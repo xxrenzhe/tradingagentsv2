@@ -70,6 +70,7 @@ instance/
 
 # Sphinx documentation
 docs/_build/
+/docs/
 
 # PyBuilder
 .pybuilder/
@@ -217,3 +218,9 @@ __marimo__/
 
 # Cache
 **/data_cache/
+/data/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
