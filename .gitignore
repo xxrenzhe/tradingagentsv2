@@ -219,6 +219,7 @@ __marimo__/
 # Cache
 **/data_cache/
 /data/
+/.tmp/
 
 # Beads / Dolt files (added by bd init)
 .dolt/
