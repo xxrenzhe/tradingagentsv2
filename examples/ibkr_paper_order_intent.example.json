@@ -1,0 +1,13 @@
+{
+  "action": "BUY",
+  "quantity": 1,
+  "symbol": "NQ",
+  "exchange": "CME",
+  "currency": "USD",
+  "last_trade_date_or_contract_month": "202606",
+  "order_type": "MKT",
+  "stop_loss_price": 18000.0,
+  "take_profit_price": 18100.0,
+  "strategy_id": "adaptive_mbp_portfolio",
+  "reason": "Example IBKR paper-trading dry-run intent"
+}

@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NQM6 Top10 Enhancement Assessment</title>
+  <style>
+    body { margin: 0; padding: 28px; background: #0f1016; color: #f4f1ea; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .wrap { max-width: 1220px; margin: 0 auto; }
+    .card { background: rgba(28, 29, 38, .94); border: 1px solid #3c3d4a; border-radius: 18px; padding: 20px; margin-bottom: 18px; box-shadow: 0 16px 50px rgba(0,0,0,.28); overflow-x: auto; }
+    h1, h2 { margin: 0 0 12px; }
+    p { color: #c7c1b4; line-height: 1.65; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { padding: 10px 12px; border-bottom: 1px solid #3c3d4a; text-align: left; }
+    th { color: #eee4d2; text-transform: uppercase; letter-spacing: .04em; font-size: 12px; }
+    .metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; }
+    .metric { border: 1px solid #3c3d4a; border-radius: 12px; padding: 12px; background: rgba(15, 16, 22, .48); }
+    .metric strong { display: block; margin-bottom: 6px; color: #fffaf0; }
+    .metric span { color: #c7c1b4; line-height: 1.55; }
+    .badge { display: inline-block; padding: 6px 10px; border-radius: 999px; background: rgba(245,158,11,.16); color: #fbbf24; margin-bottom: 10px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="card">
+      <span class="badge">Top10 Enhancement · NQM6</span>
+      <h1>NQM6 Live-Ready Top10 增强潜力评估</h1>
+      <p>本报告逐个策略做同族一跳参数扰动，并要求增强候选仍满足 live-ready。Preserves Core Edge 进一步要求 positive fold/window、3x 成本净收益、最差 10 日窗口不低于原策略。</p>
+    </section>
+    <section class="card">
+      <h2>结论摘要</h2>
+
+      <div class="metric-grid">
+        <div class="metric"><strong>Live-Ready Enhanced</strong><span>9 / 10</span></div>
+        <div class="metric"><strong>Core Edge Preserved</strong><span>7 / 10</span></div>
+        <div class="metric"><strong>Total Net Delta</strong><span>1,563.2500 points</span></div>
+        <div class="metric"><strong>Best Single Delta</strong><span>515.8750 points</span></div>
+        <div class="metric"><strong>No Quick Candidate</strong><span>1</span></div>
+        <div class="metric"><strong>Interpretation</strong><span>多数策略能增强，但不是全部；增强必须按策略族和稳定性门槛逐个验证。</span></div>
+      </div>
+
+    </section>
+    <section class="card">
+      <h2>逐策略结果</h2>
+      <table class="dataframe metrics">
+  <thead>
+    <tr style="text-align: right;">
+      <th>Rank</th>
+      <th>Family</th>
+      <th>Original Net</th>
+      <th>Enhanced Net</th>
+      <th>Net Delta</th>
+      <th>PF Delta</th>
+      <th>Worst Window Delta</th>
+      <th>3x Cost Delta</th>
+      <th>Still Live-Ready</th>
+      <th>Preserves Core Edge</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>1</td>
+      <td>mean_reversion</td>
+      <td>1,232.3750</td>
+      <td>1,270.5000</td>
+      <td>38.1250</td>
+      <td>0.3813</td>
+      <td>11.7500</td>
+      <td>67.1250</td>
+      <td>True</td>
+      <td>True</td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td>momentum</td>
+      <td>2,039.1250</td>
+      <td>2,219.2500</td>
+      <td>180.1250</td>
+      <td>0.0101</td>
+      <td>-1.2500</td>
+      <td>113.1250</td>
+      <td>True</td>
+      <td>False</td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td>vwap_reclaim</td>
+      <td>1,933.3750</td>
+      <td>2,013.3750</td>
+      <td>80.0000</td>
+      <td>0.0463</td>
+      <td>-8.0000</td>
+      <td>98.0000</td>
+      <td>True</td>
+      <td>False</td>
+    </tr>
+    <tr>
+      <td>4</td>
+      <td>vwap_reclaim</td>
+      <td>2,931.2500</td>
+      <td>0.0000</td>
+      <td>0.0000</td>
+      <td>0.0000</td>
+      <td>0.0000</td>
+      <td>0.0000</td>
+      <td>False</td>
+      <td>False</td>
+    </tr>
+    <tr>
+      <td>5</td>
+      <td>vwap_reclaim</td>
+      <td>1,880.0000</td>
+      <td>1,994.1250</td>
+      <td>114.1250</td>
+      <td>0.0561</td>
+      <td>27.1250</td>
+      <td>133.1250</td>
+      <td>True</td>
+      <td>True</td>
+    </tr>
+    <tr>
+      <td>6</td>
+      <td>vwap_reclaim</td>
+      <td>2,841.7500</td>
+      <td>2,931.2500</td>
+      <td>89.5000</td>
+      <td>0.0161</td>
+      <td>124.6250</td>
+      <td>89.5000</td>
+      <td>True</td>
+      <td>True</td>
+    </tr>
+    <tr>
+      <td>7</td>
+      <td>momentum</td>
+      <td>1,757.8750</td>
+      <td>2,035.3750</td>
+      <td>277.5000</td>
+      <td>0.0839</td>
+      <td>93.1250</td>
+      <td>311.5000</td>
+      <td>True</td>
+      <td>True</td>
+    </tr>
+    <tr>
+      <td>8</td>
+      <td>mean_reversion</td>
+      <td>1,863.6250</td>
+      <td>2,379.5000</td>
+      <td>515.8750</td>
+      <td>0.1713</td>
+      <td>17.3750</td>
+      <td>540.8750</td>
+      <td>True</td>
+      <td>True</td>
+    </tr>
+    <tr>
+      <td>9</td>
+      <td>mean_reversion</td>
+      <td>978.7500</td>
+      <td>1,155.3750</td>
+      <td>176.6250</td>
+      <td>0.3735</td>
+      <td>0.6250</td>
+      <td>149.6250</td>
+      <td>True</td>
+      <td>True</td>
+    </tr>
+    <tr>
+      <td>10</td>
+      <td>vwap_reclaim</td>
+      <td>1,929.7500</td>
+      <td>2,021.1250</td>
+      <td>91.3750</td>
+      <td>0.0512</td>
+      <td>4.3750</td>
+      <td>110.3750</td>
+      <td>True</td>
+      <td>True</td>
+    </tr>
+  </tbody>
+</table>
+    </section>
+  </div>
+</body>
+</html>

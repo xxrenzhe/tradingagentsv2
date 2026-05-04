@@ -111,6 +111,7 @@ _PASSTHROUGH_KWARGS = (
 
 # Provider base URLs and API key env vars
 _PROVIDER_CONFIG = {
+    "aicode": ("https://aicode.cat", ("AICODE_API_KEY", "OPENAI_API_KEY")),
     "xai": ("https://api.x.ai/v1", "XAI_API_KEY"),
     "deepseek": ("https://api.deepseek.com", "DEEPSEEK_API_KEY"),
     "qwen": ("https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "DASHSCOPE_API_KEY"),
@@ -121,7 +122,7 @@ _PROVIDER_CONFIG = {
 
 
 class OpenAIClient(BaseLLMClient):
-    """Client for OpenAI, Ollama, OpenRouter, and xAI providers.
+    """Client for OpenAI, aicode.cat, Ollama, OpenRouter, and xAI providers.
 
     For native OpenAI models, uses the Responses API (/v1/responses) which
     supports reasoning_effort with function tools across all model families
@@ -151,7 +152,8 @@ class OpenAIClient(BaseLLMClient):
             default_base, api_key_env = _PROVIDER_CONFIG[self.provider]
             llm_kwargs["base_url"] = self.base_url or default_base
             if api_key_env:
-                api_key = os.environ.get(api_key_env)
+                env_names = (api_key_env,) if isinstance(api_key_env, str) else api_key_env
+                api_key = next((os.environ.get(name) for name in env_names if os.environ.get(name)), None)
                 if api_key:
                     llm_kwargs["api_key"] = api_key
             else:
@@ -164,8 +166,19 @@ class OpenAIClient(BaseLLMClient):
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
 
+        if self.provider == "aicode" and not llm_kwargs.get("api_key"):
+            raise ValueError(
+                "Missing API key for aicode provider. Set AICODE_API_KEY "
+                "(preferred) or OPENAI_API_KEY in .env."
+            )
+        if self.provider == "aicode":
+            llm_kwargs.setdefault("streaming", True)
+
         # Native OpenAI: use Responses API for consistent behavior across
-        # all model families. Third-party providers use Chat Completions.
+        # GPT-5.x model families. aicode.cat follows the app gateway pattern
+        # used in huoziwriter: third-party OpenAI-compatible hosts use
+        # Chat Completions because their Responses endpoint can return empty
+        # text while still reporting completed token usage.
         if self.provider == "openai":
             llm_kwargs["use_responses_api"] = True
 

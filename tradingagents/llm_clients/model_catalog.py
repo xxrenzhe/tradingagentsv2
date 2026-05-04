@@ -9,6 +9,16 @@ ProviderModeOptions = Dict[str, Dict[str, List[ModelOption]]]
 
 
 MODEL_OPTIONS: ProviderModeOptions = {
+    "aicode": {
+        "quick": [
+            ("aicode.cat GPT-5.5", "gpt-5.5"),
+            ("aicode.cat GPT-5.4", "gpt-5.4"),
+        ],
+        "deep": [
+            ("aicode.cat GPT-5.5", "gpt-5.5"),
+            ("aicode.cat GPT-5.4", "gpt-5.4"),
+        ],
+    },
     "openai": {
         "quick": [
             ("GPT-5.4 Mini - Fast, strong coding and tool use", "gpt-5.4-mini"),

@@ -22,6 +22,8 @@ from .alpha_vantage import (
     get_news as get_alpha_vantage_news,
     get_global_news as get_alpha_vantage_global_news,
 )
+from .databento import get_indicator as get_databento_indicator
+from .databento import get_stock_data as get_databento_stock_data
 from .alpha_vantage_common import AlphaVantageRateLimitError
 
 # Configuration and routing logic
@@ -63,6 +65,7 @@ TOOLS_CATEGORIES = {
 VENDOR_LIST = [
     "yfinance",
     "alpha_vantage",
+    "databento",
 ]
 
 # Mapping of methods to their vendor-specific implementations
@@ -70,11 +73,13 @@ VENDOR_METHODS = {
     # core_stock_apis
     "get_stock_data": {
         "alpha_vantage": get_alpha_vantage_stock,
+        "databento": get_databento_stock_data,
         "yfinance": get_YFin_data_online,
     },
     # technical_indicators
     "get_indicators": {
         "alpha_vantage": get_alpha_vantage_indicator,
+        "databento": get_databento_indicator,
         "yfinance": get_stock_stats_indicators_window,
     },
     # fundamental_data

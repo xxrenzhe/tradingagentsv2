@@ -1,0 +1,199 @@
+from __future__ import annotations
+
+import json
+import time
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any
+
+from .agent_gate import AgentStrategyGate
+from .ibkr import IBKRContractSpec, IBKRPaperBroker
+from .live_signal import LiveSignalConfig, build_live_signal_row, write_live_signal
+from .paper_runner import PaperRunnerConfig, run_adaptive_portfolio_paper_once
+from .tick_recorder import IBKRTickRecorderConfig
+
+DEFAULT_LIVE_STRATEGY_ID = "adaptive_defensive_mr_trendstable_mr_meanstable_mr_fallbackdefensive_mr_us0_eu1_gap1_cap24"
+DEFAULT_LIVE_SELECTED_ALIAS = "adaptive_portfolio"
+
+
+@dataclass(frozen=True)
+class LivePaperTraderConfig:
+    live_signal_path: Path = Path(".tmp/mbp-live-signal.csv")
+    state_path: Path = Path(".tmp/mbp-live-paper-trader-state.json")
+    strategy_id: str = DEFAULT_LIVE_STRATEGY_ID
+    selected_alias: str = DEFAULT_LIVE_SELECTED_ALIAS
+    direction: int = 1
+    contract: IBKRContractSpec = IBKRContractSpec()
+    account: str | None = None
+    quantity: int = 1
+    stop_loss_points: float = 16.0
+    take_profit_points: float = 24.0
+    max_hold_minutes: int = 6
+    submit: bool = False
+    require_agent_gate: bool = False
+    skip_preflight: bool = False
+    snapshot_attempts: int = 3
+    snapshot_retry_seconds: float = 1.0
+    skip_when_position_open: bool = True
+    tick_recorder: IBKRTickRecorderConfig = field(default_factory=IBKRTickRecorderConfig)
+
+
+@dataclass(frozen=True)
+class LivePaperTraderDaemonConfig:
+    trader: LivePaperTraderConfig = field(default_factory=LivePaperTraderConfig)
+    interval_seconds: float = 30.0
+    max_iterations: int | None = None
+
+
+def run_live_paper_trader_daemon(
+    *,
+    config: LivePaperTraderDaemonConfig | None = None,
+    broker: IBKRPaperBroker | None = None,
+    gate: AgentStrategyGate | None = None,
+) -> dict[str, Any]:
+    config = config or LivePaperTraderDaemonConfig()
+    active_broker = broker or IBKRPaperBroker()
+    iteration = 0
+    events: list[dict[str, Any]] = []
+    next_started_at = time.monotonic()
+    while config.max_iterations is None or iteration < config.max_iterations:
+        now = time.monotonic()
+        if now < next_started_at:
+            time.sleep(next_started_at - now)
+        started_at = time.monotonic()
+        iteration += 1
+        result = run_live_paper_trader_once(config=config.trader, broker=active_broker, gate=gate)
+        next_started_at = started_at + max(0.0, float(config.interval_seconds))
+        event = {
+            "iteration": iteration,
+            "status": result.get("status"),
+            "submitted": result.get("submitted"),
+            "candidate_key": result.get("candidate_key"),
+            "intent_id": result.get("intent", {}).get("intent_id") if isinstance(result.get("intent"), dict) else None,
+            "started_at_monotonic": started_at,
+            "next_started_at_monotonic": next_started_at,
+        }
+        _append_live_audit(config.trader.state_path, {"status": "daemon_iteration", **event})
+        events.append(event)
+        if config.max_iterations is not None and iteration >= config.max_iterations:
+            break
+    return {"status": "completed", "iterations": iteration, "events": events, "state_path": str(config.trader.state_path)}
+
+
+def run_live_paper_trader_once(
+    *,
+    config: LivePaperTraderConfig | None = None,
+    broker: IBKRPaperBroker | None = None,
+    gate: AgentStrategyGate | None = None,
+) -> dict[str, Any]:
+    config = config or LivePaperTraderConfig()
+    active_broker = broker or IBKRPaperBroker()
+    try:
+        row = build_live_signal_row(
+            config=LiveSignalConfig(
+                output=config.live_signal_path,
+                strategy_id=config.strategy_id,
+                selected_alias=config.selected_alias,
+                direction=config.direction,
+                max_hold_minutes=config.max_hold_minutes,
+                signal_source="ibkr_live_paper_trader",
+                contract=config.contract,
+                snapshot_attempts=config.snapshot_attempts,
+                snapshot_retry_seconds=config.snapshot_retry_seconds,
+            ),
+            broker=active_broker,
+        )
+    except Exception as exc:
+        result = {
+            "status": "signal_blocked",
+            "submitted": False,
+            "reason": str(exc) or exc.__class__.__name__,
+        }
+        _append_live_audit(config.state_path, result)
+        return result
+
+    write_live_signal(row, config.live_signal_path)
+    if config.skip_when_position_open:
+        exposure = _current_exposure(active_broker, config.contract.symbol)
+        if exposure["blocked"]:
+            result = {
+                "status": "exposure_blocked",
+                "submitted": False,
+                "reason": exposure["reason"],
+                "exposure": exposure,
+                "live_signal": row,
+            }
+            _append_live_audit(config.state_path, result)
+            return result
+
+    runner_config = PaperRunnerConfig(
+        trades_path=config.live_signal_path,
+        state_path=config.state_path,
+        contract_month=config.contract.last_trade_date_or_contract_month,
+        account=config.account,
+        quantity=config.quantity,
+        stop_loss_points=config.stop_loss_points,
+        take_profit_points=config.take_profit_points,
+        submit=config.submit,
+        skip_preflight=config.skip_preflight,
+        require_agent_gate=config.require_agent_gate,
+        max_signal_age_minutes=10.0,
+        tick_recorder=config.tick_recorder,
+    )
+    result = run_adaptive_once(runner_config, active_broker, gate)
+    result["live_signal"] = row
+    _append_live_audit(config.state_path, {"status": "live_iteration", **_audit_result(result)})
+    return result
+
+
+def run_adaptive_once(
+    runner_config: PaperRunnerConfig,
+    broker: IBKRPaperBroker,
+    gate: AgentStrategyGate | None,
+) -> dict[str, Any]:
+    return run_adaptive_portfolio_paper_once(config=runner_config, broker=broker, gate=gate)
+
+
+def _current_exposure(broker: IBKRPaperBroker, symbol: str) -> dict[str, Any]:
+    try:
+        connection = broker.connect()
+        if not connection.get("connected"):
+            return {
+                "blocked": True,
+                "reason": connection.get("reason") or connection.get("status") or "connect_failed",
+                "connection": connection,
+            }
+        snapshot = broker.status_snapshot(symbol)
+    except Exception as exc:
+        return {"blocked": True, "reason": str(exc) or exc.__class__.__name__}
+    current_position = int(snapshot.get("current_position") or 0)
+    open_trades = snapshot.get("open_trades") or []
+    blocked = current_position != 0 or bool(open_trades)
+    return {
+        "blocked": blocked,
+        "reason": "position_or_open_orders_present" if blocked else None,
+        "current_position": current_position,
+        "open_trades": open_trades,
+    }
+
+
+def _append_live_audit(state_path: Path, event: dict[str, Any]) -> None:
+    audit_path = state_path.with_suffix(".jsonl")
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    with audit_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"event_type": "ibkr_live_paper_trader", **event}, sort_keys=True, default=str) + "\n")
+
+
+def _audit_result(result: dict[str, Any]) -> dict[str, Any]:
+    compact = {
+        "status": result.get("status"),
+        "submitted": result.get("submitted"),
+        "candidate_key": result.get("candidate_key"),
+        "intent": result.get("intent"),
+        "agent_gate": result.get("agent_gate"),
+        "tick_recording": result.get("tick_recording"),
+    }
+    selected_trade = result.get("selected_trade")
+    if selected_trade:
+        compact["selected_trade"] = selected_trade
+    return compact

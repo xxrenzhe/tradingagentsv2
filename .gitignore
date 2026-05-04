@@ -51,6 +51,14 @@ coverage.xml
 .pytest_cache/
 cover/
 
+# Local agent/browser artifacts
+.claude/
+.playwright-mcp/
+.tmp/
+
+# OS metadata
+.DS_Store
+
 # Translations
 *.mo
 *.pot

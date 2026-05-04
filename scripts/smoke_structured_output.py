@@ -33,6 +33,7 @@ from tradingagents.llm_clients import create_llm_client
 
 PROVIDER_DEFAULTS = {
     "openai": ("gpt-5.4-mini", None),
+    "aicode": ("gpt-5.4", "https://aicode.cat"),
     "google": ("gemini-2.5-flash", None),
     "anthropic": ("claude-sonnet-4-6", None),
     "deepseek": ("deepseek-chat", None),
@@ -120,8 +121,9 @@ def main() -> int:
     print(f"Quick model: {quick_model}")
 
     # Build the LLM clients via the framework's factory.
-    deep_client = create_llm_client(provider=args.provider, model=deep_model)
-    quick_client = create_llm_client(provider=args.provider, model=quick_model)
+    _, base_url = PROVIDER_DEFAULTS[args.provider]
+    deep_client = create_llm_client(provider=args.provider, model=deep_model, base_url=base_url)
+    quick_client = create_llm_client(provider=args.provider, model=quick_model, base_url=base_url)
     deep_llm = deep_client.get_llm()
     quick_llm = quick_client.get_llm()
 

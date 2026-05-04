@@ -30,6 +30,7 @@ from tradingagents.dataflows.config import set_config
 from tradingagents.agents.utils.agent_utils import (
     get_stock_data,
     get_indicators,
+    get_orderbook_microstructure,
     get_fundamentals,
     get_balance_sheet,
     get_cashflow,
@@ -114,6 +115,7 @@ class TradingAgentsGraph:
             self.deep_thinking_llm,
             self.tool_nodes,
             self.conditional_logic,
+            fast_mode=bool(self.config.get("fast_graph_mode", False)),
         )
 
         self.propagator = Propagator()
@@ -161,6 +163,8 @@ class TradingAgentsGraph:
                     get_stock_data,
                     # Technical indicators
                     get_indicators,
+                    # Order-book microstructure
+                    get_orderbook_microstructure,
                 ]
             ),
             "social": ToolNode(
@@ -262,7 +266,10 @@ class TradingAgentsGraph:
         if updates:
             self.memory_log.batch_update_with_outcomes(updates)
 
-    def propagate(self, company_name, trade_date):
+    def _memory_enabled(self) -> bool:
+        return bool(self.config.get("memory_log_enabled", True))
+
+    def propagate(self, company_name, trade_date, candidate_trade_context: str = ""):
         """Run the trading agents graph for a company on a specific date.
 
         When ``checkpoint_enabled`` is set in config, the graph is recompiled
@@ -272,7 +279,9 @@ class TradingAgentsGraph:
         self.ticker = company_name
 
         # Resolve any pending memory-log entries for this ticker before the pipeline runs.
-        self._resolve_pending_entries(company_name)
+        # Futures/local Databento runs can disable this to avoid yfinance outcome lookups.
+        if self._memory_enabled():
+            self._resolve_pending_entries(company_name)
 
         # Recompile with a checkpointer if the user opted in.
         if self.config.get("checkpoint_enabled"):
@@ -293,19 +302,22 @@ class TradingAgentsGraph:
                 logger.info("Starting fresh for %s on %s", company_name, trade_date)
 
         try:
-            return self._run_graph(company_name, trade_date)
+            return self._run_graph(company_name, trade_date, candidate_trade_context=candidate_trade_context)
         finally:
             if self._checkpointer_ctx is not None:
                 self._checkpointer_ctx.__exit__(None, None, None)
                 self._checkpointer_ctx = None
                 self.graph = self.workflow.compile()
 
-    def _run_graph(self, company_name, trade_date):
+    def _run_graph(self, company_name, trade_date, candidate_trade_context: str = ""):
         """Execute the graph and write the resulting state to disk and memory log."""
         # Initialize state — inject memory log context for PM.
-        past_context = self.memory_log.get_past_context(company_name)
+        past_context = self.memory_log.get_past_context(company_name) if self._memory_enabled() else ""
         init_agent_state = self.propagator.create_initial_state(
-            company_name, trade_date, past_context=past_context
+            company_name,
+            trade_date,
+            past_context=past_context,
+            candidate_trade_context=candidate_trade_context,
         )
         args = self.propagator.get_graph_args()
 
@@ -314,7 +326,9 @@ class TradingAgentsGraph:
             tid = thread_id(company_name, str(trade_date))
             args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = tid
 
-        if self.debug:
+        if self.config.get("deterministic_decision_mode"):
+            final_state = self._run_deterministic_decision(init_agent_state)
+        elif self.debug:
             trace = []
             for chunk in self.graph.stream(init_agent_state, **args):
                 if len(chunk["messages"]) == 0:
@@ -333,11 +347,12 @@ class TradingAgentsGraph:
         self._log_state(trade_date, final_state)
 
         # Store decision for deferred reflection on the next same-ticker run.
-        self.memory_log.store_decision(
-            ticker=company_name,
-            trade_date=trade_date,
-            final_trade_decision=final_state["final_trade_decision"],
-        )
+        if self._memory_enabled():
+            self.memory_log.store_decision(
+                ticker=company_name,
+                trade_date=trade_date,
+                final_trade_decision=final_state["final_trade_decision"],
+            )
 
         # Clear checkpoint on successful completion to avoid stale state.
         if self.config.get("checkpoint_enabled"):
@@ -346,6 +361,44 @@ class TradingAgentsGraph:
             )
 
         return final_state, self.process_signal(final_state["final_trade_decision"])
+
+    def _run_deterministic_decision(self, init_agent_state):
+        market_node = create_market_analyst(self.quick_thinking_llm)
+        state = dict(init_agent_state)
+        state.update(market_node(state))
+        market_report = state.get("market_report", "")
+        decision = "Hold"
+        investment_plan = (
+            "**Recommendation**: Hold\n\n"
+            f"**Rationale**: Deterministic fast mode used the market report for {state['company_of_interest']}. "
+            "Treat the top-ranked short-term patterns as hypotheses, not automatic trades.\n\n"
+            "**Strategic Actions**: Validate the best pattern out-of-sample, size small, and require stop-loss controls."
+        )
+        trader_plan = (
+            "**Action**: Hold\n\n"
+            f"**Reasoning**: Market report is available ({len(market_report)} chars), but deterministic fast mode avoids "
+            "LLM discretionary execution. Wait for walk-forward confirmation before live entry.\n\n"
+            "FINAL TRANSACTION PROPOSAL: **HOLD**"
+        )
+        final_decision = (
+            f"**Rating**: {decision}\n\n"
+            "**Executive Summary**: Deterministic fast mode completed with Databento market evidence and no external LLM "
+            "decision calls. Maintain capital until the mined strategy passes broader validation.\n\n"
+            f"**Investment Thesis**: {market_report[:1500]}"
+        )
+        if state.get("candidate_trade_context"):
+            final_decision += (
+                "\n\n**Candidate Trade Review**: Deterministic mode does not approve candidate orders. "
+                "Run the multi-agent gate with LLM decisions enabled before paper submission."
+            )
+        state.update(
+            {
+                "investment_plan": investment_plan,
+                "trader_investment_plan": trader_plan,
+                "final_trade_decision": final_decision,
+            }
+        )
+        return state
 
     def _log_state(self, trade_date, final_state):
         """Log the final state to a JSON file."""

@@ -28,12 +28,37 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=BaseModel)
 
 
+def normalize_freetext_output(text: str, agent_name: str) -> str:
+    content = str(text or "").strip()
+    if agent_name == "Research Manager" and "**Recommendation**:" not in content:
+        return f"**Recommendation**: Hold\n\n**Rationale**: {content}\n\n**Strategic Actions**: Use conservative sizing until a structured recommendation is available."
+    if agent_name == "Trader" and "**Action**:" not in content:
+        upper = content.upper()
+        if "SELL" in upper and "BUY" not in upper:
+            action = "Sell"
+        elif "BUY" in upper and "SELL" not in upper:
+            action = "Buy"
+        else:
+            action = "Hold"
+        return f"**Action**: {action}\n\n**Reasoning**: {content}\n\nFINAL TRANSACTION PROPOSAL: **{action.upper()}**"
+    if agent_name == "Portfolio Manager" and "**Rating**:" not in content:
+        return f"**Rating**: Hold\n\n**Executive Summary**: {content}\n\n**Investment Thesis**: Free-text provider fallback; review the reasoning above before acting."
+    return content
+
+
 def bind_structured(llm: Any, schema: type[T], agent_name: str) -> Optional[Any]:
     """Return ``llm.with_structured_output(schema)`` or ``None`` if unsupported.
 
     Logs a warning when the binding fails so the user understands the agent
     will use free-text generation for every call instead of one-shot fallback.
     """
+    base_url = str(getattr(llm, "openai_api_base", "") or getattr(llm, "base_url", ""))
+    if "aicode.cat" in base_url:
+        logger.warning(
+            "%s: aicode.cat structured output is disabled; using free-text generation",
+            agent_name,
+        )
+        return None
     try:
         return llm.with_structured_output(schema)
     except (NotImplementedError, AttributeError) as exc:
@@ -70,4 +95,4 @@ def invoke_structured_or_freetext(
             )
 
     response = plain_llm.invoke(prompt)
-    return response.content
+    return normalize_freetext_output(response.content, agent_name)

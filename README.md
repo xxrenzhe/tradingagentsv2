@@ -119,6 +119,77 @@ Install the package and its dependencies:
 pip install .
 ```
 
+Optional IBKR paper-trading support:
+```bash
+pip install ".[ibkr]"
+```
+
+The IBKR adapter lives under `tradingagents.execution.ibkr`. It is guarded for paper trading by default: paper-only mode accepts TWS paper port `7497` or IB Gateway paper port `4002`, rejects non-paper ports, enforces account/symbol/quantity checks, requires brackets for entry orders, and writes audit events to `.tmp/ibkr-paper-audit.jsonl`.
+
+Copy `.env.example` to `.env` and configure the `TRADINGAGENTS_IBKR_*` values there. Scripts load `.env` automatically; do not pass IBKR account settings via ad-hoc shell exports.
+
+Minimal dry-run:
+```python
+from tradingagents.execution import IBKROrderIntent, IBKRPaperBroker
+
+intent = IBKROrderIntent(
+    action="BUY",
+    quantity=1,
+    symbol="NQ",
+    last_trade_date_or_contract_month="202606",
+    stop_loss_price=18000.0,
+    take_profit_price=18100.0,
+    account="DU123456",
+    strategy_id="adaptive_mbp_portfolio",
+)
+
+result = IBKRPaperBroker().submit(intent, dry_run=True)
+```
+
+Or from the command line:
+
+```bash
+python scripts/submit_ibkr_paper_order.py --intent examples/ibkr_paper_order_intent.example.json
+```
+
+Use `dry_run=False` only after TWS/IB Gateway paper trading is running and account, port, bracket, and risk settings have been verified. The paper session adds a preflight similar to the `tradingllmagent` IBKR gateway: socket check, paper-account verification, contract metadata validation, quote readiness, spread cap, current-position risk, and JSONL audit output.
+
+Run readiness before submitting:
+
+```bash
+.venv/bin/python scripts/check_ibkr_paper_ready.py
+```
+
+To validate the adaptive portfolio against paper trading inputs:
+
+```bash
+.venv/bin/python scripts/validate_mbp_adaptive_portfolio_paper.py --trades .tmp/mbp-adaptive-portfolio-trades.csv --preflight
+```
+
+To run the selected best MBP strategy through the same guarded IBKR paper path:
+
+```bash
+.venv/bin/python scripts/run_mbp_best_strategy_paper_trader.py --record-ticks
+```
+
+This locks the paper runner to `adv_wf_best_mean_reversion_lb6_thr0.8_min1_max6_reverse_europe_all_imb0.3` from `.tmp/mbp-best-strategy-trades.csv` and defaults to dry-run. Add `--daemon --max-iterations 0` for continuous monitoring. Add `--submit` only after readiness and paper-validation gates pass.
+
+To run the guarded automation supervisor for that strategy:
+
+```bash
+.venv/bin/python scripts/automate_mbp_best_strategy_paper_trading.py --daemon --max-iterations 0 --record-ticks
+```
+
+The supervisor defaults to dry-run automation. With `--submit`, it first checks IBKR paper readiness and the paper-validation gate for `adv_wf_best_mean_reversion_lb6_thr0.8_min1_max6_reverse_europe_all_imb0.3`; if either gate is blocked, it exits without submitting.
+
+To run the guarded live top-of-book paper loop in dry-run mode:
+
+```bash
+.venv/bin/python scripts/run_ibkr_live_paper_trader.py --record-ticks
+```
+
+For continuous monitoring, add `--daemon --max-iterations 0`. Add `--submit` only after `scripts/check_paper_automation_status.py` reports `paper_submit_status: ready`; without `--submit`, the live loop writes a fresh signal, builds the bracket intent, runs risk checks, records audit/tick evidence, and does not place orders.
+
 ### Docker
 
 Alternatively, run with Docker:
@@ -134,18 +205,28 @@ docker compose --profile ollama run --rm tradingagents-ollama
 
 ### Required APIs
 
-TradingAgents supports multiple LLM providers. Set the API key for your chosen provider:
+This project routes AI business calls to aicode.cat. Prefer `gpt-5.5` when it is available; the current validated fallback is `gpt-5.4`. Configure these values in `.env`:
 
 ```bash
-export OPENAI_API_KEY=...          # OpenAI (GPT)
-export GOOGLE_API_KEY=...          # Google (Gemini)
-export ANTHROPIC_API_KEY=...       # Anthropic (Claude)
-export XAI_API_KEY=...             # xAI (Grok)
-export DEEPSEEK_API_KEY=...        # DeepSeek
-export DASHSCOPE_API_KEY=...       # Qwen (Alibaba DashScope)
-export ZHIPU_API_KEY=...           # GLM (Zhipu)
-export OPENROUTER_API_KEY=...      # OpenRouter
-export ALPHA_VANTAGE_API_KEY=...   # Alpha Vantage
+AICODE_API_KEY=...
+AICODE_BASE_URL=https://aicode.cat
+LLM_PROVIDER=aicode
+DEEP_THINK_LLM=gpt-5.4
+QUICK_THINK_LLM=gpt-5.4
+```
+
+TradingAgents still supports multiple LLM providers. If you intentionally switch providers, set the API key for your chosen provider in `.env`:
+
+```bash
+OPENAI_API_KEY=...          # OpenAI (GPT)
+GOOGLE_API_KEY=...          # Google (Gemini)
+ANTHROPIC_API_KEY=...       # Anthropic (Claude)
+XAI_API_KEY=...             # xAI (Grok)
+DEEPSEEK_API_KEY=...        # DeepSeek
+DASHSCOPE_API_KEY=...       # Qwen (Alibaba DashScope)
+ZHIPU_API_KEY=...           # GLM (Zhipu)
+OPENROUTER_API_KEY=...      # OpenRouter
+ALPHA_VANTAGE_API_KEY=...   # Alpha Vantage
 ```
 
 For enterprise providers (e.g. Azure OpenAI, AWS Bedrock), copy `.env.enterprise.example` to `.env.enterprise` and fill in your credentials.
@@ -208,9 +289,9 @@ from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.default_config import DEFAULT_CONFIG
 
 config = DEFAULT_CONFIG.copy()
-config["llm_provider"] = "openai"        # openai, google, anthropic, xai, deepseek, qwen, glm, openrouter, ollama, azure
-config["deep_think_llm"] = "gpt-5.4"     # Model for complex reasoning
-config["quick_think_llm"] = "gpt-5.4-mini" # Model for quick tasks
+config["llm_provider"] = "aicode"      # default AI provider for this project
+config["deep_think_llm"] = "gpt-5.4"   # Validated aicode.cat fallback when gpt-5.5 is unavailable
+config["quick_think_llm"] = "gpt-5.4"  # Validated aicode.cat fallback when gpt-5.5 is unavailable
 config["max_debate_rounds"] = 2
 
 ta = TradingAgentsGraph(debug=True, config=config)

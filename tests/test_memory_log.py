@@ -1,5 +1,7 @@
 """Tests for TradingMemoryLog — storage, deferred reflection, PM injection, legacy removal."""
 
+import functools
+
 import pytest
 import pandas as pd
 from unittest.mock import MagicMock, patch
@@ -771,3 +773,47 @@ class TestLegacyRemoval:
         assert len(entries) == 1
         assert entries[0]["ticker"] == "NVDA"
         assert entries[0]["pending"] is True
+
+    def test_run_graph_skips_memory_when_disabled(self, tmp_path):
+        fake_state = {
+            "company_of_interest": "NQM6",
+            "trade_date": "2026-04-27",
+            "messages": [],
+            "market_report": "",
+            "sentiment_report": "",
+            "news_report": "",
+            "fundamentals_report": "",
+            "investment_debate_state": {
+                "bull_history": "", "bear_history": "", "history": "",
+                "current_response": "", "judge_decision": "",
+            },
+            "investment_plan": "",
+            "trader_investment_plan": "",
+            "risk_debate_state": {
+                "aggressive_history": "", "conservative_history": "",
+                "neutral_history": "", "history": "", "judge_decision": "",
+                "current_aggressive_response": "", "current_conservative_response": "",
+                "current_neutral_response": "", "count": 1, "latest_speaker": "",
+            },
+            "final_trade_decision": "**Rating**: Hold",
+        }
+        mock_graph = MagicMock()
+        mock_graph.memory_log = MagicMock()
+        mock_graph.log_states_dict = {}
+        mock_graph.debug = False
+        mock_graph.config = {"results_dir": str(tmp_path), "memory_log_enabled": False}
+        mock_graph.graph.invoke.return_value = fake_state
+        mock_graph.propagator.create_initial_state.return_value = fake_state
+        mock_graph.propagator.get_graph_args.return_value = {}
+        mock_graph.signal_processor.process_signal.return_value = "Hold"
+        mock_graph._memory_enabled = functools.partial(
+            TradingAgentsGraph._memory_enabled, mock_graph
+        )
+        mock_graph._run_graph = functools.partial(
+            TradingAgentsGraph._run_graph, mock_graph
+        )
+
+        TradingAgentsGraph.propagate(mock_graph, "NQM6", "2026-04-27")
+
+        mock_graph.memory_log.get_past_context.assert_not_called()
+        mock_graph.memory_log.store_decision.assert_not_called()

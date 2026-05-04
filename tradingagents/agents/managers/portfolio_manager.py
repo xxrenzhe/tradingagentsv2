@@ -31,11 +31,17 @@ def create_portfolio_manager(llm):
         risk_debate_state = state["risk_debate_state"]
         research_plan = state["investment_plan"]
         trader_plan = state["trader_investment_plan"]
+        candidate_trade_context = state.get("candidate_trade_context", "")
 
         past_context = state.get("past_context", "")
         lessons_line = (
             f"- Lessons from prior decisions and outcomes:\n{past_context}\n"
             if past_context
+            else ""
+        )
+        candidate_line = (
+            f"- Concrete strategy candidate under review:\n{candidate_trade_context}\n"
+            if candidate_trade_context
             else ""
         )
 
@@ -56,10 +62,13 @@ def create_portfolio_manager(llm):
 - Research Manager's investment plan: **{research_plan}**
 - Trader's transaction proposal: **{trader_plan}**
 {lessons_line}
+{candidate_line}
 **Risk Analysts Debate History:**
 {history}
 
 ---
+
+If a concrete strategy candidate is supplied, explicitly decide whether that candidate should be allowed, reduced, or vetoed. A candidate must be vetoed when the final rating direction conflicts with the candidate action, when market evidence is too thin, or when execution risk is elevated.
 
 Be decisive and ground every conclusion in specific evidence from the analysts.{get_language_instruction()}"""
 

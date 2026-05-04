@@ -21,6 +21,7 @@ from tradingagents.agents.schemas import (
     render_trader_proposal,
 )
 from tradingagents.agents.trader.trader import create_trader
+from tradingagents.agents.utils.structured import normalize_freetext_output
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +159,22 @@ class TestTraderAgent:
         trader = create_trader(llm)
         result = trader(_make_trader_state())
         assert result["trader_investment_plan"] == plain_response
+
+    def test_aicode_skips_structured_binding(self):
+        plain_response = "**Action**: Hold\n\nNo clean edge.\n\nFINAL TRANSACTION PROPOSAL: **HOLD**"
+        llm = MagicMock()
+        llm.openai_api_base = "https://aicode.cat"
+        llm.invoke.return_value = MagicMock(content=plain_response)
+        trader = create_trader(llm)
+        result = trader(_make_trader_state())
+        assert result["trader_investment_plan"] == plain_response
+        llm.with_structured_output.assert_not_called()
+
+
+def test_normalize_freetext_output_adds_required_trader_markers():
+    normalized = normalize_freetext_output("Buy gradually on pullbacks.", "Trader")
+    assert "**Action**: Buy" in normalized
+    assert "FINAL TRANSACTION PROPOSAL: **BUY**" in normalized
 
 
 # ---------------------------------------------------------------------------
