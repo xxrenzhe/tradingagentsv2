@@ -1,5 +1,6 @@
 from pathlib import Path
 import importlib.util
+from dataclasses import asdict
 
 import pandas as pd
 
@@ -14,6 +15,7 @@ from tradingagents.execution.live_signal import LiveSignalConfig, build_live_sig
 from tradingagents.execution.paper_runner import PaperDaemonConfig, PaperRunnerConfig, run_adaptive_portfolio_paper_daemon, run_adaptive_portfolio_paper_once
 from tradingagents.execution.paper_validation import build_paper_intent_from_trade, select_trade_sample
 from tradingagents.execution.tick_recorder import IBKRTickRecorderConfig
+from tradingagents.execution.trade_log import append_execution_fill_log
 
 
 def test_build_paper_intent_from_long_trade():
@@ -359,6 +361,8 @@ def test_live_paper_trader_refreshes_signal_before_runner(tmp_path, monkeypatch)
             state_path=tmp_path / "state.json",
             strategy_id="best",
             selected_alias="best_strategy",
+            direction=1,
+            signal_mode="manual",
             account="DU123",
         ),
         broker=broker,
@@ -388,7 +392,12 @@ def test_live_paper_trader_blocks_existing_exposure(tmp_path):
     }
 
     result = run_live_paper_trader_once(
-        config=LivePaperTraderConfig(live_signal_path=tmp_path / "live.csv", state_path=tmp_path / "state.json"),
+        config=LivePaperTraderConfig(
+            live_signal_path=tmp_path / "live.csv",
+            state_path=tmp_path / "state.json",
+            direction=1,
+            signal_mode="manual",
+        ),
         broker=broker,
     )
 
@@ -399,14 +408,14 @@ def test_live_paper_trader_blocks_existing_exposure(tmp_path):
 
 def test_live_paper_trader_daemon_runs_one_iteration(tmp_path):
     broker = IBKRPaperBroker(
-            risk=IBKRPaperRiskConfig(allowed_accounts=("DU123",), allowed_symbols=("MNQ",)),
+        risk=IBKRPaperRiskConfig(allowed_accounts=("DU123",), allowed_symbols=("MNQ",)),
         audit_path=tmp_path / "ibkr.jsonl",
     )
     broker.connect = lambda: {"status": "connected", "connected": True}
     broker.status_snapshot = lambda symbol: {"current_position": 0, "open_trades": [], "fills": []}
     broker.tick_snapshot = lambda spec: {
         "event_type": "ibkr_tick_snapshot",
-            "symbol": "MNQ",
+        "symbol": "MNQ",
         "bid": 18000.0,
         "ask": 18000.25,
         "last": 18000.25,
@@ -419,6 +428,8 @@ def test_live_paper_trader_daemon_runs_one_iteration(tmp_path):
             trader=LivePaperTraderConfig(
                 live_signal_path=tmp_path / "live.csv",
                 state_path=tmp_path / "state.json",
+                direction=1,
+                signal_mode="manual",
                 account="DU123",
             ),
             interval_seconds=0,
@@ -565,6 +576,236 @@ def test_paper_daemon_runs_one_iteration_with_snapshot(tmp_path, monkeypatch):
     assert result["iterations"] == 1
     assert result["events"][0]["status"] == "dry_run"
     assert result["events"][0]["before"]["current_position"] == 0
+
+
+def test_submitted_paper_order_appends_dated_trade_log(tmp_path, monkeypatch):
+    trades_path = tmp_path / "trades.csv"
+    strategy = "adv_wf_best_mean_reversion_lb6_thr0.8_min1_max6_reverse_europe_all_imb0.3"
+    pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-05-04",
+                "entry_ts": "2026-05-04T12:07:44+00:00",
+                "exit_ts": "2026-05-04T12:13:44+00:00",
+                "direction": -1,
+                "entry_price": 27827.5,
+                "portfolio_rule": strategy,
+                "selected_alias": "best_strategy",
+                "exit_reason": "live_bracket",
+                "signal_source": f"strategy:{strategy}:short_mean_reversion",
+            }
+        ]
+    ).to_csv(trades_path, index=False)
+    broker = IBKRPaperBroker(
+        risk=IBKRPaperRiskConfig(allowed_accounts=("DU123",), allowed_symbols=("MNQ",)),
+        audit_path=tmp_path / "ibkr.jsonl",
+    )
+
+    class FakeSession:
+        def __init__(self, broker):
+            self.broker = broker
+
+        def submit_intent(self, intent, *, dry_run=True, skip_preflight=False):
+            normalized = intent.normalized()
+            return {
+                "created_at": "2026-05-04T12:07:56+00:00",
+                "status": "submitted",
+                "submitted": True,
+                "intent": {
+                    **asdict(normalized),
+                    "intent_id": "intent-123",
+                    "reason": f"{normalized.reason} | reference_source=current_market_bid | reference_price=27826.75",
+                    "stop_loss_price": 27842.75,
+                    "take_profit_price": 27802.75,
+                },
+                "preflight": {
+                    "market_data": {
+                        "bid": 27826.75,
+                        "ask": 27827.5,
+                        "last": 27827.25,
+                        "bid_size": 2,
+                        "ask_size": 4,
+                        "market_data_type": "3",
+                        "spread": 0.75,
+                        "snapshot_time": "2026-05-04T12:07:56+00:00",
+                    }
+                },
+                "risk": {"decision": "risk_approved", "reasons": []},
+                "protection": {"active": True, "exit_order_count": 2},
+                "orders": [{"account": "DU123", "action": "SELL", "orderType": "MKT", "totalQuantity": 1}],
+                "trades": [{"order_status": {"status": "Filled", "filled": 1, "remaining": 0}}],
+            }
+
+    monkeypatch.setattr("tradingagents.execution.paper_runner.IBKRPaperTradingSession.from_env", lambda active_broker: FakeSession(active_broker))
+    result = run_adaptive_portfolio_paper_once(
+        config=PaperRunnerConfig(
+            trades_path=trades_path,
+            state_path=tmp_path / "state.json",
+            account="DU123",
+            submit=True,
+            trade_log_dir=tmp_path / "tradelogs",
+            max_signal_age_minutes=None,
+        ),
+        broker=broker,
+    )
+
+    log_path = tmp_path / "tradelogs" / "2026-05-04.md"
+    assert result["status"] == "submitted"
+    assert result["trade_log_path"] == str(log_path)
+    content = log_path.read_text(encoding="utf-8")
+    assert "卖出开空 1 MNQ" in content
+    assert "做空" in content
+    assert "current_market_bid" in content
+    assert "27826.75" in content
+    assert "下单理由" in content
+
+
+def test_trade_log_is_idempotent_by_intent_id(tmp_path, monkeypatch):
+    trades_path = tmp_path / "trades.csv"
+    pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-05-04",
+                "entry_ts": "2026-05-04T12:07:44+00:00",
+                "exit_ts": "2026-05-04T12:13:44+00:00",
+                "direction": 1,
+                "entry_price": 27827.5,
+                "portfolio_rule": "adv_wf_best_mean_reversion_lb6_thr0.8_min1_max6_reverse_europe_all_imb0.3",
+                "selected_alias": "best_strategy",
+                "exit_reason": "live_bracket",
+            }
+        ]
+    ).to_csv(trades_path, index=False)
+    broker = IBKRPaperBroker(
+        risk=IBKRPaperRiskConfig(allowed_accounts=("DU123",), allowed_symbols=("MNQ",)),
+        audit_path=tmp_path / "ibkr.jsonl",
+    )
+
+    class FakeSession:
+        def __init__(self, broker):
+            self.broker = broker
+
+        def submit_intent(self, intent, *, dry_run=True, skip_preflight=False):
+            normalized = intent.normalized()
+            return {
+                "created_at": "2026-05-04T12:07:56+00:00",
+                "status": "submitted",
+                "submitted": True,
+                "intent": {**asdict(normalized), "intent_id": "intent-idempotent"},
+                "risk": {"decision": "risk_approved", "reasons": []},
+                "orders": [{"account": "DU123", "action": "BUY", "orderType": "MKT", "totalQuantity": 1}],
+                "trades": [{"order_status": {"status": "Filled", "filled": 1, "remaining": 0}}],
+            }
+
+    monkeypatch.setattr("tradingagents.execution.paper_runner.IBKRPaperTradingSession.from_env", lambda active_broker: FakeSession(active_broker))
+    config = PaperRunnerConfig(
+        trades_path=trades_path,
+        state_path=tmp_path / "state.json",
+        account="DU123",
+        submit=True,
+        trade_log_dir=tmp_path / "tradelogs",
+        max_signal_age_minutes=None,
+    )
+    first = run_adaptive_portfolio_paper_once(config=config, broker=broker)
+    (tmp_path / "state.json").unlink()
+    second = run_adaptive_portfolio_paper_once(config=config, broker=broker)
+
+    log_path = tmp_path / "tradelogs" / "2026-05-04.md"
+    content = log_path.read_text(encoding="utf-8")
+    assert first["trade_log_path"] == str(log_path)
+    assert second["trade_log_path"] == str(log_path)
+    assert content.count("- 订单ID：`intent-idempotent`") == 1
+
+
+def test_execution_fill_log_is_idempotent_by_exec_id(tmp_path):
+    fill = {
+        "contract": {"symbol": "MNQ", "localSymbol": "MNQM6"},
+        "execution": {
+            "exec_id": "exec-fill-1",
+            "time": "2026-05-04T12:24:35+00:00",
+            "account": "DU123",
+            "side": "BOT",
+            "shares": 1,
+            "price": 27854.75,
+            "order_id": 257,
+        },
+    }
+
+    first = append_execution_fill_log(fill, log_dir=tmp_path / "tradelogs")
+    second = append_execution_fill_log(fill, log_dir=tmp_path / "tradelogs")
+
+    assert first == second
+    content = (tmp_path / "tradelogs" / "2026-05-04.md").read_text(encoding="utf-8")
+    assert content.count("- 成交ID：`exec-fill-1`") == 1
+    assert "IBKR 实际成交回填" in content
+
+
+def test_submitted_paper_order_logs_before_tick_recording_failure(tmp_path, monkeypatch):
+    trades_path = tmp_path / "trades.csv"
+    pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-05-04",
+                "entry_ts": "2026-05-04T12:24:30+00:00",
+                "exit_ts": "2026-05-04T12:30:30+00:00",
+                "direction": 1,
+                "entry_price": 27854.25,
+                "portfolio_rule": "adv_wf_best_mean_reversion_lb6_thr0.8_min1_max6_reverse_europe_all_imb0.3",
+                "selected_alias": "best_strategy",
+                "exit_reason": "live_bracket",
+            }
+        ]
+    ).to_csv(trades_path, index=False)
+    broker = IBKRPaperBroker(
+        risk=IBKRPaperRiskConfig(allowed_accounts=("DU123",), allowed_symbols=("MNQ",)),
+        audit_path=tmp_path / "ibkr.jsonl",
+    )
+
+    class FakeSession:
+        def __init__(self, broker):
+            self.broker = broker
+
+        def submit_intent(self, intent, *, dry_run=True, skip_preflight=False):
+            normalized = intent.normalized()
+            return {
+                "created_at": "2026-05-04T12:24:35+00:00",
+                "status": "submitted",
+                "submitted": True,
+                "intent": {
+                    **asdict(normalized),
+                    "intent_id": "intent-tick-fails",
+                    "reason": f"{normalized.reason} | reference_source=current_market_ask | reference_price=27854.25",
+                },
+                "risk": {"decision": "risk_approved", "reasons": []},
+                "orders": [{"account": "DU123", "action": "BUY", "orderType": "MKT", "totalQuantity": 1}],
+                "trades": [{"order_status": {"status": "Filled", "filled": 1, "remaining": 0}}],
+            }
+
+    def fail_tick_recording(**kwargs):
+        raise RuntimeError("tick recorder unavailable")
+
+    monkeypatch.setattr("tradingagents.execution.paper_runner.IBKRPaperTradingSession.from_env", lambda active_broker: FakeSession(active_broker))
+    monkeypatch.setattr("tradingagents.execution.paper_runner.record_ibkr_ticks", fail_tick_recording)
+
+    result = run_adaptive_portfolio_paper_once(
+        config=PaperRunnerConfig(
+            trades_path=trades_path,
+            state_path=tmp_path / "state.json",
+            account="DU123",
+            submit=True,
+            trade_log_dir=tmp_path / "tradelogs",
+            tick_recorder=IBKRTickRecorderConfig(enabled=True, max_ticks=1, interval_seconds=0),
+            max_signal_age_minutes=None,
+        ),
+        broker=broker,
+    )
+
+    log_path = tmp_path / "tradelogs" / "2026-05-04.md"
+    assert result["status"] == "submitted"
+    assert result["trade_log_path"] == str(log_path)
+    assert result["tick_recording"]["status"] == "error"
+    assert "tick recorder unavailable" in result["tick_recording"]["reason"]
+    assert "intent-tick-fails" in log_path.read_text(encoding="utf-8")
 
 
 def test_adaptive_portfolio_paper_trader_script_outputs_dry_run(tmp_path, monkeypatch, capsys):

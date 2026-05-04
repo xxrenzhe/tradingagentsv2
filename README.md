@@ -182,13 +182,19 @@ To run the guarded automation supervisor for that strategy:
 
 The supervisor defaults to dry-run automation. With `--submit`, it first checks IBKR paper readiness and the paper-validation gate for `adv_wf_best_mean_reversion_lb6_thr0.8_min1_max6_reverse_europe_all_imb0.3`; if either gate is blocked, it exits without submitting.
 
-To run the guarded live top-of-book paper loop in dry-run mode:
+To run the guarded live best-strategy paper loop in dry-run mode:
 
 ```bash
 .venv/bin/python scripts/run_ibkr_live_paper_trader.py --record-ticks
 ```
 
-For continuous monitoring, add `--daemon --max-iterations 0`. Add `--submit` only after `scripts/check_paper_automation_status.py` reports `paper_submit_status: ready`; without `--submit`, the live loop writes a fresh signal, builds the bracket intent, runs risk checks, records audit/tick evidence, and does not place orders.
+The default signal mode now evaluates `adv_wf_best_mean_reversion_lb6_thr0.8_min1_max6_reverse_europe_all_imb0.3` instead of using a fixed BUY/SELL direction. It appends live market snapshots to `.tmp/mbp-live-market-history.jsonl` and blocks with `signal_blocked` unless the strategy has enough minute bars, crosses the mean-reversion z-score threshold, and has aligned bid/ask size imbalance. Paper trading defaults to `--strategy-session all`; pass `--strategy-session europe` to restore the original Europe-only window. For continuous monitoring, add `--daemon --max-iterations 0`. Add `--submit` only after `scripts/check_paper_automation_status.py` reports `paper_submit_status: ready`; without `--submit`, the live loop writes a fresh signal only when the strategy triggers, builds the bracket intent, runs risk checks, records audit/tick evidence, and does not place orders.
+
+Manual top-of-book signals are still available for diagnostics only:
+
+```bash
+.venv/bin/python scripts/run_ibkr_live_paper_trader.py --signal-mode manual --direction buy
+```
 
 ### Docker
 

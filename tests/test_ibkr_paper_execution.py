@@ -66,7 +66,11 @@ class FakeIB:
         status = "Filled" if order.orderType == "MKT" else "Submitted"
         filled = order.totalQuantity if order.orderType == "MKT" else 0
         remaining = 0 if order.orderType == "MKT" else order.totalQuantity
-        trade = SimpleNamespace(order=order, orderStatus=SimpleNamespace(status=status, filled=filled, remaining=remaining))
+        trade = SimpleNamespace(
+            contract=contract,
+            order=order,
+            orderStatus=SimpleNamespace(status=status, filled=filled, remaining=remaining),
+        )
         self.placed_orders.append((contract, order))
         return trade
 
@@ -100,6 +104,9 @@ class FakeIB:
             SimpleNamespace(account="DU123", tag="NetLiquidation", value="100000"),
         ]
 
+    def managedAccounts(self):
+        return ["DU123"]
+
     def positions(self):
         return []
 
@@ -107,6 +114,9 @@ class FakeIB:
         return []
 
     def fills(self):
+        return []
+
+    def reqExecutions(self, execution_filter=None):
         return []
 
     def reqContractDetails(self, contract):
@@ -143,7 +153,15 @@ class MarketDataTypeFakeIB(FakeIB):
 
     def reqMktData(self, contract, genericTickList, snapshot, regulatorySnapshot):
         if self.current_market_data_type == 3:
-            return SimpleNamespace(bid=18000.0, ask=18000.25, last=18000.25, marketDataType="delayed")
+            return SimpleNamespace(
+                bid=18000.0,
+                ask=18000.25,
+                last=18000.25,
+                bidSize=5,
+                askSize=7,
+                lastSize=2,
+                marketDataType="delayed",
+            )
         return SimpleNamespace(bid=None, ask=None, last=None, marketDataType=str(self.current_market_data_type))
 
 
@@ -285,6 +303,22 @@ def test_submit_reuses_existing_ib_connection(tmp_path, monkeypatch):
     assert fake_ib.connect_calls == 1
 
 
+def test_broker_blocks_configured_account_not_managed(tmp_path):
+    fake_ib = FakeIB()
+    broker = IBKRPaperBroker(
+        connection=IBKRConnectionConfig(port=7497, account="DU999"),
+        risk=IBKRPaperRiskConfig(allowed_accounts=("DU999",), allowed_symbols=("MNQ",), max_quantity=1),
+        ib=fake_ib,
+        audit_path=tmp_path / "audit.jsonl",
+    )
+
+    response = broker.connect()
+
+    assert response["status"] == "blocked"
+    assert response["reason"] == "configured_account_not_managed"
+    assert response["managed_accounts"] == ["DU123"]
+
+
 def test_paper_session_preflight_ready_with_paper_account(tmp_path, monkeypatch):
     fake_ib = FakeIB()
     broker = IBKRPaperBroker(
@@ -316,6 +350,9 @@ def test_market_snapshot_qualifies_contract_and_retries_market_data_types(tmp_pa
 
     assert snapshot.order_ready
     assert snapshot.market_data_type == "delayed"
+    assert snapshot.bid_size == 5
+    assert snapshot.ask_size == 7
+    assert snapshot.to_dict()["bid_size"] == 5
     assert fake_ib.market_data_types == [1, 2, 3]
 
 
@@ -475,6 +512,76 @@ def test_broker_status_snapshot_includes_positions_orders_and_fills(tmp_path):
     assert snapshot["current_position"] == 0
     assert snapshot["open_trades"] == []
     assert snapshot["fills"] == []
+
+
+def test_broker_status_snapshot_keeps_open_protection_orders_for_symbol(tmp_path):
+    class OpenProtectionFakeIB(FakeIB):
+        def openTrades(self):
+            contract = SimpleNamespace(symbol="MNQ", lastTradeDateOrContractMonth="20260618", localSymbol="MNQM6")
+            take_profit = SimpleNamespace(
+                action="BUY",
+                totalQuantity=1,
+                orderType="LMT",
+                lmtPrice=27847.0,
+                auxPrice=0.0,
+                ocaGroup="MNQ_PROTECT_test",
+            )
+            stop = SimpleNamespace(
+                action="BUY",
+                totalQuantity=1,
+                orderType="STP",
+                lmtPrice=0.0,
+                auxPrice=27887.0,
+                ocaGroup="MNQ_PROTECT_test",
+            )
+            return [
+                SimpleNamespace(contract=contract, order=take_profit, orderStatus=SimpleNamespace(status="Submitted", filled=0, remaining=1)),
+                SimpleNamespace(contract=contract, order=stop, orderStatus=SimpleNamespace(status="PreSubmitted", filled=0, remaining=1)),
+            ]
+
+    broker = IBKRPaperBroker(
+        connection=IBKRConnectionConfig(port=7497, account="DU123"),
+        risk=_risk(),
+        ib=OpenProtectionFakeIB(),
+        audit_path=tmp_path / "audit.jsonl",
+    )
+
+    snapshot = broker.status_snapshot("MNQ")
+
+    assert [trade["order"]["orderType"] for trade in snapshot["open_trades"]] == ["LMT", "STP"]
+    assert snapshot["open_trades"][0]["contract"]["symbol"] == "MNQ"
+
+
+def test_broker_execution_fills_requests_account_symbol_filter(tmp_path):
+    class ExecutionFakeIB(FakeIB):
+        def reqExecutions(self, execution_filter=None):
+            self.execution_filter = execution_filter
+            contract = SimpleNamespace(symbol="MNQ", localSymbol="MNQM6")
+            execution = SimpleNamespace(
+                execId="exec-1",
+                time="2026-05-04T12:24:35+00:00",
+                acctNumber="DU123",
+                side="BOT",
+                shares=1,
+                price=27854.75,
+                orderId=257,
+            )
+            return [SimpleNamespace(contract=contract, execution=execution, commissionReport=None)]
+
+    ib = ExecutionFakeIB()
+    broker = IBKRPaperBroker(
+        connection=IBKRConnectionConfig(port=7497, account="DU123"),
+        risk=_risk(),
+        ib=ib,
+        audit_path=tmp_path / "audit.jsonl",
+    )
+
+    fills = broker.execution_fills(symbol="MNQ")
+
+    assert getattr(ib.execution_filter, "acctCode") == "DU123"
+    assert getattr(ib.execution_filter, "symbol") == "MNQ"
+    assert fills[0]["execution"]["exec_id"] == "exec-1"
+    assert fills[0]["execution"]["price"] == 27854.75
 
 
 def test_tick_recorder_writes_jsonl_snapshots(tmp_path):

@@ -143,6 +143,9 @@ class IBKRMarketSnapshot:
     bid: float | None
     ask: float | None
     last: float | None
+    bid_size: float | None = None
+    ask_size: float | None = None
+    last_size: float | None = None
     market_data_type: str = "unknown"
     snapshot_time: str = ""
 
@@ -163,6 +166,9 @@ class IBKRMarketSnapshot:
             "bid": _finite_price(self.bid),
             "ask": _finite_price(self.ask),
             "last": _finite_price(self.last),
+            "bid_size": _optional_float(self.bid_size),
+            "ask_size": _optional_float(self.ask_size),
+            "last_size": _optional_float(self.last_size),
             "spread": self.spread,
             "order_ready": self.order_ready,
         }
@@ -501,7 +507,21 @@ class IBKRPaperBroker:
             }
         ib = self._ib()
         if hasattr(ib, "isConnected") and ib.isConnected():
-            return {"status": "connected", "connected": True, "connection": asdict(self.connection)}
+            account_check = self._managed_account_check()
+            if not account_check["passed"]:
+                return {
+                    "status": "blocked",
+                    "connected": False,
+                    "reason": "configured_account_not_managed",
+                    "connection": asdict(self.connection),
+                    "managed_accounts": account_check["managed_accounts"],
+                }
+            return {
+                "status": "connected",
+                "connected": True,
+                "connection": asdict(self.connection),
+                "managed_accounts": account_check["managed_accounts"],
+            }
         try:
             ib.connect(
                 self.connection.host,
@@ -518,7 +538,35 @@ class IBKRPaperBroker:
                 "connection": asdict(self.connection),
             }
         connected = bool(ib.isConnected()) if hasattr(ib, "isConnected") else True
-        return {"status": "connected" if connected else "connect_failed", "connected": connected, "connection": asdict(self.connection)}
+        if not connected:
+            return {"status": "connect_failed", "connected": False, "connection": asdict(self.connection)}
+        account_check = self._managed_account_check()
+        if not account_check["passed"]:
+            return {
+                "status": "blocked",
+                "connected": False,
+                "reason": "configured_account_not_managed",
+                "connection": asdict(self.connection),
+                "managed_accounts": account_check["managed_accounts"],
+            }
+        return {
+            "status": "connected",
+            "connected": True,
+            "connection": asdict(self.connection),
+            "managed_accounts": account_check["managed_accounts"],
+        }
+
+    def _managed_account_check(self) -> dict[str, Any]:
+        ib = self._ib()
+        managed_accounts = []
+        if hasattr(ib, "managedAccounts"):
+            try:
+                managed_accounts = [str(account) for account in ib.managedAccounts()]
+            except Exception:
+                managed_accounts = []
+        configured = self.connection.account
+        passed = not configured or not managed_accounts or str(configured) in managed_accounts
+        return {"passed": passed, "managed_accounts": managed_accounts}
 
     def account_summary(self) -> dict[str, Any]:
         ib = self._ib()
@@ -579,6 +627,22 @@ class IBKRPaperBroker:
         if not hasattr(ib, "fills"):
             return []
         return [_serialize_fill(fill) for fill in ib.fills()]
+
+    def execution_fills(self, *, symbol: str | None = None) -> list[dict[str, Any]]:
+        ib = self._ib()
+        if not hasattr(ib, "reqExecutions"):
+            return self.fills()
+        execution_filter = None
+        try:
+            execution_filter_cls = _load_ib_class("ExecutionFilter")
+            execution_filter = execution_filter_cls(
+                acctCode=self.connection.account or "",
+                symbol=(symbol or ""),
+                secType="FUT" if symbol else "",
+            )
+        except Exception:
+            execution_filter = None
+        return [_serialize_fill(fill) for fill in ib.reqExecutions(execution_filter)]
 
     def status_snapshot(self, symbol: str | None = None) -> dict[str, Any]:
         positions = self.positions()
@@ -645,6 +709,9 @@ class IBKRPaperBroker:
                 bid=_optional_float(getattr(ticker, "bid", None)),
                 ask=_optional_float(getattr(ticker, "ask", None)),
                 last=_optional_float(getattr(ticker, "last", None)),
+                bid_size=_optional_float(getattr(ticker, "bidSize", None)),
+                ask_size=_optional_float(getattr(ticker, "askSize", None)),
+                last_size=_optional_float(getattr(ticker, "lastSize", None)),
                 market_data_type=str(getattr(ticker, "marketDataType", market_data_type or "unknown")),
                 snapshot_time=_now(),
             )
@@ -669,7 +736,10 @@ class IBKRPaperBroker:
             ib.sleep(interval_seconds)
         ticks = [_serialize_tick_by_tick(tick) for tick in getattr(ticker, "tickByTicks", [])]
         if hasattr(ib, "cancelTickByTickData"):
-            ib.cancelTickByTickData(ticker)
+            try:
+                ib.cancelTickByTickData(ticker)
+            except TypeError:
+                ib.cancelTickByTickData(contract, tick_type)
         return ticks
 
     def _orders(self, intent: IBKROrderIntent) -> list[Any]:
@@ -741,9 +811,11 @@ def _serialize_contract(contract: Any) -> dict[str, Any]:
 
 
 def _serialize_trade(trade: Any) -> dict[str, Any]:
+    contract = getattr(trade, "contract", None)
     order = getattr(trade, "order", None)
     order_status = getattr(trade, "orderStatus", None)
     return {
+        "contract": _serialize_contract(contract) if contract is not None else {},
         "order": _serialize_order(order) if order is not None else {},
         "order_status": {
             "status": getattr(order_status, "status", None),
@@ -968,6 +1040,8 @@ class IBKRPaperTradingSession:
         missing = []
         if not connection.get("connected"):
             missing.append("not_connected")
+        if connection.get("reason") == "configured_account_not_managed":
+            missing.append("configured_account_not_managed")
         if account and not account.get("paper"):
             missing.append("paper_account_not_verified")
         if account and self.broker.risk.allowed_accounts and (account.get("account") not in self.broker.risk.allowed_accounts):

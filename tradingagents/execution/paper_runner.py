@@ -12,6 +12,7 @@ from typing import Any
 from .agent_gate import AgentGateConfig, AgentStrategyGate
 from .ibkr import IBKRPaperBroker, IBKRPaperTradingSession
 from .paper_validation import build_paper_intent_from_trade, load_trade_samples, select_trade_sample
+from .trade_log import DEFAULT_TRADE_LOG_DIR, append_trade_log
 from .tick_recorder import IBKRTickRecorderConfig, record_ibkr_ticks
 
 
@@ -29,6 +30,7 @@ class PaperRunnerConfig:
     require_agent_gate: bool = False
     max_signal_age_minutes: float | None = 10.0
     audit_path: Path | None = None
+    trade_log_dir: Path = DEFAULT_TRADE_LOG_DIR
     tick_recorder: IBKRTickRecorderConfig = field(default_factory=IBKRTickRecorderConfig)
 
 
@@ -198,7 +200,10 @@ def run_adaptive_portfolio_paper_once(
     }
     if response.get("status") in {"dry_run", "submitted"}:
         _save_state(config.state_path, {"last_candidate_key": key, "last_intent_id": result["intent"].get("intent_id")})
-    result["tick_recording"] = record_ibkr_ticks(
+    trade_log_path = _append_trade_log_safely(result, log_dir=config.trade_log_dir)
+    if trade_log_path is not None:
+        result["trade_log_path"] = str(trade_log_path)
+    result["tick_recording"] = _record_ibkr_ticks_safely(
         broker=active_broker,
         config=config.tick_recorder,
         intent_id=result["intent"].get("intent_id"),
@@ -298,6 +303,34 @@ def _parse_utc_timestamp(value: Any) -> datetime | None:
 def _save_state(path: Path, state: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state, indent=2, sort_keys=True, default=str), encoding="utf-8")
+
+
+def _append_trade_log_safely(result: dict[str, Any], *, log_dir: Path) -> Path | None:
+    try:
+        return append_trade_log(result, log_dir=log_dir)
+    except Exception as exc:
+        result["trade_log_error"] = str(exc) or exc.__class__.__name__
+        return None
+
+
+def _record_ibkr_ticks_safely(
+    *,
+    broker: IBKRPaperBroker,
+    config: IBKRTickRecorderConfig,
+    intent_id: str | None,
+    candidate_key: str,
+    strategy_id: str | None,
+) -> dict[str, Any]:
+    try:
+        return record_ibkr_ticks(
+            broker=broker,
+            config=config,
+            intent_id=intent_id,
+            candidate_key=candidate_key,
+            strategy_id=strategy_id,
+        )
+    except Exception as exc:
+        return {"status": "error", "ticks": 0, "errors": 1, "reason": str(exc) or exc.__class__.__name__}
 
 
 def _append_runner_audit(state_path: Path, event: dict[str, Any]) -> None:

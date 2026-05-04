@@ -12,6 +12,14 @@ from .ibkr import (
     submit_ibkr_paper_order,
 )
 from .live_signal import LIVE_SIGNAL_COLUMNS, LiveSignalConfig, build_live_signal_row, write_live_signal
+from .live_strategy import (
+    BEST_MEAN_REVERSION_ALIAS,
+    BEST_MEAN_REVERSION_STRATEGY_ID,
+    LiveStrategySignalConfig,
+    LiveStrategySpec,
+    build_strategy_live_signal_row,
+    evaluate_mean_reversion_signal,
+)
 from .agent_gate import (
     AgentGateConfig,
     AgentStrategyGate,
@@ -51,8 +59,13 @@ __all__ = [
     "LivePaperTraderDaemonConfig",
     "IBKRTickRecorderConfig",
     "TickReplayDatasetConfig",
+    "LiveStrategySignalConfig",
+    "LiveStrategySpec",
+    "BEST_MEAN_REVERSION_ALIAS",
+    "BEST_MEAN_REVERSION_STRATEGY_ID",
     "build_nq_future_contract",
     "build_live_signal_row",
+    "build_strategy_live_signal_row",
     "build_candidate_trade_context",
     "build_paper_intent_from_trade",
     "load_trade_samples",
@@ -73,5 +86,6 @@ __all__ = [
     "write_live_signal",
     "submit_ibkr_paper_order",
     "walk_forward_gate_replay",
+    "evaluate_mean_reversion_signal",
     "LIVE_SIGNAL_COLUMNS",
 ]
