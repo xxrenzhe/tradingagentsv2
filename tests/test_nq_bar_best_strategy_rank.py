@@ -21,6 +21,7 @@ SPEC.loader.exec_module(rank_script)
 
 def test_rank_nq_bar_candidates_exports_agent_gate_evidence(tmp_path) -> None:
     aggregate_path = tmp_path / "aggregate.csv"
+    trades_path = tmp_path / "trades.csv"
     ranking_path = tmp_path / "ranking.csv"
     aggregate = pd.DataFrame(
         [
@@ -65,10 +66,19 @@ def test_rank_nq_bar_candidates_exports_agent_gate_evidence(tmp_path) -> None:
         ]
     )
     aggregate.to_csv(aggregate_path, index=False)
+    trades = pd.DataFrame(
+        [
+            {"candidate": "bar_best_mean_reversion_lb30_thr1_hold30_us_rth", "direction": 1, "net_points": 10.0},
+            {"candidate": "bar_best_mean_reversion_lb30_thr1_hold30_us_rth", "direction": 1, "net_points": -2.0},
+            {"candidate": "bar_best_mean_reversion_lb30_thr1_hold30_us_rth", "direction": -1, "net_points": 5.0},
+        ]
+    )
+    trades.to_csv(trades_path, index=False)
 
     rows = rank_script.load_candidate_results([(str(aggregate_path), "walkforward_5y_1m")])
     ranked = rank_script.rank_candidates(rows)
-    debate_pack = rank_script.build_debate_pack(ranked)
+    direction_stats = rank_script.summarize_direction_stats(rank_script.load_trade_results(str(trades_path)))
+    debate_pack = rank_script.build_debate_pack(ranked, direction_stats=direction_stats)
     ranked.to_csv(ranking_path, index=False)
 
     best = ranked.iloc[0]
@@ -83,6 +93,9 @@ def test_rank_nq_bar_candidates_exports_agent_gate_evidence(tmp_path) -> None:
     assert debate_pack["candidates"][0]["bear_case"]
     assert debate_pack["candidates"][0]["session_window_utc"] == "13:30-20:00"
     assert "rolling standard deviations" in debate_pack["candidates"][0]["signal_rule"]
+    assert debate_pack["candidates"][0]["direction_stats"][0]["direction"] == "long"
+    assert debate_pack["candidates"][0]["direction_stats"][0]["net_points"] == 8.0
+    assert debate_pack["candidates"][0]["direction_stats"][1]["direction"] == "short"
 
     evidence = load_strategy_evidence(str(best["name"]), ranking_path)
     context = build_candidate_trade_context(

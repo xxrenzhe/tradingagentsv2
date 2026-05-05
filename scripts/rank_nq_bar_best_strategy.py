@@ -33,6 +33,22 @@ def load_candidate_results(inputs: list[tuple[str, str]]) -> pd.DataFrame:
     return rows
 
 
+def load_trade_results(path_text: str | None) -> pd.DataFrame:
+    if not path_text:
+        return pd.DataFrame()
+    path = Path(path_text)
+    if not path.exists():
+        return pd.DataFrame()
+    frame = pd.read_csv(path)
+    required = {"candidate", "direction", "net_points"}
+    if frame.empty or not required.issubset(frame.columns):
+        return pd.DataFrame()
+    frame = frame.copy()
+    frame["direction"] = pd.to_numeric(frame["direction"], errors="coerce")
+    frame["net_points"] = pd.to_numeric(frame["net_points"], errors="coerce")
+    return frame.dropna(subset=["candidate", "direction", "net_points"])
+
+
 def _normalize_candidate_columns(frame: pd.DataFrame) -> None:
     fallback_columns = {
         "full_trades": ["test_trades"],
@@ -156,9 +172,41 @@ def rank_candidates(rows: pd.DataFrame) -> pd.DataFrame:
     return ranked
 
 
-def build_debate_pack(ranked: pd.DataFrame, top_n: int = 3) -> dict[str, object]:
+def summarize_direction_stats(trades: pd.DataFrame) -> dict[str, list[dict[str, object]]]:
+    if trades.empty:
+        return {}
+    stats: dict[str, list[dict[str, object]]] = {}
+    for (candidate, direction), group in trades.groupby(["candidate", "direction"], sort=True):
+        net = pd.to_numeric(group["net_points"], errors="coerce").dropna()
+        if net.empty:
+            continue
+        wins = net[net > 0].sum()
+        losses = abs(net[net < 0].sum())
+        profit_factor = float(wins / losses) if losses else None
+        direction_label = "long" if int(direction) > 0 else "short"
+        stats.setdefault(str(candidate), []).append(
+            {
+                "direction": direction_label,
+                "trades": int(len(net)),
+                "net_points": float(net.sum()),
+                "profit_factor": profit_factor,
+                "win_rate": float((net > 0).mean()),
+                "avg_points": float(net.mean()),
+            }
+        )
+    for rows in stats.values():
+        rows.sort(key=lambda item: str(item["direction"]))
+    return stats
+
+
+def build_debate_pack(
+    ranked: pd.DataFrame,
+    top_n: int = 3,
+    direction_stats: dict[str, list[dict[str, object]]] | None = None,
+) -> dict[str, object]:
     if ranked.empty:
         return {"candidates": [], "message": "no ranked candidates"}
+    direction_stats = direction_stats or {}
     candidates = []
     for _, row in ranked.head(top_n).iterrows():
         bull_case = [
@@ -190,6 +238,7 @@ def build_debate_pack(ranked: pd.DataFrame, top_n: int = 3) -> dict[str, object]
                 "positive_fold_rate": _to_python_value(row.get("positive_fold_rate")),
                 "positive_window_rate": _to_python_value(row.get("positive_window_rate")),
                 "full_stability": _to_python_value(row.get("full_stability")),
+                "direction_stats": direction_stats.get(str(row.get("name")), []),
                 "bull_case": bull_case,
                 "bear_case": bear_case,
                 "decision_hint": "use as LLM debate seed; confirm current live features before taking direction",
@@ -237,7 +286,13 @@ def session_window_utc(session: object) -> str:
     return windows.get(session_name, "unknown")
 
 
-def write_report(path: Path, ranked: pd.DataFrame, debate_pack: dict[str, object], source_path: Path) -> None:
+def write_report(
+    path: Path,
+    ranked: pd.DataFrame,
+    debate_pack: dict[str, object],
+    source_path: Path,
+    direction_stats: dict[str, list[dict[str, object]]] | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         "# NQ 1m Feature Discovery Ranking",
@@ -266,6 +321,7 @@ def write_report(path: Path, ranked: pd.DataFrame, debate_pack: dict[str, object
             best = ranked.iloc[0]
             verdict = "Best research candidate"
             warning = "No candidate passed the risk-control gate; use these rows for research and LLM debate only, not automatic submission."
+        best_direction_stats = direction_stats.get(str(best["name"]), []) if direction_stats else []
         lines.extend(
             [
                 "## Verdict",
@@ -282,6 +338,21 @@ def write_report(path: Path, ranked: pd.DataFrame, debate_pack: dict[str, object
                 f"- Exit rule: time exit after `{int(best.get('holding_minutes', 0) or 0)}` minutes unless a stop/target is configured.",
                 f"- Readiness: `{best.get('selection_tier')}`; live_ready=`{bool(best.get('live_ready'))}`.",
                 "",
+            ]
+        )
+        if best_direction_stats:
+            lines.extend(
+                [
+                    "## Directional Evidence",
+                    "",
+                    "```csv",
+                    pd.DataFrame(best_direction_stats).to_csv(index=False).strip(),
+                    "```",
+                    "",
+                ]
+            )
+        lines.extend(
+            [
                 "## Best Candidate",
                 "",
                 "```csv",
@@ -355,6 +426,7 @@ def main() -> int:
     parser.add_argument("--output", default=".tmp/nq-bar-best-strategy-ranking.csv")
     parser.add_argument("--report", default="reports/NQ-bar-best-strategy-ranking.md")
     parser.add_argument("--debate-output", default=".tmp/nq-bar-best-strategy-debate.json")
+    parser.add_argument("--trades-input", default=None)
     args = parser.parse_args()
 
     rows = load_candidate_results([(args.input, "walkforward_5y_1m")])
@@ -362,11 +434,12 @@ def main() -> int:
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     ranked.to_csv(output, index=False)
-    debate_pack = build_debate_pack(ranked)
+    direction_stats = summarize_direction_stats(load_trade_results(args.trades_input))
+    debate_pack = build_debate_pack(ranked, direction_stats=direction_stats)
     debate_path = Path(args.debate_output)
     debate_path.parent.mkdir(parents=True, exist_ok=True)
     debate_path.write_text(json.dumps(debate_pack, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
-    write_report(Path(args.report), ranked, debate_pack, Path(args.input))
+    write_report(Path(args.report), ranked, debate_pack, Path(args.input), direction_stats=direction_stats)
     print(f"Candidates ranked: {len(ranked):,}")
     print(f"CSV: {output}")
     print(f"Debate pack: {debate_path}")

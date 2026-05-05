@@ -18,6 +18,7 @@ The current 5-year NQ bar-only research does not produce an automatic live-tradi
 - Full ranking report: `reports/NQ-bar-5y-full-strategy-ranking.md`.
 - Ranking implementation: `scripts/rank_nq_bar_best_strategy.py`.
 - Regression test: `tests/test_nq_bar_best_strategy_rank.py`.
+- Directional evidence: ranking reports include long/short trade-count, net-points, profit-factor, win-rate, and average-points splits for each top candidate.
 
 ## Best Research Features
 
@@ -35,5 +36,6 @@ The 5-year bar-only backtests found useful trading-opportunity features, but not
 - Broader ranking: `0` balanced candidates.
 - Full ranking: `0` balanced candidates.
 - Best candidates include LLM debate seed data, but their `live_ready` flag is `False`.
+- Best candidates now include direction-specific evidence so the LLM can challenge whether the current signal should be acted on long, short, or filtered.
 
 Therefore, the system should use these features as LLM debate context and paper-validation candidates only. It should not automatically submit live long/short orders from these bar-only results until a candidate passes risk-control gates, paper validation, and current-market confirmation.

@@ -20,6 +20,14 @@ No candidate passed the risk-control gate; use these rows for research and LLM d
 - Exit rule: time exit after `60` minutes unless a stop/target is configured.
 - Readiness: `research_only`; live_ready=`False`.
 
+## Directional Evidence
+
+```csv
+direction,trades,net_points,profit_factor,win_rate,avg_points
+long,273,4607.375,1.3346680467785283,0.5604395604395604,16.876831501831504
+short,260,45.5,1.0028155069459486,0.5153846153846153,0.175
+```
+
 ## Best Candidate
 
 ```csv
@@ -65,6 +73,24 @@ bar_best_momentum_lb5_thr0.001_hold60_us_late,walkforward_5y_1m,research_only,mo
       ],
       "candidate_universe": "walkforward_5y_1m",
       "decision_hint": "use as LLM debate seed; confirm current live features before taking direction",
+      "direction_stats": [
+        {
+          "avg_points": 16.876831501831504,
+          "direction": "long",
+          "net_points": 4607.375,
+          "profit_factor": 1.3346680467785283,
+          "trades": 273,
+          "win_rate": 0.5604395604395604
+        },
+        {
+          "avg_points": 0.175,
+          "direction": "short",
+          "net_points": 45.5,
+          "profit_factor": 1.0028155069459486,
+          "trades": 260,
+          "win_rate": 0.5153846153846153
+        }
+      ],
       "entry_point": "enter on the next minute open after the signal bar; direction is the signal sign",
       "exit_rule": "time exit after 60 minutes unless a strategy-specific stop/target is configured",
       "family": "momentum",
@@ -95,6 +121,24 @@ bar_best_momentum_lb5_thr0.001_hold60_us_late,walkforward_5y_1m,research_only,mo
       ],
       "candidate_universe": "walkforward_5y_1m",
       "decision_hint": "use as LLM debate seed; confirm current live features before taking direction",
+      "direction_stats": [
+        {
+          "avg_points": 7.982822410147992,
+          "direction": "long",
+          "net_points": 3775.875,
+          "profit_factor": 1.372958156877755,
+          "trades": 473,
+          "win_rate": 0.5369978858350951
+        },
+        {
+          "avg_points": -1.3863636363636365,
+          "direction": "short",
+          "net_points": -30.5,
+          "profit_factor": 0.9248999692212989,
+          "trades": 22,
+          "win_rate": 0.6818181818181818
+        }
+      ],
       "entry_point": "enter on the next minute open after the signal bar; direction is the signal sign",
       "exit_rule": "time exit after 30 minutes unless a strategy-specific stop/target is configured",
       "family": "vwap_reclaim",
@@ -125,6 +169,24 @@ bar_best_momentum_lb5_thr0.001_hold60_us_late,walkforward_5y_1m,research_only,mo
       ],
       "candidate_universe": "walkforward_5y_1m",
       "decision_hint": "use as LLM debate seed; confirm current live features before taking direction",
+      "direction_stats": [
+        {
+          "avg_points": 7.982822410147992,
+          "direction": "long",
+          "net_points": 3775.875,
+          "profit_factor": 1.372958156877755,
+          "trades": 473,
+          "win_rate": 0.5369978858350951
+        },
+        {
+          "avg_points": -1.3863636363636365,
+          "direction": "short",
+          "net_points": -30.5,
+          "profit_factor": 0.9248999692212989,
+          "trades": 22,
+          "win_rate": 0.6818181818181818
+        }
+      ],
       "entry_point": "enter on the next minute open after the signal bar; direction is the signal sign",
       "exit_rule": "time exit after 30 minutes unless a strategy-specific stop/target is configured",
       "family": "vwap_reclaim",
