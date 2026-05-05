@@ -73,6 +73,20 @@ def _prepare_features(features: pd.DataFrame) -> pd.DataFrame:
     data["ts"] = pd.to_datetime(data["ts"], utc=True)
     data["trade_date"] = data["ts"].dt.date
     data["minute_of_day"] = data["ts"].dt.hour * 60 + data["ts"].dt.minute
+    has_spread = "spread_mean" in data.columns
+    has_imbalance = "imbalance_mean" in data.columns or "imbalance_last" in data.columns
+    has_depth = "depth_mean" in data.columns
+    data["_has_spread"] = has_spread
+    data["_has_imbalance"] = has_imbalance
+    data["_has_depth"] = has_depth
+    if "spread_mean" not in data.columns:
+        data["spread_mean"] = 0.0
+    if "imbalance_mean" not in data.columns:
+        data["imbalance_mean"] = 0.0
+    if "imbalance_last" not in data.columns:
+        data["imbalance_last"] = data["imbalance_mean"]
+    if "depth_mean" not in data.columns:
+        data["depth_mean"] = 1.0
     for column in [
         "Open",
         "High",
@@ -239,15 +253,24 @@ def _choch_signal(features: pd.DataFrame, config: ChochConfig) -> pd.Series:
     volatility_ok = _volatility_mask(features, config.volatility_mode)
 
     imbalance = pd.to_numeric(features["imbalance_last"].fillna(features["imbalance_mean"]), errors="coerce")
-    imbalance_ok = ((direction > 0) & (imbalance >= config.imbalance_threshold)) | (
-        (direction < 0) & (imbalance <= -config.imbalance_threshold)
-    )
-    spread_ok = pd.to_numeric(features["spread_mean"], errors="coerce") <= pd.to_numeric(
-        features["spread_mean"], errors="coerce"
-    ).quantile(config.max_spread_quantile)
-    depth_ok = pd.to_numeric(features["depth_mean"], errors="coerce") >= pd.to_numeric(
-        features["depth_mean"], errors="coerce"
-    ).quantile(config.min_depth_quantile)
+    if bool(features.get("_has_imbalance", pd.Series(False, index=features.index)).any()):
+        imbalance_ok = ((direction > 0) & (imbalance >= config.imbalance_threshold)) | (
+            (direction < 0) & (imbalance <= -config.imbalance_threshold)
+        )
+    else:
+        imbalance_ok = pd.Series(True, index=features.index)
+
+    spread = pd.to_numeric(features["spread_mean"], errors="coerce")
+    if bool(features.get("_has_spread", pd.Series(False, index=features.index)).any()):
+        spread_ok = spread <= spread.quantile(config.max_spread_quantile)
+    else:
+        spread_ok = pd.Series(True, index=features.index)
+
+    depth = pd.to_numeric(features["depth_mean"], errors="coerce")
+    if bool(features.get("_has_depth", pd.Series(False, index=features.index)).any()):
+        depth_ok = depth >= depth.quantile(config.min_depth_quantile)
+    else:
+        depth_ok = pd.Series(True, index=features.index)
 
     extension = (features["Close"] - features["broken_level"]).abs()
     atr = pd.to_numeric(features["atr_14"], errors="coerce")
@@ -527,6 +550,16 @@ def _write_report(
     best_choch: pd.Series,
 ) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
+    has_microstructure = bool(
+        features.get("_has_spread", pd.Series(False, index=features.index)).any()
+        and features.get("_has_imbalance", pd.Series(False, index=features.index)).any()
+        and features.get("_has_depth", pd.Series(False, index=features.index)).any()
+    )
+    microstructure_note = (
+        "本次缓存包含 spread / imbalance / depth，盘口过滤已启用。"
+        if has_microstructure
+        else "本次缓存缺少 spread / imbalance / depth，盘口过滤已自动旁路；结果代表 bar-only 两个月回测，不等同于完整 MBP 盘口过滤效果。"
+    )
     html_doc = f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -559,7 +592,7 @@ def _write_report(
 <main class="wrap">
   <section class="card">
     <h1>CHoCH + 过滤版两个月回测</h1>
-    <p>数据范围：<code>{features['ts'].min()}</code> 至 <code>{features['ts'].max()}</code>；样本为本地 Databento MBP-derived 1m 特征，共 {len(features):,} 行。新策略只允许 CHoCH 入场，显式禁止顺趋势 BOS 追高，并加入趋势、波动、盘口失衡、价差/深度、固定止损/止盈过滤。</p>
+    <p>数据范围：<code>{features['ts'].min()}</code> 至 <code>{features['ts'].max()}</code>；样本共 {len(features):,} 行。新策略只允许 CHoCH 入场，显式禁止顺趋势 BOS 追高，并加入趋势、波动、固定止损/止盈过滤。{html.escape(microstructure_note)}</p>
   </section>
   <section class="card">
     <h2>最佳 CHoCH 版本</h2>
