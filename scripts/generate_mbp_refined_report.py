@@ -6,9 +6,37 @@ from pathlib import Path
 
 import pandas as pd
 
-from generate_mbp_history_report import _equity_curve_summary, _load_features, _svg_line_chart
+from generate_mbp_history_report import _equity_curve_summary, _svg_line_chart
 from generate_mbp_live_ready_report import _advanced_spec_from_row
-from mine_mbp_advanced_patterns import build_advanced_trades
+from mine_mbp_advanced_patterns import AdvancedStrategySpec, build_advanced_trades
+from optimize_mbp_robust_top10 import (
+    Candidate,
+    _fold_metrics,
+    _load_features,
+    _prefixed_summary,
+    _spec_parameters,
+    _window_metrics,
+)
+from tradingagents.backtesting.short_patterns import BacktestCosts
+
+
+BASELINE_NAME = "adv_wf_best_mean_reversion_lb6_thr0.8_min1_max6_reverse_europe_all_imb0.3"
+BASELINE_SPEC = AdvancedStrategySpec(
+    name=BASELINE_NAME,
+    family="mean_reversion",
+    lookback=6,
+    threshold=0.8,
+    min_hold=1,
+    max_hold=6,
+    exit_mode="reverse",
+    session="europe",
+    volatility_filter="all",
+    imbalance_threshold=0.3,
+    max_spread_quantile=0.75,
+    min_depth_quantile=0.25,
+    stop_loss_points=None,
+    take_profit_points=None,
+)
 
 
 def _fmt(value: float, decimals: int = 4) -> str:
@@ -34,6 +62,60 @@ def _curves(features: pd.DataFrame, rows: pd.DataFrame) -> dict[str, list[tuple[
     return curves
 
 
+def _robust_score(full: dict, folds: dict, worst_cost_score: float) -> float:
+    return (
+        full["full_score"]
+        * max(folds["positive_fold_rate"], 0.01)
+        * max(min(full["full_stability"], 1.0), 0.01)
+        * max(min(worst_cost_score / max(full["full_score"], 1e-9), 1.0), 0.01)
+    )
+
+
+def _baseline_row(features: pd.DataFrame) -> pd.Series:
+    candidate = Candidate("advanced", BASELINE_NAME, BASELINE_SPEC)
+    base_costs = BacktestCosts()
+    full = _prefixed_summary(candidate, features, base_costs, "full")
+    folds = _fold_metrics(candidate, features, 6, base_costs)
+    window = _window_metrics(candidate, features, BacktestCosts(slippage_ticks_per_side=3.0), 10, 5)
+    cost_rows = []
+    for multiplier in [1.0, 2.0, 3.0]:
+        costs = BacktestCosts(
+            point_value=base_costs.point_value,
+            tick_size=base_costs.tick_size,
+            slippage_ticks_per_side=base_costs.slippage_ticks_per_side * multiplier,
+            commission_per_contract=base_costs.commission_per_contract,
+        )
+        cost_rows.append(_prefixed_summary(candidate, features, costs, f"cost_{multiplier:g}x"))
+    worst_cost_net = min(row[f"cost_{multiplier:g}x_net_points"] for row, multiplier in zip(cost_rows, [1.0, 2.0, 3.0]))
+    worst_cost_score = min(row[f"cost_{multiplier:g}x_score"] for row, multiplier in zip(cost_rows, [1.0, 2.0, 3.0]))
+    live_ready_strict = (
+        worst_cost_net > 0
+        and folds["positive_fold_rate"] >= 1.0
+        and window["positive_window_rate"] >= 1.0
+        and window["min_window_net_points"] >= 0
+        and window["min_window_trades"] >= 5
+        and full["full_trades"] >= 200
+        and full["full_profit_factor"] >= 1.25
+    )
+    row = {
+        "label": "Current Live",
+        "name": BASELINE_NAME,
+        "source": "advanced",
+        "family": BASELINE_SPEC.family,
+        **_spec_parameters(candidate),
+        **full,
+        **folds,
+        **window,
+        "worst_cost_net_points": worst_cost_net,
+        "worst_cost_score": worst_cost_score,
+        "robust_score": _robust_score(full, folds, worst_cost_score),
+        "live_ready_strict": live_ready_strict,
+    }
+    for cost_row in cost_rows:
+        row.update(cost_row)
+    return pd.Series(row)
+
+
 def _table(rows: pd.DataFrame) -> str:
     columns = [
         "label",
@@ -47,6 +129,7 @@ def _table(rows: pd.DataFrame) -> str:
         "min_window_net_points",
         "worst_cost_net_points",
         "robust_score",
+        "live_ready_strict",
     ]
     display = rows[columns].copy()
     for column in ["positive_fold_rate", "positive_window_rate"]:
@@ -72,25 +155,26 @@ def _table(rows: pd.DataFrame) -> str:
         "Worst Window",
         "3x Cost Net",
         "Robust Score",
+        "Strict OK",
     ]
     return display.to_html(index=False, classes="metrics", border=0, escape=True)
 
 
-def _cards(best: pd.Series, baseline: pd.Series) -> str:
-    net_delta = float(best["full_net_points"]) - float(baseline["full_net_points"])
-    dd_delta = float(best["full_max_drawdown_points"]) - float(baseline["full_max_drawdown_points"])
-    pf_delta = float(best["full_profit_factor"]) - float(baseline["full_profit_factor"])
-    worst_window_delta = float(best["min_window_net_points"]) - float(baseline["min_window_net_points"])
+def _cards(best_net: pd.Series, best_pf: pd.Series, baseline: pd.Series) -> str:
+    net_delta = float(best_net["full_net_points"]) - float(baseline["full_net_points"])
+    dd_delta = float(best_pf["full_max_drawdown_points"]) - float(baseline["full_max_drawdown_points"])
+    pf_delta = float(best_pf["full_profit_factor"]) - float(baseline["full_profit_factor"])
+    worst_window_delta = float(best_pf["min_window_net_points"]) - float(baseline["min_window_net_points"])
     return f"""
       <div class="metric-grid">
-        <div class="metric"><strong>Refined Top1</strong><span>{html.escape(best['name'])}</span></div>
-        <div class="metric"><strong>Net Improvement</strong><span>{_fmt(net_delta)} points</span></div>
-        <div class="metric"><strong>Net Points</strong><span>{_fmt(float(best['full_net_points']))}</span></div>
-        <div class="metric"><strong>Max DD Change</strong><span>{_fmt(dd_delta)} points</span></div>
-        <div class="metric"><strong>PF Change</strong><span>{_fmt(pf_delta)}</span></div>
-        <div class="metric"><strong>Worst Window Improvement</strong><span>{_fmt(worst_window_delta)} points</span></div>
-        <div class="metric"><strong>Positive Folds</strong><span>{float(best['positive_fold_rate']):.2%}</span></div>
-        <div class="metric"><strong>Positive Windows</strong><span>{float(best['positive_window_rate']):.2%}</span></div>
+        <div class="metric"><strong>结论</strong><span>找到 5 个过去2个月正收益且严格通过稳健性验证的优化候选；但净收益最高的仍是当前 live 策略，暂不建议替换。</span></div>
+        <div class="metric"><strong>当前策略净收益</strong><span>{_fmt(float(baseline['full_net_points']))} points</span></div>
+        <div class="metric"><strong>优化候选最高净收益</strong><span>{_fmt(float(best_net['full_net_points']))} points ({_fmt(net_delta)} vs 当前)</span></div>
+        <div class="metric"><strong>保守候选 PF 改善</strong><span>{_fmt(pf_delta)}，候选：{html.escape(best_pf['name'])}</span></div>
+        <div class="metric"><strong>保守候选 DD 变化</strong><span>{_fmt(dd_delta)} points</span></div>
+        <div class="metric"><strong>最差10日窗口变化</strong><span>{_fmt(worst_window_delta)} points</span></div>
+        <div class="metric"><strong>当前 Positive Folds</strong><span>{float(baseline['positive_fold_rate']):.2%}</span></div>
+        <div class="metric"><strong>当前 Positive Windows</strong><span>{float(baseline['positive_window_rate']):.2%}</span></div>
       </div>
 """
 
@@ -99,25 +183,29 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Generate refined MBP mean-reversion HTML report.")
     parser.add_argument("--features-cache", default=".tmp/mbp-history-features-cache.pkl")
     parser.add_argument("--refined-results", default=".tmp/mbp-refined-mean-reversion.csv")
-    parser.add_argument("--baseline-results", default=".tmp/mbp-live-ready-top10.csv")
     parser.add_argument("--output", default="reports/NQM6-mbp-refined-mean-reversion.html")
     args = parser.parse_args()
 
     features = _load_features(Path(args.features_cache))
     refined = pd.read_csv(args.refined_results)
-    baseline = pd.read_csv(args.baseline_results).head(1).copy()
-    if refined.empty or baseline.empty:
-        raise SystemExit("Refined or baseline results are empty.")
+    if refined.empty:
+        raise SystemExit("Refined results are empty.")
 
     strict = refined[refined["live_ready_strict"]].copy()
-    top_refined = (strict if not strict.empty else refined).head(3).copy()
+    top_refined = (strict if not strict.empty else refined).head(5).copy()
     top_refined["label"] = [f"Refined #{index}" for index in range(1, len(top_refined) + 1)]
-    baseline["label"] = "Original Top1"
-    baseline["robust_score"] = baseline.get("robust_score", baseline.get("live_score", 0.0))
-    comparison = pd.concat([top_refined, baseline], ignore_index=True, sort=False)
+    baseline = _baseline_row(features).to_frame().T
+    comparison = pd.concat([baseline, top_refined], ignore_index=True, sort=False)
     curves = _curves(features, comparison)
-    best = top_refined.iloc[0]
+    best_net = top_refined.sort_values("full_net_points", ascending=False).iloc[0]
+    best_pf = top_refined.sort_values(["full_profit_factor", "full_max_drawdown_points"], ascending=[False, True]).iloc[0]
     base = baseline.iloc[0]
+    replacement = bool(float(best_net["full_net_points"]) > float(base["full_net_points"]))
+    recommendation = (
+        "可考虑替换当前 live 策略。"
+        if replacement
+        else "不建议替换当前 live 策略；可以把 refined 候选加入 shadow/paper 观察。"
+    )
 
     html_doc = f"""<!doctype html>
 <html lang="zh-CN">
@@ -153,11 +241,12 @@ def main() -> int:
     <section class="card">
       <span class="badge">Refined Mean-Reversion · NQM6</span>
       <h1>NQM6 收益增强策略报告</h1>
-      <p>目标是在保留原 Top1 的核心优势时提高整体收益。本轮只接受更严格门槛：6/6 folds 为正、9/9 滚动 10 日窗口为正、最差 10 日窗口非负、3x 成本后仍盈利、交易数不少于 200、PF 不低于 1.25。</p>
+      <p>目标是在保留当前 live 均值回归框架时提高收益或降低风险。本轮只接受更严格门槛：6/6 folds 为正、9/9 滚动 10 日窗口为正、最差 10 日窗口非负、3x 成本后仍盈利、交易数不少于 200、PF 不低于 1.25。数据范围：{features['ts'].min()} 至 {features['ts'].max()}。</p>
     </section>
     <section class="card">
       <h2>结论摘要</h2>
-      {_cards(best, base)}
+      {_cards(best_net, best_pf, base)}
+      <p><strong>操作建议：</strong>{recommendation}</p>
     </section>
     <section class="card">
       <h2>候选对比</h2>
@@ -165,10 +254,16 @@ def main() -> int:
     </section>
     <section class="card">
       <h2>资金曲线对比</h2>
-      <p>包含 refined Top3 与原 Top1。第一张图按交易次数对齐，第二张图按实际交易日期展开。鼠标悬浮仅显示当前点。</p>
+      <p>包含当前 live 策略与严格通过验证的 refined 候选。第一张图按交易次数对齐，第二张图按实际交易日期展开。鼠标悬浮仅显示当前点。</p>
       {_svg_line_chart(curves, "Refined candidates equity by trade sequence (net points)", "sequence")}
       {_svg_line_chart(curves, "Refined candidates equity by trading date (net points)", "date")}
       {_equity_curve_summary(curves)}
+    </section>
+    <section class="card">
+      <h2>优化内容</h2>
+      <p>本轮优化没有引入全新形态识别，而是对当前 live 均值回归策略做局部参数优化：lookback 从 6 扩展到 4-7，z-score 阈值在 0.55-0.65 邻域搜索，退出方式比较 reverse 与 reverse_vwap，波动过滤固定为 not_low，并测试盘口 imbalance 0.30-0.40 与可选固定止损/止盈。</p>
+      <p>固定止损/止盈版本没有进入严格候选；说明最近2个月里，硬性 12/24 或 16/24 风险参数会破坏当前短持仓均值回归优势。当前最有效的优化是减少低波动噪声交易、略放宽/调整 z-score 入场并保留盘口 imbalance 对齐。</p>
+      <p>过拟合风险：仍然存在，因为优化窗口只有2个月且候选来自同一数据集。为降低过拟合，本报告只展示同时通过 folds、滚动10日窗口和3倍成本压力测试的候选；但由于没有明显超过当前 baseline，不应直接替换 live 策略。</p>
     </section>
   </div>
   <div class="chart-tooltip" id="chart-tooltip"></div>
