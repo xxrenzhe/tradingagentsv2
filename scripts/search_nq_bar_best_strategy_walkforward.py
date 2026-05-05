@@ -59,6 +59,10 @@ def _thresholds_for_family(family: str, args: argparse.Namespace) -> list[float]
         return [float(value) for value in args.vwap_thresholds]
     if family == "breakout":
         return [0.0]
+    if family == "support_reclaim":
+        return [float(value) for value in args.support_reclaim_thresholds]
+    if family == "breakout_retest":
+        return [float(value) for value in args.breakout_retest_thresholds]
     raise ValueError(f"unknown family: {family}")
 
 
@@ -385,13 +389,19 @@ def main() -> int:
     parser.add_argument("--test-days", type=int, default=90)
     parser.add_argument("--step-days", type=int, default=90)
     parser.add_argument("--max-fold-candidates", type=int, default=15)
-    parser.add_argument("--families", nargs="+", default=["mean_reversion", "momentum", "vwap_reclaim", "breakout"])
+    parser.add_argument(
+        "--families",
+        nargs="+",
+        default=["mean_reversion", "momentum", "vwap_reclaim", "breakout", "support_reclaim", "breakout_retest"],
+    )
     parser.add_argument("--sessions", nargs="+", default=["all", "europe", "us_rth", "us_late", "asia"])
     parser.add_argument("--lookbacks", type=int, nargs="+", default=[5, 10, 15, 30, 60])
     parser.add_argument("--holding-minutes", type=int, nargs="+", default=[3, 5, 10, 15, 30, 60])
     parser.add_argument("--mean-reversion-thresholds", type=float, nargs="+", default=[0.6, 1.0, 1.4, 2.0])
     parser.add_argument("--momentum-thresholds", type=float, nargs="+", default=[0.0003, 0.0006, 0.001, 0.0015])
     parser.add_argument("--vwap-thresholds", type=float, nargs="+", default=[0.0002, 0.0005, 0.001])
+    parser.add_argument("--support-reclaim-thresholds", type=float, nargs="+", default=[0.0002, 0.0005, 0.001])
+    parser.add_argument("--breakout-retest-thresholds", type=float, nargs="+", default=[0.0002, 0.0005, 0.001])
     parser.add_argument("--min-train-trades", type=int, default=120)
     parser.add_argument("--min-test-trades", type=int, default=20)
     parser.add_argument("--min-train-profit-factor", type=float, default=1.08)

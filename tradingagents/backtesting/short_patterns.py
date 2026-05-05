@@ -98,6 +98,8 @@ def generate_strategy_specs(include_microstructure: bool = True) -> list[Strateg
         "mean_reversion": [0.6, 1.0, 1.4],
         "breakout": [0.0],
         "vwap_reclaim": [0.0002, 0.0005],
+        "support_reclaim": [0.0002, 0.0005],
+        "breakout_retest": [0.0002, 0.0005],
     }
     for family, thresholds in families.items():
         for lookback, threshold, holding_minutes in product([3, 5, 10, 15], thresholds, [3, 5, 10, 15]):
@@ -160,6 +162,24 @@ def _base_signal(features: pd.DataFrame, spec: StrategySpec) -> pd.Series:
         long_signal = (vwap_distance > spec.threshold) & (momentum > 0)
         short_signal = (vwap_distance < -spec.threshold) & (momentum < 0)
         return (long_signal.astype(int) - short_signal.astype(int)).astype(float)
+
+    if spec.family == "support_reclaim":
+        prior_low = features["Low"].rolling(spec.lookback).min().shift(1)
+        prior_high = features["High"].rolling(spec.lookback).max().shift(1)
+        range_size = (prior_high - prior_low).replace(0, pd.NA)
+        long_signal = (features["Low"] < prior_low) & (close > prior_low + range_size * spec.threshold)
+        short_signal = (features["High"] > prior_high) & (close < prior_high - range_size * spec.threshold)
+        return (long_signal.astype(int) - short_signal.astype(int)).astype(float)
+
+    if spec.family == "breakout_retest":
+        prior_high = features["High"].rolling(spec.lookback).max().shift(2)
+        prior_low = features["Low"].rolling(spec.lookback).min().shift(2)
+        range_size = (prior_high - prior_low).replace(0, pd.NA)
+        long_breakout = features["Close"].shift(1) > prior_high
+        long_retest = (features["Low"] <= prior_high) & (close > prior_high + range_size * spec.threshold)
+        short_breakdown = features["Close"].shift(1) < prior_low
+        short_retest = (features["High"] >= prior_low) & (close < prior_low - range_size * spec.threshold)
+        return ((long_breakout & long_retest).astype(int) - (short_breakdown & short_retest).astype(int)).astype(float)
 
     raise ValueError(f"Unknown strategy family: {spec.family}")
 

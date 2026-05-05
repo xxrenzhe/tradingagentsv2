@@ -271,6 +271,16 @@ def signal_rule(row: pd.Series) -> str:
             f"go long when close is more than {threshold:g} above cumulative VWAP and {lookback}m momentum is positive; "
             f"go short when close is more than {threshold:g} below cumulative VWAP and {lookback}m momentum is negative"
         )
+    if family == "support_reclaim":
+        return (
+            f"go long when price sweeps below the prior {lookback}m low then closes back above that support by {threshold:g} of the prior range; "
+            f"go short when price sweeps above the prior {lookback}m high then closes back below that resistance by {threshold:g} of the prior range"
+        )
+    if family == "breakout_retest":
+        return (
+            f"go long when the prior bar breaks the {lookback}m high, the current bar retests that level, then closes back above by {threshold:g} of the prior range; "
+            f"go short when the prior bar breaks the {lookback}m low, the current bar retests that level, then closes back below by {threshold:g} of the prior range"
+        )
     return "unknown signal family"
 
 
