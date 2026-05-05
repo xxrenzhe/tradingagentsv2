@@ -42,6 +42,7 @@ class LiveStrategySpec:
 @dataclass(frozen=True)
 class LiveStrategySignalConfig:
     history_path: Path = Path(".tmp/mbp-live-market-history.jsonl")
+    bootstrap_cache_path: Path | None = Path(".tmp/mbp-history-features-cache.pkl")
     max_history_minutes: int = 120
     tick_interval_seconds: float = 1.0
     min_bars: int = 7
@@ -79,10 +80,17 @@ def build_strategy_live_signal_row(
     if strategy_spec.family == "mean_reversion":
         evaluation = evaluate_mean_reversion_signal(bars, strategy_spec, min_bars=strategy_config.min_bars)
     elif strategy_spec.family == "mtf_setup":
-        mtf_features = prepare_multi_timeframe_features(bars, spec=_mtf_spec(strategy_spec))
+        mtf_spec = _mtf_spec(strategy_spec)
+        required_bars = _required_mtf_bars(mtf_spec, strategy_config.min_bars)
+        if len(bars) < required_bars:
+            bootstrap = _load_bootstrap_bars(strategy_config.bootstrap_cache_path, timestamp, required_bars)
+            if not bootstrap.empty:
+                bars = pd.concat([bars, bootstrap], ignore_index=True)
+                bars = bars.sort_values("ts").drop_duplicates("ts").reset_index(drop=True)
+        mtf_features = prepare_multi_timeframe_features(bars, spec=mtf_spec)
         evaluation = evaluate_multi_timeframe_setup_signal(
             mtf_features,
-            _mtf_spec(strategy_spec),
+            mtf_spec,
             min_bars=strategy_config.min_bars,
         )
     else:
@@ -199,6 +207,10 @@ def _mtf_spec(spec: LiveStrategySpec) -> MultiTimeframeSetupSpec:
     )
 
 
+def _required_mtf_bars(spec: MultiTimeframeSetupSpec, min_bars: int | None) -> int:
+    return max(int(min_bars or 0), spec.max_hold_minutes + spec.ltf_fast_ema + 1, spec.htf_slow_ema * 15)
+
+
 def _order_ready_snapshot(broker: IBKRPaperBroker, config: LiveSignalConfig) -> dict[str, Any]:
     attempts = max(1, int(config.snapshot_attempts))
     last_snapshot: dict[str, Any] = {}
@@ -272,6 +284,36 @@ def _load_recent_history(path: Path, timestamp: datetime, max_history_minutes: i
         event["ts"] = event_ts
         rows.append(event)
     return pd.DataFrame(rows)
+
+
+def _load_bootstrap_bars(
+    cache_path: Path | None,
+    timestamp: datetime,
+    required_bars: int,
+) -> pd.DataFrame:
+    if cache_path is None or not cache_path.exists():
+        return pd.DataFrame()
+    try:
+        cache = pd.read_pickle(cache_path)
+    except Exception:
+        return pd.DataFrame()
+    frames = [frame for frame in cache.values() if isinstance(frame, pd.DataFrame) and not frame.empty]
+    if not frames:
+        return pd.DataFrame()
+    bars = pd.concat(frames, ignore_index=True)
+    if "ts" not in bars.columns:
+        return pd.DataFrame()
+    bars = bars.copy()
+    bars["ts"] = pd.to_datetime(bars["ts"], utc=True, errors="coerce")
+    bars = bars.dropna(subset=["ts"]).sort_values("ts").drop_duplicates("ts").reset_index(drop=True)
+    keep_count = min(len(bars), max(int(required_bars), 90))
+    bars = bars.tail(keep_count).copy()
+    if bars.empty:
+        return pd.DataFrame()
+    shift = (timestamp - timedelta(minutes=1)) - bars.iloc[-1]["ts"]
+    bars["ts"] = bars["ts"] + shift
+    bars["minute_of_day"] = bars["ts"].dt.hour * 60 + bars["ts"].dt.minute
+    return bars.reset_index(drop=True)
 
 
 def _build_minute_bars(history: pd.DataFrame) -> pd.DataFrame:
