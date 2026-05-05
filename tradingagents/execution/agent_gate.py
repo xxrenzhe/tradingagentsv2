@@ -330,6 +330,14 @@ def build_candidate_trade_context(
         "selected_alias",
         "regime",
         "exit_reason",
+        "setup_id",
+        "setup_family",
+        "setup_bias",
+        "setup_confidence",
+        "setup_htf_trend",
+        "setup_mtf_reclaim",
+        "setup_ltf_trigger",
+        "setup_reason",
     ]:
         if key in trade:
             parts.append(f"{key}: {trade[key]}")

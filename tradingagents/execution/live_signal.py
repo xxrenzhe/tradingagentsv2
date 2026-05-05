@@ -45,6 +45,10 @@ LIVE_SIGNAL_COLUMNS = [
     "cumulative_net_points",
     "exit_reason",
     "signal_source",
+    "setup_confidence",
+    "setup_htf_trend",
+    "setup_mtf_reclaim",
+    "setup_ltf_trigger",
 ]
 
 

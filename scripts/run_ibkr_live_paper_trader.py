@@ -36,12 +36,15 @@ def main() -> int:
     parser.add_argument("--state-path", default=".tmp/mbp-live-paper-trader-state.json")
     parser.add_argument("--strategy-id", default=DEFAULT_STRATEGY_ID)
     parser.add_argument("--selected-alias", default=DEFAULT_SELECTED_ALIAS)
+    parser.add_argument("--strategy-family", choices=["mean_reversion", "mtf_setup"], default="mean_reversion")
+    parser.add_argument("--imbalance-threshold", type=float, default=None)
     parser.add_argument("--signal-mode", choices=["strategy", "manual"], default="strategy")
     parser.add_argument("--direction", choices=["buy", "sell", "BUY", "SELL"], default=None)
     parser.add_argument("--history-path", default=".tmp/mbp-live-market-history.jsonl")
     parser.add_argument("--max-history-minutes", type=int, default=120)
     parser.add_argument("--min-bars", type=int, default=7)
     parser.add_argument("--strategy-session", choices=["all", "europe"], default="all")
+    parser.add_argument("--htf-mode", choices=["off", "bias", "confirm"], default="off")
     parser.add_argument("--symbol", default="MNQ")
     parser.add_argument("--contract-month", default="202606")
     parser.add_argument("--account", default=None)
@@ -70,14 +73,26 @@ def main() -> int:
     if args.signal_mode == "manual" and args.direction is None:
         raise SystemExit("--direction is required when --signal-mode manual")
     direction = 0 if args.direction is None else (1 if args.direction.lower() == "buy" else -1)
+    strategy_id = args.strategy_id
+    selected_alias = args.selected_alias
+    if args.strategy_family == "mtf_setup" and strategy_id == DEFAULT_STRATEGY_ID and selected_alias == DEFAULT_SELECTED_ALIAS:
+        strategy_id = "mtf_setup"
+        selected_alias = "mtf_setup"
     config = LivePaperTraderConfig(
         live_signal_path=Path(args.live_signal),
         state_path=Path(args.state_path),
-        strategy_id=args.strategy_id,
-        selected_alias=args.selected_alias,
+        strategy_id=strategy_id,
+        selected_alias=selected_alias,
         direction=direction,
         signal_mode=args.signal_mode,
-        strategy_spec=LiveStrategySpec(session=args.strategy_session),
+        strategy_spec=LiveStrategySpec(
+            strategy_id=strategy_id,
+            selected_alias=selected_alias,
+            family=args.strategy_family,
+            session=args.strategy_session,
+            htf_mode=args.htf_mode,
+            imbalance_threshold=0.3 if args.imbalance_threshold is None else args.imbalance_threshold,
+        ),
         strategy_signal=LiveStrategySignalConfig(
             history_path=Path(args.history_path),
             max_history_minutes=args.max_history_minutes,

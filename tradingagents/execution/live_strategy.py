@@ -9,6 +9,12 @@ from typing import Any
 
 import pandas as pd
 
+from tradingagents.backtesting.multi_timeframe_setup import (
+    MultiTimeframeSetupSpec,
+    evaluate_multi_timeframe_setup_signal,
+    prepare_multi_timeframe_features,
+)
+
 from .ibkr import IBKRContractSpec, IBKRPaperBroker
 from .live_signal import LiveSignalConfig, build_live_signal_row
 
@@ -28,6 +34,7 @@ class LiveStrategySpec:
     max_hold_minutes: int = 6
     exit_mode: str = "reverse"
     session: str = "europe"
+    htf_mode: str = "off"
     volatility_filter: str = "all"
     imbalance_threshold: float = 0.3
 
@@ -56,8 +63,6 @@ def build_strategy_live_signal_row(
     strategy_config = strategy_config or LiveStrategySignalConfig()
     if signal_config.strategy_id != strategy_spec.strategy_id:
         raise ValueError(f"unsupported live strategy: {signal_config.strategy_id}")
-    if strategy_spec.family != "mean_reversion":
-        raise ValueError(f"unsupported live strategy family: {strategy_spec.family}")
     timestamp = _utc_now(now)
     active_broker = broker or IBKRPaperBroker()
     connection = active_broker.connect()
@@ -71,7 +76,17 @@ def build_strategy_live_signal_row(
     _append_market_event(strategy_config.history_path, market_event)
     history = _load_recent_history(strategy_config.history_path, timestamp, strategy_config.max_history_minutes)
     bars = _build_minute_bars(history)
-    evaluation = evaluate_mean_reversion_signal(bars, strategy_spec, min_bars=strategy_config.min_bars)
+    if strategy_spec.family == "mean_reversion":
+        evaluation = evaluate_mean_reversion_signal(bars, strategy_spec, min_bars=strategy_config.min_bars)
+    elif strategy_spec.family == "mtf_setup":
+        mtf_features = prepare_multi_timeframe_features(bars, spec=_mtf_spec(strategy_spec))
+        evaluation = evaluate_multi_timeframe_setup_signal(
+            mtf_features,
+            _mtf_spec(strategy_spec),
+            min_bars=strategy_config.min_bars,
+        )
+    else:
+        raise ValueError(f"unsupported live strategy family: {strategy_spec.family}")
     if not evaluation["triggered"]:
         raise ValueError(json.dumps({"reason": "no_strategy_signal", **evaluation}, sort_keys=True, default=str))
     direction = int(evaluation["direction"])
@@ -99,6 +114,10 @@ def build_strategy_live_signal_row(
         "strategy_imbalance": evaluation.get("imbalance"),
         "strategy_bars": evaluation.get("bars"),
         "signal_source": f"strategy:{strategy_spec.strategy_id}:{evaluation['side']}",
+        "setup_confidence": evaluation.get("confidence", ""),
+        "setup_htf_trend": evaluation.get("htf_trend", ""),
+        "setup_mtf_reclaim": evaluation.get("mtf_reclaim", ""),
+        "setup_ltf_trigger": evaluation.get("ltf_trigger", ""),
     }
 
 
@@ -167,6 +186,17 @@ def evaluate_mean_reversion_signal(
         "minute_of_day": minute,
         "session": spec.session,
     }
+
+
+def _mtf_spec(spec: LiveStrategySpec) -> MultiTimeframeSetupSpec:
+    return MultiTimeframeSetupSpec(
+        name=spec.strategy_id,
+        session=spec.session,
+        htf_mode=spec.htf_mode,
+        imbalance_threshold=spec.imbalance_threshold,
+        min_hold_minutes=spec.min_hold_minutes,
+        max_hold_minutes=spec.max_hold_minutes,
+    )
 
 
 def _order_ready_snapshot(broker: IBKRPaperBroker, config: LiveSignalConfig) -> dict[str, Any]:
