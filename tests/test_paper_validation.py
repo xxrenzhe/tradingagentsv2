@@ -8,11 +8,13 @@ from tradingagents.execution.ibkr import IBKRPaperBroker, IBKRPaperRiskConfig
 from tradingagents.execution.live_paper_trader import (
     LivePaperTraderConfig,
     LivePaperTraderDaemonConfig,
+    _sync_execution_logs,
     run_live_paper_trader_daemon,
     run_live_paper_trader_once,
 )
 from tradingagents.execution.live_signal import LiveSignalConfig, build_live_signal_row, write_live_signal
 from tradingagents.execution.paper_runner import PaperDaemonConfig, PaperRunnerConfig, run_adaptive_portfolio_paper_daemon, run_adaptive_portfolio_paper_once
+from tradingagents.execution.paper_report import PaperValidationGateConfig
 from tradingagents.execution.paper_validation import build_paper_intent_from_trade, select_trade_sample
 from tradingagents.execution.tick_recorder import IBKRTickRecorderConfig
 from tradingagents.execution.trade_log import append_execution_fill_log
@@ -406,6 +408,85 @@ def test_live_paper_trader_blocks_existing_exposure(tmp_path):
     assert pd.read_csv(tmp_path / "live.csv").iloc[0]["ibkr_ask"] == 18000.25
 
 
+def test_live_paper_trader_blocks_submit_when_paper_gate_fails(tmp_path, monkeypatch):
+    broker = IBKRPaperBroker(
+        risk=IBKRPaperRiskConfig(allowed_accounts=("DU123",), allowed_symbols=("MNQ",)),
+        audit_path=tmp_path / "ibkr.jsonl",
+    )
+    broker.connect = lambda: {"status": "connected", "connected": True}
+    broker.tick_snapshot = lambda spec: {
+        "event_type": "ibkr_tick_snapshot",
+        "symbol": "MNQ",
+        "bid": 18000.0,
+        "ask": 18000.25,
+        "last": 18000.25,
+        "spread": 0.25,
+        "order_ready": True,
+    }
+    monkeypatch.setattr(
+        "tradingagents.execution.live_paper_trader.run_adaptive_once",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("runner should not be called")),
+    )
+
+    result = run_live_paper_trader_once(
+        config=LivePaperTraderConfig(
+            live_signal_path=tmp_path / "live.csv",
+            state_path=tmp_path / "state.json",
+            direction=1,
+            signal_mode="manual",
+            submit=True,
+            skip_when_position_open=False,
+            agent_audit_path=tmp_path / "agent.jsonl",
+            ibkr_audit_path=tmp_path / "ibkr.jsonl",
+        ),
+        broker=broker,
+    )
+
+    assert result["status"] == "paper_validation_blocked"
+    assert result["submitted"] is False
+    assert "paper_outcomes_below_min" in result["reason"]
+
+
+def test_live_paper_trader_accrual_mode_allows_sample_count_blocker(tmp_path, monkeypatch):
+    broker = IBKRPaperBroker(
+        risk=IBKRPaperRiskConfig(allowed_accounts=("DU123",), allowed_symbols=("MNQ",)),
+        audit_path=tmp_path / "ibkr.jsonl",
+    )
+    broker.connect = lambda: {"status": "connected", "connected": True}
+    broker.tick_snapshot = lambda spec: {
+        "event_type": "ibkr_tick_snapshot",
+        "symbol": "MNQ",
+        "bid": 18000.0,
+        "ask": 18000.25,
+        "last": 18000.25,
+        "spread": 0.25,
+        "order_ready": True,
+    }
+    monkeypatch.setattr(
+        "tradingagents.execution.live_paper_trader.run_adaptive_once",
+        lambda runner_config, broker, gate: {"status": "submitted", "submitted": True},
+    )
+
+    result = run_live_paper_trader_once(
+        config=LivePaperTraderConfig(
+            live_signal_path=tmp_path / "live.csv",
+            state_path=tmp_path / "state.json",
+            direction=1,
+            signal_mode="manual",
+            submit=True,
+            skip_when_position_open=False,
+            paper_validation_accrual_mode=True,
+            paper_validation_gate=PaperValidationGateConfig(min_ibkr_ready=0, min_ibkr_submitted=0),
+            agent_audit_path=tmp_path / "agent.jsonl",
+            ibkr_audit_path=tmp_path / "ibkr.jsonl",
+        ),
+        broker=broker,
+    )
+
+    assert result["status"] == "submitted"
+    assert result["submitted"] is True
+
+
 def test_live_paper_trader_daemon_runs_one_iteration(tmp_path):
     broker = IBKRPaperBroker(
         risk=IBKRPaperRiskConfig(allowed_accounts=("DU123",), allowed_symbols=("MNQ",)),
@@ -738,6 +819,55 @@ def test_execution_fill_log_is_idempotent_by_exec_id(tmp_path):
     content = (tmp_path / "tradelogs" / "2026-05-04.md").read_text(encoding="utf-8")
     assert content.count("- 成交ID：`exec-fill-1`") == 1
     assert "IBKR 实际成交回填" in content
+
+
+def test_execution_sync_records_high_confidence_paper_outcomes(tmp_path):
+    trade_log_dir = tmp_path / "tradelogs"
+    trade_log_dir.mkdir()
+    (trade_log_dir / "2026-05-04.md").write_text(
+        "# 交易记录 2026-05-04\n\n"
+        "## 2026-05-04T14:04:58+00:00 - 买入开多 1 MNQ\n\n"
+        "- 账户：`DU123`\n"
+        "- 策略：`adaptive_defensive_mr`\n"
+        "- 方向：`做多`\n"
+        "- 入场：`current_market_ask` @ `27869.5`，盘口 bid/ask/last=`27869.25`/`27869.5`/`27869.5`\n"
+        "- 止损/止盈：`27853.5` / `27893.5`\n"
+        "- 订单ID：`ibkr_intent_sync_1`\n\n",
+        encoding="utf-8",
+    )
+
+    class FakeBroker:
+        def execution_fills(self, symbol):
+            assert symbol == "MNQ"
+            return [
+                {
+                    "contract": {"symbol": "MNQ", "localSymbol": "MNQM6"},
+                    "execution": {
+                        "exec_id": "exec-sync-1",
+                        "time": "2026-05-04T14:09:59+00:00",
+                        "account": "DU123",
+                        "side": "SLD",
+                        "shares": 1,
+                        "price": 27893.5,
+                        "order_id": 257,
+                    },
+                }
+            ]
+
+    result = _sync_execution_logs(
+        FakeBroker(),
+        LivePaperTraderConfig(
+            strategy_id="adaptive_defensive_mr",
+            trade_log_dir=trade_log_dir,
+            agent_audit_path=tmp_path / "agent.jsonl",
+        ),
+    )
+
+    assert result["paper_outcomes"]["recorded"] == 1
+    assert result["paper_outcomes"]["high_confidence"] == 1
+    rows = (tmp_path / "agent.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(rows) == 1
+    assert '"intent_id": "ibkr_intent_sync_1"' in rows[0]
 
 
 def test_submitted_paper_order_logs_before_tick_recording_failure(tmp_path, monkeypatch):
@@ -1291,6 +1421,144 @@ def test_check_paper_automation_status_reports_blockers(tmp_path, monkeypatch, c
     assert '"paper_submit_status": "blocked"' in output
     assert "live_signal_missing" in output
     assert "market_data_not_ready" in output
+
+
+def test_check_paper_automation_status_flags_skip_gate_daemon(tmp_path, monkeypatch, capsys):
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "check_paper_automation_status.py"
+    spec = importlib.util.spec_from_file_location("check_paper_automation_status_skip_gate", script_path)
+    script = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(script)
+    live_signal = tmp_path / "live.csv"
+    pd.DataFrame(
+        [
+            {
+                "entry_ts": pd.Timestamp.utcnow().isoformat(),
+                "actual_entry_ts": pd.Timestamp.utcnow().isoformat(),
+                "exit_ts": pd.Timestamp.utcnow().isoformat(),
+                "direction": 1,
+                "entry_price": 18000.25,
+                "portfolio_rule": "best_strategy",
+                "selected_alias": "best_strategy",
+            }
+        ]
+    ).to_csv(live_signal, index=False)
+
+    class FakeSession:
+        @classmethod
+        def from_env(cls):
+            return cls()
+
+        def preflight(self):
+            return {
+                "readiness": {"status": "ready", "missing_requirements": []},
+                "connection": {"connected": True},
+                "market_data": {"order_ready": True},
+            }
+
+    monkeypatch.setattr(script, "IBKRPaperTradingSession", FakeSession)
+    monkeypatch.setattr(
+        script,
+        "_daemon_status",
+        lambda pattern: {
+            "running": True,
+            "submit_enabled": True,
+            "skip_paper_validation_gate_enabled": True,
+            "pids": ["123"],
+            "submit_pids": ["123"],
+            "skip_paper_validation_gate_pids": ["123"],
+        },
+    )
+    monkeypatch.setattr(script, "summarize_paper_audits", lambda **kwargs: {"validation_gate": {"status": "pass", "blockers": []}})
+    monkeypatch.setattr("sys.argv", ["check_paper_automation_status.py", "--live-signal", str(live_signal)])
+
+    assert script.main() == 2
+    output = capsys.readouterr().out
+    assert "skip_paper_validation_gate_daemon_running" in output
+
+
+def test_daemon_status_detects_accrual_and_skip_gate_flags(monkeypatch):
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "check_paper_automation_status.py"
+    spec = importlib.util.spec_from_file_location("check_paper_automation_status_daemon_flags", script_path)
+    script = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(script)
+
+    class FakeCompleted:
+        stdout = (
+            " 123 .venv/bin/python scripts/run_ibkr_live_paper_trader.py --daemon --submit --paper-validation-accrual-mode\n"
+            " 456 .venv/bin/python scripts/run_ibkr_live_paper_trader.py --daemon --submit --skip-paper-validation-gate\n"
+        )
+
+    monkeypatch.setattr(script.subprocess, "run", lambda *args, **kwargs: FakeCompleted())
+    monkeypatch.setattr(script.os, "getpid", lambda: 999)
+
+    status = script._daemon_status("run_ibkr_live_paper_trader.py --daemon")
+
+    assert status["submit_enabled"] is True
+    assert status["paper_validation_accrual_mode_enabled"] is True
+    assert status["skip_paper_validation_gate_enabled"] is True
+    assert status["paper_validation_accrual_pids"] == ["123"]
+    assert status["skip_paper_validation_gate_pids"] == ["456"]
+
+
+def test_check_paper_automation_status_reports_accrual_allowed(tmp_path, monkeypatch, capsys):
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "check_paper_automation_status.py"
+    spec = importlib.util.spec_from_file_location("check_paper_automation_status_accrual", script_path)
+    script = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(script)
+    live_signal = tmp_path / "live.csv"
+    pd.DataFrame(
+        [
+            {
+                "entry_ts": pd.Timestamp.utcnow().isoformat(),
+                "actual_entry_ts": pd.Timestamp.utcnow().isoformat(),
+                "exit_ts": pd.Timestamp.utcnow().isoformat(),
+                "direction": 1,
+                "entry_price": 18000.25,
+                "portfolio_rule": "best_strategy",
+                "selected_alias": "best_strategy",
+            }
+        ]
+    ).to_csv(live_signal, index=False)
+
+    class FakeSession:
+        @classmethod
+        def from_env(cls):
+            return cls()
+
+        def preflight(self):
+            return {
+                "readiness": {"status": "ready", "missing_requirements": []},
+                "connection": {"connected": True},
+                "market_data": {"order_ready": True},
+            }
+
+    monkeypatch.setattr(script, "IBKRPaperTradingSession", FakeSession)
+    monkeypatch.setattr(script, "_daemon_status", lambda pattern: {"running": True, "submit_enabled": True, "pids": ["123"], "submit_pids": ["123"]})
+    monkeypatch.setattr(
+        script,
+        "summarize_paper_audits",
+        lambda **kwargs: {"validation_gate": {"status": "blocked", "blockers": ["paper_outcomes_below_min:16<20"]}},
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "check_paper_automation_status.py",
+            "--live-signal",
+            str(live_signal),
+            "--paper-validation-accrual-mode",
+        ],
+    )
+
+    assert script.main() == 0
+    output = capsys.readouterr().out
+    assert '"paper_submit_status": "ready"' in output
+    assert '"live_candidate_status": "blocked"' in output
+    assert '"strict_live_candidate_status": "blocked"' in output
+    assert '"paper_validation_accrual_status": "ready"' in output
+    assert '"paper_validation_accrual_allowed": true' in output
 
 
 def test_check_paper_automation_status_blocks_dry_run_daemon(tmp_path, monkeypatch, capsys):

@@ -17,8 +17,10 @@ from .live_strategy import (
     build_strategy_live_signal_row,
 )
 from .paper_runner import PaperRunnerConfig, run_adaptive_portfolio_paper_once
+from .paper_report import PaperValidationGateConfig, summarize_paper_audits
 from .tick_recorder import IBKRTickRecorderConfig
 from .trade_log import append_execution_fill_log
+from .trade_outcome_inference import infer_outcomes, record_outcomes
 
 DEFAULT_LIVE_STRATEGY_ID = BEST_MEAN_REVERSION_STRATEGY_ID
 DEFAULT_LIVE_SELECTED_ALIAS = BEST_MEAN_REVERSION_ALIAS
@@ -48,6 +50,13 @@ class LivePaperTraderConfig:
     skip_when_position_open: bool = True
     trade_log_dir: Path = Path("docs/Strategy/tradelogs")
     sync_execution_logs: bool = True
+    sync_paper_outcomes: bool = True
+    agent_audit_path: Path = Path(".tmp/agent-gate-audit.jsonl")
+    ibkr_audit_path: Path = Path(".tmp/ibkr-paper-audit.jsonl")
+    paper_validation_gate_enabled: bool = True
+    paper_validation_accrual_mode: bool = False
+    paper_validation_gate: PaperValidationGateConfig = field(default_factory=PaperValidationGateConfig)
+    update_memory_from_outcomes: bool = False
     tick_recorder: IBKRTickRecorderConfig = field(default_factory=IBKRTickRecorderConfig)
 
 
@@ -149,6 +158,18 @@ def run_live_paper_trader_once(
             _append_live_audit(config.state_path, result)
             return result
 
+    paper_gate = _paper_validation_gate(config) if config.submit and config.paper_validation_gate_enabled else None
+    if paper_gate is not None and not _paper_gate_allows_submit(paper_gate, accrual_mode=config.paper_validation_accrual_mode):
+        result = {
+            "status": "paper_validation_blocked",
+            "submitted": False,
+            "reason": ",".join(paper_gate.get("blockers", [])) or "paper_validation_blocked",
+            "paper_validation_gate": paper_gate,
+            "live_signal": row,
+        }
+        _append_live_audit(config.state_path, result)
+        return result
+
     runner_config = PaperRunnerConfig(
         trades_path=config.live_signal_path,
         state_path=config.state_path,
@@ -208,6 +229,25 @@ def _append_live_audit(state_path: Path, event: dict[str, Any]) -> None:
         handle.write(json.dumps({"event_type": "ibkr_live_paper_trader", **event}, sort_keys=True, default=str) + "\n")
 
 
+def _paper_validation_gate(config: LivePaperTraderConfig) -> dict[str, Any]:
+    summary = summarize_paper_audits(
+        agent_audit_path=config.agent_audit_path,
+        ibkr_audit_path=config.ibkr_audit_path,
+        gate_config=config.paper_validation_gate,
+        strategy_id=config.strategy_id,
+    )
+    return summary["validation_gate"]
+
+
+def _paper_gate_allows_submit(gate: dict[str, Any], *, accrual_mode: bool) -> bool:
+    if gate.get("status") == "pass":
+        return True
+    if not accrual_mode:
+        return False
+    blockers = list(gate.get("blockers", []))
+    return bool(blockers) and all(str(blocker).startswith("paper_outcomes_below_min:") for blocker in blockers)
+
+
 def _sync_execution_logs(broker: IBKRPaperBroker, config: LivePaperTraderConfig) -> dict[str, Any]:
     if not config.sync_execution_logs:
         return {"status": "disabled", "fills": 0}
@@ -218,9 +258,29 @@ def _sync_execution_logs(broker: IBKRPaperBroker, config: LivePaperTraderConfig)
             path = append_execution_fill_log(fill, log_dir=config.trade_log_dir)
             if path is not None:
                 paths.append(str(path))
-        return {"status": "synced", "fills": len(fills), "paths": sorted(set(paths))}
+        outcome_sync = _sync_paper_outcomes(config) if paths else {"status": "skipped", "recorded": 0, "reason": "no_trade_log_paths"}
+        return {"status": "synced", "fills": len(fills), "paths": sorted(set(paths)), "paper_outcomes": outcome_sync}
     except Exception as exc:
         return {"status": "error", "fills": 0, "reason": str(exc) or exc.__class__.__name__}
+
+
+def _sync_paper_outcomes(config: LivePaperTraderConfig) -> dict[str, Any]:
+    if not config.sync_paper_outcomes:
+        return {"status": "disabled", "recorded": 0}
+    outcomes = infer_outcomes(config.trade_log_dir, strategy_id=config.strategy_id)
+    high_confidence = [outcome for outcome in outcomes if outcome.confidence == "target_or_stop_hit"]
+    recorded = record_outcomes(
+        outcomes,
+        audit_path=config.agent_audit_path,
+        update_memory=config.update_memory_from_outcomes,
+    )
+    return {
+        "status": "synced",
+        "outcomes": len(outcomes),
+        "high_confidence": len(high_confidence),
+        "recorded": recorded,
+        "audit_path": str(config.agent_audit_path),
+    }
 
 
 def _audit_result(result: dict[str, Any]) -> dict[str, Any]:

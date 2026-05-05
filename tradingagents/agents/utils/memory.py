@@ -115,52 +115,31 @@ class TradingMemoryLog:
         if not self._log_path or not self._log_path.exists():
             return
 
-        text = self._log_path.read_text(encoding="utf-8")
-        blocks = text.split(self._SEPARATOR)
-
-        pending_prefix = f"[{trade_date} | {ticker} |"
         raw_pct = f"{raw_return:+.1%}"
         alpha_pct = f"{alpha_return:+.1%}"
+        self._update_pending_entry(
+            ticker=ticker,
+            trade_date=trade_date,
+            outcome_fields=[raw_pct, alpha_pct, f"{holding_days}d"],
+            reflection=reflection,
+        )
 
-        updated = False
-        new_blocks = []
-        for block in blocks:
-            stripped = block.strip()
-            if not stripped:
-                new_blocks.append(block)
-                continue
-
-            lines = stripped.splitlines()
-            tag_line = lines[0].strip()
-
-            if (
-                not updated
-                and tag_line.startswith(pending_prefix)
-                and tag_line.endswith("| pending]")
-            ):
-                # Parse rating from the existing pending tag
-                fields = [f.strip() for f in tag_line[1:-1].split("|")]
-                rating = fields[2]
-                new_tag = (
-                    f"[{trade_date} | {ticker} | {rating}"
-                    f" | {raw_pct} | {alpha_pct} | {holding_days}d]"
-                )
-                rest = "\n".join(lines[1:])
-                new_blocks.append(
-                    f"{new_tag}\n\n{rest.lstrip()}\n\nREFLECTION:\n{reflection}"
-                )
-                updated = True
-            else:
-                new_blocks.append(block)
-
-        if not updated:
-            return
-
-        new_blocks = self._apply_rotation(new_blocks)
-        new_text = self._SEPARATOR.join(new_blocks)
-        tmp_path = self._log_path.with_suffix(".tmp")
-        tmp_path.write_text(new_text, encoding="utf-8")
-        tmp_path.replace(self._log_path)
+    def update_with_paper_outcome(
+        self,
+        ticker: str,
+        trade_date: str,
+        points: float,
+        reflection: str,
+        holding: str = "paper",
+    ) -> None:
+        """Resolve a pending entry using paper/futures points instead of equity returns."""
+        points_text = f"{points:+.2f}pts"
+        self._update_pending_entry(
+            ticker=ticker,
+            trade_date=trade_date,
+            outcome_fields=[points_text, "paper", holding],
+            reflection=reflection,
+        )
 
     def batch_update_with_outcomes(self, updates: List[dict]) -> None:
         """Apply multiple outcome updates in a single read + atomic write.
@@ -217,6 +196,58 @@ class TradingMemoryLog:
         tmp_path.replace(self._log_path)
 
     # --- Helpers ---
+
+    def _update_pending_entry(
+        self,
+        *,
+        ticker: str,
+        trade_date: str,
+        outcome_fields: List[str],
+        reflection: str,
+    ) -> None:
+        if not self._log_path or not self._log_path.exists():
+            return
+
+        text = self._log_path.read_text(encoding="utf-8")
+        blocks = text.split(self._SEPARATOR)
+
+        pending_prefix = f"[{trade_date} | {ticker} |"
+        updated = False
+        new_blocks = []
+        for block in blocks:
+            stripped = block.strip()
+            if not stripped:
+                new_blocks.append(block)
+                continue
+
+            lines = stripped.splitlines()
+            tag_line = lines[0].strip()
+
+            if (
+                not updated
+                and tag_line.startswith(pending_prefix)
+                and tag_line.endswith("| pending]")
+            ):
+                fields = [f.strip() for f in tag_line[1:-1].split("|")]
+                rating = fields[2]
+                suffix = " | ".join(outcome_fields)
+                new_tag = f"[{trade_date} | {ticker} | {rating} | {suffix}]"
+                rest = "\n".join(lines[1:])
+                new_blocks.append(
+                    f"{new_tag}\n\n{rest.lstrip()}\n\nREFLECTION:\n{reflection}"
+                )
+                updated = True
+            else:
+                new_blocks.append(block)
+
+        if not updated:
+            return
+
+        new_blocks = self._apply_rotation(new_blocks)
+        new_text = self._SEPARATOR.join(new_blocks)
+        tmp_path = self._log_path.with_suffix(".tmp")
+        tmp_path.write_text(new_text, encoding="utf-8")
+        tmp_path.replace(self._log_path)
 
     def _apply_rotation(self, blocks: List[str]) -> List[str]:
         """Drop oldest resolved blocks when their count exceeds max_entries.

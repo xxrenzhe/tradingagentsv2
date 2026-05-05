@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from tradingagents.agents.utils.rating import parse_rating
+from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
@@ -251,6 +252,7 @@ class PaperTradeOutcome:
     symbol: str = "MNQ"
     action: str = "BUY"
     quantity: int = 1
+    trade_date: str | None = None
     entry_time: str | None = None
     exit_time: str | None = None
     entry_price: float | None = None
@@ -276,7 +278,10 @@ def record_agent_gate_outcome(
     outcome: PaperTradeOutcome,
     *,
     audit_path: Path | str | None = None,
+    memory_log_path: Path | str | None = None,
+    update_memory: bool = False,
 ) -> dict[str, Any]:
+    points = outcome.normalized_points
     event = {
         "event_type": "agent_gate_paper_outcome",
         "created_at": _now(),
@@ -285,11 +290,12 @@ def record_agent_gate_outcome(
         "symbol": outcome.symbol,
         "action": outcome.action.upper(),
         "quantity": outcome.quantity,
+        "trade_date": outcome.trade_date,
         "entry_time": outcome.entry_time,
         "exit_time": outcome.exit_time,
         "entry_price": outcome.entry_price,
         "exit_price": outcome.exit_price,
-        "points": outcome.normalized_points,
+        "points": points,
         "commission": outcome.commission,
         "slippage_points": outcome.slippage_points,
         "exit_reason": outcome.exit_reason,
@@ -300,7 +306,60 @@ def record_agent_gate_outcome(
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(event, sort_keys=True, default=str) + "\n")
+    if update_memory and points is not None:
+        _record_outcome_in_memory(outcome, points, memory_log_path=memory_log_path)
     return event
+
+
+def _record_outcome_in_memory(
+    outcome: PaperTradeOutcome,
+    points: float,
+    *,
+    memory_log_path: Path | str | None = None,
+) -> None:
+    trade_date = _trade_date_from_outcome(outcome)
+    if not trade_date:
+        return
+    memory_path = memory_log_path or DEFAULT_CONFIG.get("memory_log_path")
+    if not memory_path:
+        return
+    reflection = _paper_outcome_reflection(outcome, points)
+    TradingMemoryLog({"memory_log_path": str(memory_path)}).update_with_paper_outcome(
+        ticker=outcome.symbol,
+        trade_date=trade_date,
+        points=points,
+        reflection=reflection,
+        holding=_paper_holding_label(outcome),
+    )
+
+
+def _trade_date_from_outcome(outcome: PaperTradeOutcome) -> str | None:
+    if outcome.trade_date:
+        return str(outcome.trade_date)[:10]
+    timestamp = outcome.entry_time or outcome.exit_time
+    if not timestamp:
+        return None
+    return str(timestamp)[:10]
+
+
+def _paper_holding_label(outcome: PaperTradeOutcome) -> str:
+    if outcome.entry_time and outcome.exit_time:
+        return f"{outcome.entry_time}->{outcome.exit_time}"
+    return outcome.source
+
+
+def _paper_outcome_reflection(outcome: PaperTradeOutcome, points: float) -> str:
+    direction = "profitable" if points > 0 else "losing" if points < 0 else "flat"
+    pieces = [
+        f"Paper outcome was {direction}: {outcome.action.upper()} {outcome.symbol} produced {points:+.2f} points.",
+    ]
+    if outcome.exit_reason:
+        pieces.append(f"Exit reason was {outcome.exit_reason}.")
+    if outcome.strategy_id:
+        pieces.append(f"Use this as verified feedback for strategy {outcome.strategy_id}, not an untested prediction.")
+    if outcome.notes:
+        pieces.append(str(outcome.notes))
+    return " ".join(pieces)
 
 
 def build_candidate_trade_context(

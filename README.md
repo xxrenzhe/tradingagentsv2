@@ -190,6 +190,21 @@ To run the guarded live best-strategy paper loop in dry-run mode:
 
 The default signal mode now evaluates `adv_wf_best_mean_reversion_lb6_thr0.8_min1_max6_reverse_europe_all_imb0.3` instead of using a fixed BUY/SELL direction. It appends live market snapshots to `.tmp/mbp-live-market-history.jsonl` and blocks with `signal_blocked` unless the strategy has enough minute bars, crosses the mean-reversion z-score threshold, and has aligned bid/ask size imbalance. Paper trading defaults to `--strategy-session all`; pass `--strategy-session europe` to restore the original Europe-only window. For continuous monitoring, add `--daemon --max-iterations 0`. Add `--submit` only after `scripts/check_paper_automation_status.py` reports `paper_submit_status: ready`; without `--submit`, the live loop writes a fresh signal only when the strategy triggers, builds the bracket intent, runs risk checks, records audit/tick evidence, and does not place orders.
 
+When the only paper-validation blocker is insufficient outcome count, use explicit accrual mode to continue collecting IBKR paper outcomes without treating the strategy as fully validated:
+
+```bash
+.venv/bin/python scripts/check_paper_automation_status.py \
+  --strategy-id adv_wf_best_mean_reversion_lb6_thr0.8_min1_max6_reverse_europe_all_imb0.3 \
+  --paper-validation-accrual-mode
+
+.venv/bin/python scripts/run_ibkr_live_paper_trader.py \
+  --daemon --max-iterations 0 --submit --paper-validation-accrual-mode
+```
+
+Accrual mode still blocks if readiness, net points, win rate, or consecutive-loss gates fail. It only bypasses `paper_outcomes_below_min:*` so the paper account can collect the remaining validation samples. Omit `--paper-validation-accrual-mode` for fully validated real-time paper execution.
+
+In status output, `live_candidate_status` / `strict_live_candidate_status` remain `blocked` until the full validation gate passes. `paper_validation_accrual_status` is the separate field to use when intentionally collecting the remaining paper-validation samples.
+
 Manual top-of-book signals are still available for diagnostics only:
 
 ```bash

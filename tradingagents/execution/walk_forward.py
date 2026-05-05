@@ -106,6 +106,7 @@ def _seed_training_outcomes(train: pd.DataFrame, audit_path: Path) -> None:
                 source="walk_forward_train",
             ),
             audit_path=audit_path,
+            update_memory=False,
         )
 
 

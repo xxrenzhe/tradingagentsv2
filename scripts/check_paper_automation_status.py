@@ -31,6 +31,7 @@ def main() -> int:
     parser.add_argument("--preflight-retry-seconds", type=float, default=1.0)
     parser.add_argument("--client-id", type=int, default=None, help="Override IBKR client id for status preflight.")
     parser.add_argument("--strategy-id", default=None, help="Only count paper validation events for this strategy_id.")
+    parser.add_argument("--paper-validation-accrual-mode", action="store_true")
     args = parser.parse_args()
 
     daemon = _daemon_status(args.daemon_pattern)
@@ -47,21 +48,37 @@ def main() -> int:
         paper_submit_blockers.append("daemon_not_running")
     elif not daemon.get("submit_enabled"):
         paper_submit_blockers.append("submit_daemon_not_running")
+    if daemon.get("skip_paper_validation_gate_enabled"):
+        paper_submit_blockers.append("skip_paper_validation_gate_daemon_running")
     if live_signal["status"] != "fresh":
         paper_submit_blockers.append(f"live_signal_{live_signal['status']}")
     if preflight["readiness"]["status"] != "ready":
         paper_submit_blockers.extend(preflight["readiness"].get("missing_requirements", []))
     live_candidate_blockers = list(paper_summary["validation_gate"].get("blockers", []))
-    if paper_summary["validation_gate"]["status"] != "pass":
-        live_candidate_blockers = list(paper_summary["validation_gate"].get("blockers", []))
+    accrual_allowed = _paper_validation_accrual_allowed(
+        paper_summary["validation_gate"],
+        enabled=args.paper_validation_accrual_mode,
+    )
     paper_submit_status = "ready" if not paper_submit_blockers else "blocked"
-    live_candidate_status = "ready" if paper_submit_status == "ready" and not live_candidate_blockers else "blocked"
+    strict_live_candidate_status = (
+        "ready"
+        if paper_submit_status == "ready" and not live_candidate_blockers
+        else "blocked"
+    )
+    accrual_candidate_status = (
+        "ready"
+        if paper_submit_status == "ready" and (not live_candidate_blockers or accrual_allowed)
+        else "blocked"
+    )
     result = {
         "status": paper_submit_status,
         "paper_submit_status": paper_submit_status,
         "paper_submit_blockers": paper_submit_blockers,
-        "live_candidate_status": live_candidate_status,
+        "live_candidate_status": strict_live_candidate_status,
+        "strict_live_candidate_status": strict_live_candidate_status,
+        "paper_validation_accrual_status": accrual_candidate_status,
         "live_candidate_blockers": live_candidate_blockers,
+        "paper_validation_accrual_allowed": accrual_allowed,
         "daemon": daemon,
         "live_signal": live_signal,
         "ibkr_preflight": {
@@ -74,6 +91,15 @@ def main() -> int:
     }
     print(json.dumps(result, indent=2, sort_keys=True, default=str))
     return 0 if paper_submit_status == "ready" else 2
+
+
+def _paper_validation_accrual_allowed(gate: dict[str, object], *, enabled: bool) -> bool:
+    if not enabled:
+        return False
+    if gate.get("status") == "pass":
+        return True
+    blockers = list(gate.get("blockers", []))
+    return bool(blockers) and all(str(blocker).startswith("paper_outcomes_below_min:") for blocker in blockers)
 
 
 def _daemon_status(pattern: str) -> dict[str, object]:
@@ -95,16 +121,32 @@ def _daemon_status(pattern: str) -> dict[str, object]:
         if tokens and not all(token in command for token in tokens):
             continue
         submit_enabled = "--submit" in args
-        processes.append({"pid": pid, "command": command, "submit_enabled": submit_enabled})
+        accrual_mode = "--paper-validation-accrual-mode" in args
+        skip_paper_validation_gate = "--skip-paper-validation-gate" in args
+        processes.append(
+            {
+                "pid": pid,
+                "command": command,
+                "submit_enabled": submit_enabled,
+                "paper_validation_accrual_mode": accrual_mode,
+                "skip_paper_validation_gate": skip_paper_validation_gate,
+            }
+        )
     pids = [str(process["pid"]) for process in processes]
     submit_pids = [str(process["pid"]) for process in processes if process["submit_enabled"]]
     dry_run_pids = [str(process["pid"]) for process in processes if not process["submit_enabled"]]
+    accrual_pids = [str(process["pid"]) for process in processes if process.get("paper_validation_accrual_mode")]
+    skip_gate_pids = [str(process["pid"]) for process in processes if process.get("skip_paper_validation_gate")]
     return {
         "running": bool(processes),
         "submit_enabled": bool(submit_pids),
+        "paper_validation_accrual_mode_enabled": bool(accrual_pids),
+        "skip_paper_validation_gate_enabled": bool(skip_gate_pids),
         "pids": pids,
         "submit_pids": submit_pids,
         "dry_run_pids": dry_run_pids,
+        "paper_validation_accrual_pids": accrual_pids,
+        "skip_paper_validation_gate_pids": skip_gate_pids,
         "processes": processes,
     }
 

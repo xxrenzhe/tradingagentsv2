@@ -80,6 +80,7 @@ def replay_gate_on_trades(
                     source="paper" if allowed else "shadow_backtest",
                 ),
                 audit_path=replay_config.audit_path,
+                update_memory=False,
             )
         rows.append(
             {

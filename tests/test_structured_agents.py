@@ -12,6 +12,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from tradingagents.agents.managers.research_manager import create_research_manager
+from tradingagents.agents.researchers.bear_researcher import create_bear_researcher
+from tradingagents.agents.researchers.bull_researcher import create_bull_researcher
+from tradingagents.agents.risk_mgmt.aggressive_debator import create_aggressive_debator
+from tradingagents.agents.risk_mgmt.conservative_debator import create_conservative_debator
+from tradingagents.agents.risk_mgmt.neutral_debator import create_neutral_debator
 from tradingagents.agents.schemas import (
     PortfolioRating,
     ResearchPlan,
@@ -93,11 +98,13 @@ class TestRenderResearchPlan:
 # ---------------------------------------------------------------------------
 
 
-def _make_trader_state():
-    return {
+def _make_trader_state(**overrides):
+    state = {
         "company_of_interest": "NVDA",
         "investment_plan": "**Recommendation**: Buy\n**Rationale**: ...\n**Strategic Actions**: ...",
     }
+    state.update(overrides)
+    return state
 
 
 def _structured_trader_llm(captured: dict, proposal: TraderProposal | None = None):
@@ -148,6 +155,22 @@ class TestTraderAgent:
         prompt = captured["prompt"]
         assert any("Proposed Investment Plan" in m["content"] for m in prompt)
 
+    def test_prompt_includes_memory_and_candidate_context(self):
+        captured = {}
+        llm = _structured_trader_llm(captured)
+        trader = create_trader(llm)
+        trader(
+            _make_trader_state(
+                past_context="Prior NQ long failed when spread widened after entry.",
+                candidate_trade_context="Candidate action: BUY 1 NQ 202606\nStrategy ID: adaptive_defensive_mr",
+            )
+        )
+        user_prompt = next(m["content"] for m in captured["prompt"] if m["role"] == "user")
+        assert "Lessons from prior decisions and outcomes" in user_prompt
+        assert "Prior NQ long failed" in user_prompt
+        assert "Concrete strategy candidate under review" in user_prompt
+        assert "adaptive_defensive_mr" in user_prompt
+
     def test_falls_back_to_freetext_when_structured_unavailable(self):
         plain_response = (
             "**Action**: Sell\n\nGuidance cut hits margins.\n\n"
@@ -182,8 +205,8 @@ def test_normalize_freetext_output_adds_required_trader_markers():
 # ---------------------------------------------------------------------------
 
 
-def _make_rm_state():
-    return {
+def _make_rm_state(**overrides):
+    state = {
         "company_of_interest": "NVDA",
         "investment_debate_state": {
             "history": "Bull and bear arguments here.",
@@ -194,6 +217,8 @@ def _make_rm_state():
             "count": 1,
         },
     }
+    state.update(overrides)
+    return state
 
 
 def _structured_rm_llm(captured: dict, plan: ResearchPlan | None = None):
@@ -239,6 +264,15 @@ class TestResearchManagerAgent:
         for tier in ("Buy", "Overweight", "Hold", "Underweight", "Sell"):
             assert f"**{tier}**" in prompt, f"missing {tier} in prompt"
 
+    def test_prompt_includes_past_decision_memory(self):
+        captured = {}
+        llm = _structured_rm_llm(captured)
+        rm = create_research_manager(llm)
+        rm(_make_rm_state(past_context="Past analyses of NVDA: Buy worked after volume confirmation."))
+        prompt = captured["prompt"]
+        assert "Lessons from prior decisions and outcomes" in prompt
+        assert "Buy worked after volume confirmation" in prompt
+
     def test_falls_back_to_freetext_when_structured_unavailable(self):
         plain_response = "**Recommendation**: Sell\n\n**Rationale**: ...\n\n**Strategic Actions**: ..."
         llm = MagicMock()
@@ -247,3 +281,121 @@ class TestResearchManagerAgent:
         rm = create_research_manager(llm)
         result = rm(_make_rm_state())
         assert result["investment_plan"] == plain_response
+
+
+# ---------------------------------------------------------------------------
+# Bull/Bear research debate agents: shared memory + candidate context
+# ---------------------------------------------------------------------------
+
+
+def _make_researcher_state():
+    return {
+        "market_report": "M1 reclaim after liquidity sweep.",
+        "sentiment_report": "Sentiment neutral.",
+        "news_report": "No macro shock.",
+        "fundamentals_report": "Futures contract; fundamentals not applicable.",
+        "past_context": "Prior NQ long failed when spread widened after entry.",
+        "candidate_trade_context": (
+            "Candidate action: BUY 1 NQ 202606\n"
+            "Strategy ID: adaptive_defensive_mr"
+        ),
+        "investment_debate_state": {
+            "history": "Existing investment debate.",
+            "bull_history": "",
+            "bear_history": "",
+            "current_response": "",
+            "judge_decision": "",
+            "count": 0,
+        },
+    }
+
+
+def _plain_llm(captured: dict):
+    llm = MagicMock()
+    llm.invoke.side_effect = lambda prompt: (
+        captured.__setitem__("prompt", prompt) or MagicMock(content="Research argument.")
+    )
+    return llm
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "factory,expected_prefix",
+    [
+        (create_bull_researcher, "Bull Analyst:"),
+        (create_bear_researcher, "Bear Analyst:"),
+    ],
+)
+def test_research_debators_include_memory_and_candidate_context(factory, expected_prefix):
+    captured = {}
+    researcher = factory(_plain_llm(captured))
+    result = researcher(_make_researcher_state())
+    prompt = captured["prompt"]
+    assert "Lessons from prior decisions and outcomes" in prompt
+    assert "Prior NQ long failed" in prompt
+    assert "Concrete strategy candidate under review" in prompt
+    assert "adaptive_defensive_mr" in prompt
+    assert expected_prefix in result["investment_debate_state"]["current_response"]
+
+
+# ---------------------------------------------------------------------------
+# Risk debate agents: shared memory + candidate context
+# ---------------------------------------------------------------------------
+
+
+def _make_risk_state():
+    return {
+        "market_report": "M1 trend shifted higher.",
+        "sentiment_report": "Sentiment neutral.",
+        "news_report": "No macro shock.",
+        "fundamentals_report": "Futures contract; fundamentals not applicable.",
+        "trader_investment_plan": "**Action**: Buy\n**Reasoning**: Candidate setup.",
+        "past_context": "Prior NQ breakout failed when M3 divergence appeared.",
+        "candidate_trade_context": (
+            "Candidate action: BUY 1 NQ 202606\n"
+            "Strategy ID: adaptive_defensive_mr\n"
+            "full_profit_factor=1.6891"
+        ),
+        "risk_debate_state": {
+            "history": "Existing risk debate.",
+            "aggressive_history": "",
+            "conservative_history": "",
+            "neutral_history": "",
+            "latest_speaker": "",
+            "current_aggressive_response": "",
+            "current_conservative_response": "",
+            "current_neutral_response": "",
+            "judge_decision": "",
+            "count": 0,
+        },
+    }
+
+
+def _risk_llm(captured: dict):
+    llm = MagicMock()
+    llm.invoke.side_effect = lambda prompt: (
+        captured.__setitem__("prompt", prompt) or MagicMock(content="Risk argument.")
+    )
+    return llm
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "factory,expected_speaker",
+    [
+        (create_aggressive_debator, "Aggressive"),
+        (create_conservative_debator, "Conservative"),
+        (create_neutral_debator, "Neutral"),
+    ],
+)
+def test_risk_debators_include_memory_and_candidate_context(factory, expected_speaker):
+    captured = {}
+    debator = factory(_risk_llm(captured))
+    result = debator(_make_risk_state())
+    prompt = captured["prompt"]
+    assert "Lessons from prior decisions and outcomes" in prompt
+    assert "Prior NQ breakout failed" in prompt
+    assert "Concrete strategy candidate under review" in prompt
+    assert "adaptive_defensive_mr" in prompt
+    assert "full_profit_factor=1.6891" in prompt
+    assert result["risk_debate_state"]["latest_speaker"] == expected_speaker

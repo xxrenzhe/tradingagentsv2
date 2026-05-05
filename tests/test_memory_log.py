@@ -459,6 +459,24 @@ class TestDeferredReflection:
         raw_text = (tmp_path / "trading_memory.md").read_text(encoding="utf-8")
         assert "[2026-01-10 | NVDA | Buy | +4.2% | +2.1% | 5d]\n\nDECISION:" in raw_text
 
+    def test_update_with_paper_outcome_resolves_futures_points(self, tmp_path):
+        log = make_log(tmp_path)
+        log.store_decision("NQM6", "2026-05-04", "**Rating**: Hold\nVeto weak setup.")
+        log.update_with_paper_outcome(
+            "NQM6",
+            "2026-05-04",
+            -8.25,
+            "Paper outcome confirmed the veto avoided a weak long.",
+            holding="2026-05-04T07:00:00Z->2026-05-04T07:06:00Z",
+        )
+        entries = log.load_entries()
+        assert len(entries) == 1
+        assert entries[0]["pending"] is False
+        assert entries[0]["raw"] == "-8.25pts"
+        assert entries[0]["alpha"] == "paper"
+        assert entries[0]["holding"] == "2026-05-04T07:00:00Z->2026-05-04T07:06:00Z"
+        assert "confirmed the veto" in log.get_past_context("NQM6")
+
     # Reflector.reflect_on_final_decision
 
     def test_reflect_on_final_decision_returns_llm_output(self):

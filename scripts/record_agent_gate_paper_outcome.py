@@ -21,6 +21,7 @@ def main() -> int:
     parser.add_argument("--symbol", default="MNQ")
     parser.add_argument("--action", choices=["BUY", "SELL"], required=True)
     parser.add_argument("--quantity", type=int, default=1)
+    parser.add_argument("--trade-date", default=None)
     parser.add_argument("--entry-time", default=None)
     parser.add_argument("--exit-time", default=None)
     parser.add_argument("--entry-price", type=float, default=None)
@@ -32,6 +33,8 @@ def main() -> int:
     parser.add_argument("--source", default="paper", choices=["paper", "shadow", "shadow_backtest", "manual"])
     parser.add_argument("--notes", default="")
     parser.add_argument("--audit-path", default=None)
+    parser.add_argument("--memory-log-path", default=None)
+    parser.add_argument("--no-memory-update", action="store_true")
     args = parser.parse_args()
 
     outcome = PaperTradeOutcome(
@@ -40,6 +43,7 @@ def main() -> int:
         symbol=args.symbol,
         action=args.action,
         quantity=args.quantity,
+        trade_date=args.trade_date,
         entry_time=args.entry_time,
         exit_time=args.exit_time,
         entry_price=args.entry_price,
@@ -52,7 +56,12 @@ def main() -> int:
         notes=args.notes,
     )
     audit_path = args.audit_path or AgentGateConfig.from_env().audit_path
-    event = record_agent_gate_outcome(outcome, audit_path=audit_path)
+    event = record_agent_gate_outcome(
+        outcome,
+        audit_path=audit_path,
+        memory_log_path=args.memory_log_path,
+        update_memory=not args.no_memory_update,
+    )
     print(json.dumps(event, indent=2, sort_keys=True, default=str))
     return 0
 

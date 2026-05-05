@@ -19,6 +19,7 @@ from tradingagents.execution import (
     IBKRPaperBroker,
     LivePaperTraderConfig,
     LivePaperTraderDaemonConfig,
+    PaperValidationGateConfig,
     LiveStrategySpec,
     LiveStrategySignalConfig,
     run_live_paper_trader_daemon,
@@ -56,6 +57,19 @@ def main() -> int:
     parser.add_argument("--submit", action="store_true", help="Submit to IBKR paper after preflight/risk checks. Default is dry-run.")
     parser.add_argument("--agent-gate", action="store_true", help="Require multi-agent review before submitting/dry-run.")
     parser.add_argument("--skip-preflight", action="store_true")
+    parser.add_argument("--skip-paper-validation-gate", action="store_true")
+    parser.add_argument(
+        "--paper-validation-accrual-mode",
+        action="store_true",
+        help="Allow paper submit while the only paper-validation blocker is insufficient outcome count.",
+    )
+    parser.add_argument("--min-ibkr-ready", type=int, default=1)
+    parser.add_argument("--min-ibkr-submitted", type=int, default=1)
+    parser.add_argument("--min-paper-outcomes", type=int, default=20)
+    parser.add_argument("--min-paper-net-points", type=float, default=0.0)
+    parser.add_argument("--min-paper-win-rate", type=float, default=45.0)
+    parser.add_argument("--max-consecutive-losses", type=int, default=4)
+    parser.add_argument("--max-allowed-blocker-count", type=int, default=0)
     parser.add_argument("--snapshot-attempts", type=int, default=3)
     parser.add_argument("--snapshot-retry-seconds", type=float, default=1.0)
     parser.add_argument("--allow-existing-exposure", action="store_true", help="Do not block when a position/open order already exists.")
@@ -65,6 +79,10 @@ def main() -> int:
     parser.add_argument("--max-ticks", type=int, default=60)
     parser.add_argument("--trade-log-dir", default="docs/Strategy/tradelogs")
     parser.add_argument("--no-sync-execution-logs", action="store_true")
+    parser.add_argument("--no-sync-paper-outcomes", action="store_true")
+    parser.add_argument("--agent-audit", default=".tmp/agent-gate-audit.jsonl")
+    parser.add_argument("--ibkr-audit", default=".tmp/ibkr-paper-audit.jsonl")
+    parser.add_argument("--update-memory-from-outcomes", action="store_true")
     parser.add_argument("--daemon", action="store_true")
     parser.add_argument("--interval-seconds", type=float, default=30.0)
     parser.add_argument("--max-iterations", type=int, default=1, help="Use 0 to run until stopped.")
@@ -112,11 +130,26 @@ def main() -> int:
         submit=args.submit,
         require_agent_gate=args.agent_gate,
         skip_preflight=args.skip_preflight,
+        paper_validation_gate_enabled=not args.skip_paper_validation_gate,
+        paper_validation_accrual_mode=args.paper_validation_accrual_mode,
+        paper_validation_gate=PaperValidationGateConfig(
+            min_ibkr_ready=args.min_ibkr_ready,
+            min_ibkr_submitted=args.min_ibkr_submitted,
+            min_paper_outcomes=args.min_paper_outcomes,
+            min_paper_net_points=args.min_paper_net_points,
+            min_paper_win_rate=args.min_paper_win_rate,
+            max_consecutive_losses=args.max_consecutive_losses,
+            max_allowed_blocker_count=args.max_allowed_blocker_count,
+        ),
         snapshot_attempts=args.snapshot_attempts,
         snapshot_retry_seconds=args.snapshot_retry_seconds,
         skip_when_position_open=not args.allow_existing_exposure,
         trade_log_dir=Path(args.trade_log_dir),
         sync_execution_logs=not args.no_sync_execution_logs,
+        sync_paper_outcomes=not args.no_sync_paper_outcomes,
+        agent_audit_path=Path(args.agent_audit),
+        ibkr_audit_path=Path(args.ibkr_audit),
+        update_memory_from_outcomes=args.update_memory_from_outcomes,
         tick_recorder=IBKRTickRecorderConfig(
             output_dir=Path(args.tick_output_dir),
             symbol=args.symbol.upper(),

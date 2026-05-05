@@ -1,4 +1,5 @@
 import json
+import sys
 from pathlib import Path
 
 from tradingagents.execution.agent_gate import (
@@ -254,6 +255,38 @@ def test_record_agent_gate_outcome_respects_explicit_points(tmp_path):
     assert event["points"] == 3.25
 
 
+def test_record_agent_gate_outcome_updates_trading_memory(tmp_path):
+    from tradingagents.agents.utils.memory import TradingMemoryLog
+
+    memory_path = tmp_path / "trading_memory.md"
+    log = TradingMemoryLog({"memory_log_path": str(memory_path)})
+    log.store_decision("NQM6", "2026-05-04", "**Rating**: Hold\nVeto weak setup.")
+
+    record_agent_gate_outcome(
+        PaperTradeOutcome(
+            strategy_id="adaptive_defensive_mr",
+            symbol="NQM6",
+            action="BUY",
+            trade_date="2026-05-04",
+            entry_time="2026-05-04T07:00:00Z",
+            exit_time="2026-05-04T07:06:00Z",
+            entry_price=27898.0,
+            exit_price=27890.0,
+            exit_reason="stop_loss",
+        ),
+        audit_path=tmp_path / "agent.jsonl",
+        memory_log_path=memory_path,
+        update_memory=True,
+    )
+
+    entries = log.load_entries()
+    assert entries[0]["pending"] is False
+    assert entries[0]["raw"] == "-8.00pts"
+    assert entries[0]["alpha"] == "paper"
+    assert "stop_loss" in entries[0]["reflection"]
+    assert "adaptive_defensive_mr" in log.get_past_context("NQM6")
+
+
 def test_outcome_metrics_tracks_trailing_losses():
     metrics = outcome_metrics(
         [
@@ -359,6 +392,71 @@ def test_record_agent_gate_paper_outcome_script(tmp_path, monkeypatch, capsys):
     assert '"event_type": "agent_gate_paper_outcome"' in output
     assert '"points": 10.0' in output
     assert audit_path.exists()
+
+
+def test_infer_paper_outcomes_from_tradelogs_script(tmp_path, capsys):
+    import importlib.util
+
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "infer_paper_outcomes_from_tradelogs.py"
+    spec = importlib.util.spec_from_file_location("infer_paper_outcomes_from_tradelogs", script_path)
+    script = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = script
+    spec.loader.exec_module(script)
+    log_dir = tmp_path / "tradelogs"
+    log_dir.mkdir()
+    (log_dir / "2026-05-05.md").write_text(
+        "# 交易记录 2026-05-05\n\n"
+        "## 2026-05-05T01:00:00+00:00 - 买入开多 1 MNQ\n\n"
+        "- 账户：`DU003`\n"
+        "- 策略：`adaptive_defensive_mr`\n"
+        "- 方向：`做多`\n"
+        "- 入场：`current_market_ask` @ `100.0`，盘口 bid/ask/last=`99.75`/`100.0`/`100.0`\n"
+        "- 止损/止盈：`96.0` / `106.0`\n"
+        "- 订单ID：`ibkr_intent_1`\n"
+        "## 2026-05-05T01:05:00+00:00 - 卖出成交 1.0 MNQ\n\n"
+        "- 成交价/数量：`106.0` / `1.0`\n"
+        "- 成交ID：`exec_1`\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "outcomes.csv"
+
+    outcomes = script.infer_outcomes(log_dir, strategy_id="adaptive_defensive_mr")
+    script.write_csv(output, outcomes)
+
+    assert len(outcomes) == 1
+    assert outcomes[0].points == 6.0
+    assert outcomes[0].exit_reason == "take_profit"
+    assert outcomes[0].confidence == "target_or_stop_hit"
+    assert "ibkr_intent_1" in output.read_text(encoding="utf-8")
+
+
+def test_infer_paper_outcomes_recording_is_idempotent(tmp_path):
+    from tradingagents.execution.trade_outcome_inference import InferredOutcome, record_outcomes
+
+    audit_path = tmp_path / "agent.jsonl"
+    outcome = InferredOutcome(
+        strategy_id="adaptive_defensive_mr",
+        intent_id="ibkr_intent_1",
+        symbol="MNQ",
+        action="BUY",
+        quantity=1,
+        trade_date="2026-05-05",
+        entry_time="2026-05-05T01:00:00+00:00",
+        exit_time="2026-05-05T01:05:00+00:00",
+        entry_price=100.0,
+        exit_price=106.0,
+        points=6.0,
+        exit_reason="take_profit",
+        confidence="target_or_stop_hit",
+        source_file="2026-05-05.md",
+    )
+
+    assert record_outcomes([outcome], audit_path=audit_path, update_memory=False) == 1
+    assert record_outcomes([outcome], audit_path=audit_path, update_memory=False) == 0
+    rows = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["intent_id"] == "ibkr_intent_1"
 
 
 def test_diagnose_agent_gate_veto_script_reports_primary_causes(tmp_path, monkeypatch, capsys):

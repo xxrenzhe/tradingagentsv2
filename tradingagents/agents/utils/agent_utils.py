@@ -45,6 +45,28 @@ def build_instrument_context(ticker: str) -> str:
         "preserving any exchange suffix (e.g. `.TO`, `.L`, `.HK`, `.T`)."
     )
 
+
+def build_decision_context(
+    past_context: str = "",
+    candidate_trade_context: str = "",
+) -> str:
+    """Render optional memory and concrete trade-candidate context for decision agents."""
+    sections = []
+    if past_context:
+        sections.append(
+            "**Lessons from prior decisions and outcomes:**\n"
+            f"{past_context.strip()}"
+        )
+    if candidate_trade_context:
+        sections.append(
+            "**Concrete strategy candidate under review:**\n"
+            f"{candidate_trade_context.strip()}"
+        )
+    if not sections:
+        return ""
+    return "\n\n---\n\n**Decision Context:**\n" + "\n\n".join(sections)
+
+
 def create_msg_delete():
     def delete_messages(state):
         """Clear messages and add placeholder for Anthropic compatibility"""
