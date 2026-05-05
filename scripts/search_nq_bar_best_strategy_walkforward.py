@@ -36,17 +36,20 @@ def candidate_pool(args: argparse.Namespace) -> list[BarStrategyCandidate]:
             for lookback in args.lookbacks:
                 for threshold in _thresholds_for_family(family, args):
                     for holding_minutes in args.holding_minutes:
-                        spec = StrategySpec(
-                            name=(
-                                f"{family}_lb{lookback}_thr{threshold:g}"
-                                f"_hold{holding_minutes}"
-                            ),
-                            family=family,
-                            lookback=int(lookback),
-                            threshold=float(threshold),
-                            holding_minutes=int(holding_minutes),
-                        )
-                        candidates.append(BarStrategyCandidate(spec=spec, session=session))
+                        for direction_filter in args.direction_filters:
+                            direction_suffix = "" if direction_filter == "both" else f"_{direction_filter}"
+                            spec = StrategySpec(
+                                name=(
+                                    f"{family}_lb{lookback}_thr{threshold:g}"
+                                    f"_hold{holding_minutes}{direction_suffix}"
+                                ),
+                                family=family,
+                                lookback=int(lookback),
+                                threshold=float(threshold),
+                                holding_minutes=int(holding_minutes),
+                                direction_filter=str(direction_filter),
+                            )
+                            candidates.append(BarStrategyCandidate(spec=spec, session=session))
     return candidates
 
 
@@ -397,6 +400,7 @@ def main() -> int:
     parser.add_argument("--sessions", nargs="+", default=["all", "europe", "us_rth", "us_late", "asia"])
     parser.add_argument("--lookbacks", type=int, nargs="+", default=[5, 10, 15, 30, 60])
     parser.add_argument("--holding-minutes", type=int, nargs="+", default=[3, 5, 10, 15, 30, 60])
+    parser.add_argument("--direction-filters", nargs="+", default=["both"], choices=["both", "long", "short"])
     parser.add_argument("--mean-reversion-thresholds", type=float, nargs="+", default=[0.6, 1.0, 1.4, 2.0])
     parser.add_argument("--momentum-thresholds", type=float, nargs="+", default=[0.0003, 0.0006, 0.001, 0.0015])
     parser.add_argument("--vwap-thresholds", type=float, nargs="+", default=[0.0002, 0.0005, 0.001])

@@ -84,10 +84,13 @@ def _normalize_candidate_columns(frame: pd.DataFrame) -> None:
         frame["lookback"] = pd.NA
     if "threshold" not in frame.columns:
         frame["threshold"] = pd.NA
+    if "direction_filter" not in frame.columns:
+        frame["direction_filter"] = pd.NA
     parsed = frame["name"].apply(_parse_candidate_name)
-    for key in ["session", "holding_minutes", "lookback", "threshold"]:
+    for key in ["session", "holding_minutes", "lookback", "threshold", "direction_filter"]:
         values = parsed.apply(lambda item: item.get(key))
         frame[key] = frame[key].fillna(values)
+    frame["direction_filter"] = frame["direction_filter"].fillna("both")
 
 
 def _parse_candidate_name(name: object) -> dict[str, object]:
@@ -108,6 +111,10 @@ def _parse_candidate_name(name: object) -> dict[str, object]:
     threshold = re.search(r"_thr([0-9]+(?:\.[0-9]+)?)", text)
     if threshold:
         parts["threshold"] = float(threshold.group(1))
+    if text.endswith("_long") or "_long_" in text:
+        parts["direction_filter"] = "long"
+    elif text.endswith("_short") or "_short_" in text:
+        parts["direction_filter"] = "short"
     return parts
 
 
@@ -228,6 +235,7 @@ def build_debate_pack(
                 "candidate_universe": row.get("candidate_universe"),
                 "selection_tier": row.get("selection_tier"),
                 "signal_rule": signal_rule(row),
+                "direction_filter": row.get("direction_filter", "both"),
                 "session_window_utc": session_window_utc(row.get("session")),
                 "entry_point": "enter on the next minute open after the signal bar; direction is the signal sign",
                 "exit_rule": f"time exit after {int(row.get('holding_minutes', 0) or 0)} minutes unless a strategy-specific stop/target is configured",
@@ -251,35 +259,37 @@ def signal_rule(row: pd.Series) -> str:
     family = str(row.get("family", ""))
     lookback = int(row.get("lookback", 0) or 0)
     threshold = float(row.get("threshold", 0.0) or 0.0)
+    direction_filter = str(row.get("direction_filter", "both"))
+    direction_clause = "" if direction_filter == "both" else f" Only take {direction_filter} signals"
     if family == "momentum":
         return (
             f"go long when {lookback}m close-to-close return is above {threshold:g}; "
-            f"go short when it is below {-threshold:g}"
+            f"go short when it is below {-threshold:g}.{direction_clause}"
         )
     if family == "mean_reversion":
         return (
             f"go long when close is below its {lookback}m mean by more than {threshold:g} rolling standard deviations; "
-            f"go short when it is above its {lookback}m mean by more than {threshold:g} rolling standard deviations"
+            f"go short when it is above its {lookback}m mean by more than {threshold:g} rolling standard deviations.{direction_clause}"
         )
     if family == "breakout":
         return (
             f"go long when close breaks above the prior {lookback}m high; "
-            f"go short when close breaks below the prior {lookback}m low"
+            f"go short when close breaks below the prior {lookback}m low.{direction_clause}"
         )
     if family == "vwap_reclaim":
         return (
             f"go long when close is more than {threshold:g} above cumulative VWAP and {lookback}m momentum is positive; "
-            f"go short when close is more than {threshold:g} below cumulative VWAP and {lookback}m momentum is negative"
+            f"go short when close is more than {threshold:g} below cumulative VWAP and {lookback}m momentum is negative.{direction_clause}"
         )
     if family == "support_reclaim":
         return (
             f"go long when price sweeps below the prior {lookback}m low then closes back above that support by {threshold:g} of the prior range; "
-            f"go short when price sweeps above the prior {lookback}m high then closes back below that resistance by {threshold:g} of the prior range"
+            f"go short when price sweeps above the prior {lookback}m high then closes back below that resistance by {threshold:g} of the prior range.{direction_clause}"
         )
     if family == "breakout_retest":
         return (
             f"go long when the prior bar breaks the {lookback}m high, the current bar retests that level, then closes back above by {threshold:g} of the prior range; "
-            f"go short when the prior bar breaks the {lookback}m low, the current bar retests that level, then closes back below by {threshold:g} of the prior range"
+            f"go short when the prior bar breaks the {lookback}m low, the current bar retests that level, then closes back below by {threshold:g} of the prior range.{direction_clause}"
         )
     return "unknown signal family"
 

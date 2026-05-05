@@ -66,6 +66,26 @@ def test_breakout_retest_triggers_after_break_and_hold() -> None:
     assert int(trades.iloc[0]["direction"]) == 1
 
 
+def test_direction_filter_keeps_only_requested_side() -> None:
+    frame = _frame(
+        closes=[100.0, 100.2, 100.1, 100.0, 100.4, 100.6],
+        lows=[99.8, 100.0, 99.9, 98.8, 100.2, 100.4],
+        highs=[100.3, 100.4, 100.35, 100.1, 100.7, 100.9],
+    )
+    spec = StrategySpec(
+        "support_reclaim_lb3_thr0.0002_hold1_short",
+        "support_reclaim",
+        3,
+        0.0002,
+        1,
+        direction_filter="short",
+    )
+
+    trades = build_trades(frame, spec, BacktestCosts(slippage_ticks_per_side=0.0, commission_per_contract=0.0))
+
+    assert trades.empty
+
+
 def test_nq_candidate_pool_and_debate_text_include_price_action_setups() -> None:
     args = type(
         "Args",
@@ -75,6 +95,7 @@ def test_nq_candidate_pool_and_debate_text_include_price_action_setups() -> None
             "families": ["support_reclaim", "breakout_retest"],
             "lookbacks": [30],
             "holding_minutes": [30],
+            "direction_filters": ["long", "short"],
             "support_reclaim_thresholds": [0.0002],
             "breakout_retest_thresholds": [0.0005],
         },
@@ -84,5 +105,12 @@ def test_nq_candidate_pool_and_debate_text_include_price_action_setups() -> None
     families = {candidate.spec.family for candidate in candidates}
 
     assert families == {"support_reclaim", "breakout_retest"}
-    assert "sweeps below" in rank_script.signal_rule(pd.Series({"family": "support_reclaim", "lookback": 30, "threshold": 0.0002}))
-    assert "retests that level" in rank_script.signal_rule(pd.Series({"family": "breakout_retest", "lookback": 30, "threshold": 0.0005}))
+    assert {candidate.spec.direction_filter for candidate in candidates} == {"long", "short"}
+    assert any(candidate.spec.name.endswith("_long") for candidate in candidates)
+    assert any(candidate.spec.name.endswith("_short") for candidate in candidates)
+    assert "Only take long signals" in rank_script.signal_rule(
+        pd.Series({"family": "support_reclaim", "lookback": 30, "threshold": 0.0002, "direction_filter": "long"})
+    )
+    assert "Only take short signals" in rank_script.signal_rule(
+        pd.Series({"family": "breakout_retest", "lookback": 30, "threshold": 0.0005, "direction_filter": "short"})
+    )

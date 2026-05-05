@@ -34,6 +34,7 @@ class StrategySpec:
     min_depth_quantile: float | None = None
     stop_loss_points: float | None = None
     take_profit_points: float | None = None
+    direction_filter: str = "both"
 
 
 def prepare_minute_features(bars: pd.DataFrame, microstructure: pd.DataFrame | None = None) -> pd.DataFrame:
@@ -186,6 +187,13 @@ def _base_signal(features: pd.DataFrame, spec: StrategySpec) -> pd.Series:
 
 def _apply_microstructure_filters(signal: pd.Series, features: pd.DataFrame, spec: StrategySpec) -> pd.Series:
     filtered = signal.copy()
+    if spec.direction_filter == "long":
+        filtered = filtered.where(filtered > 0, 0)
+    elif spec.direction_filter == "short":
+        filtered = filtered.where(filtered < 0, 0)
+    elif spec.direction_filter != "both":
+        raise ValueError(f"Unknown direction filter: {spec.direction_filter}")
+
     if spec.imbalance_threshold is not None:
         imbalance = pd.to_numeric(features["imbalance_last"].fillna(features["imbalance_mean"]), errors="coerce")
         aligned = ((filtered > 0) & (imbalance >= spec.imbalance_threshold)) | (
