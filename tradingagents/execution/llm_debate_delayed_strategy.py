@@ -302,6 +302,20 @@ def run_realtime_debate_trader(
         if config.max_iterations is not None:
             return result
         time.sleep(max(1.0, float(config.interval_seconds)))
+    write_realtime_status(
+        config.status_path,
+        {
+            "status": "running",
+            "iterations": 0,
+            "events": [],
+            "preflight": {
+                "status": preflight["readiness"].get("status"),
+                "missing_requirements": preflight["readiness"].get("missing_requirements", []),
+                "market_data": preflight.get("market_data", {}),
+            },
+            "mode": "submit" if config.strategy.submit else "dry_run",
+        },
+    )
     result = run_debate_delayed_scanner_daemon(
         feature_sets=feature_sets,
         planner=planner,
@@ -312,6 +326,20 @@ def run_realtime_debate_trader(
         max_iterations=config.max_iterations,
         stop_after_trade=config.max_iterations is not None,
         on_event=lambda iteration, events: write_realtime_status(
+            config.status_path,
+            {
+                "status": "running",
+                "iterations": iteration,
+                "events": events,
+                "preflight": {
+                    "status": preflight["readiness"].get("status"),
+                    "missing_requirements": preflight["readiness"].get("missing_requirements", []),
+                    "market_data": preflight.get("market_data", {}),
+                },
+                "mode": "submit" if config.strategy.submit else "dry_run",
+            },
+        ),
+        on_progress=lambda iteration, events: write_realtime_status(
             config.status_path,
             {
                 "status": "running",
@@ -479,6 +507,7 @@ def run_debate_delayed_scanner_once(
     scanner_config: FeatureScannerConfig | None = None,
     broker: IBKRPaperBroker | None = None,
     now: datetime | None = None,
+    on_progress: Any | None = None,
 ) -> dict[str, Any]:
     strategy_config = strategy_config or DebateDelayedStrategyConfig()
     scanner_config = scanner_config or FeatureScannerConfig()
@@ -492,6 +521,19 @@ def run_debate_delayed_scanner_once(
     )
     if scan["status"] != "triggered":
         return audit_and_return(strategy_config.audit_path, {"submitted": False, **scan})
+    if on_progress is not None:
+        trigger = scan["trigger"]
+        on_progress(
+            {
+                "status": "llm_debate_in_progress",
+                "submitted": False,
+                "reason": scan.get("reason"),
+                "trigger": asdict(trigger),
+                "evaluation": normalize_json_value(scan.get("evaluation", {})),
+                "history_points": scan.get("history_points"),
+                "minimum_recheck_after_seconds": strategy_config.minimum_recheck_after_seconds,
+            }
+        )
     return run_debate_delayed_strategy_once(
         trigger=scan["trigger"],
         planner=planner,
@@ -512,6 +554,7 @@ def run_debate_delayed_scanner_daemon(
     max_iterations: int | None = 1,
     stop_after_trade: bool = True,
     on_event: Any | None = None,
+    on_progress: Any | None = None,
 ) -> dict[str, Any]:
     events = []
     iteration = 0
@@ -523,6 +566,11 @@ def run_debate_delayed_scanner_daemon(
             strategy_config=strategy_config,
             scanner_config=scanner_config,
             broker=broker,
+            on_progress=(
+                (lambda progress, current_iteration=iteration: on_progress(current_iteration, events + [progress]))
+                if on_progress is not None
+                else None
+            ),
         )
         events.append(event)
         if on_event is not None:

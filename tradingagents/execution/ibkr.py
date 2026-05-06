@@ -24,6 +24,7 @@ ALLOWED_ACTIONS = {"BUY", "SELL"}
 ALLOWED_ORDER_TYPES = {"MKT", "LMT"}
 ACTIVE_ORDER_STATUSES = {"ApiPending", "PendingSubmit", "PreSubmitted", "Submitted"}
 PAPER_TRADEABLE_MARKET_DATA_TYPES = {"1", "2", "3", "live", "frozen", "delayed"}
+DEFAULT_IBKR_MARKET_DATA_TYPES = (3, 4, 1, 2)
 
 
 @dataclass(frozen=True)
@@ -189,6 +190,36 @@ def _market_data_wait_seconds() -> float:
 
 def _streaming_market_data_fallback_enabled() -> bool:
     return os.getenv("TRADINGAGENTS_IBKR_STREAMING_MARKET_DATA_FALLBACK", "true").lower() not in {"0", "false", "no"}
+
+
+def _market_data_type_sequence() -> list[int]:
+    raw = os.getenv("TRADINGAGENTS_IBKR_MARKET_DATA_TYPES", "")
+    if not raw.strip():
+        return list(DEFAULT_IBKR_MARKET_DATA_TYPES)
+
+    aliases = {
+        "live": 1,
+        "frozen": 2,
+        "delayed": 3,
+        "delayed-frozen": 4,
+        "frozen-delayed": 4,
+    }
+    market_data_types: list[int] = []
+    for item in raw.split(","):
+        value = item.strip().lower()
+        if not value:
+            continue
+        market_data_type = aliases.get(value)
+        if market_data_type is None:
+            try:
+                market_data_type = int(value)
+            except ValueError:
+                return list(DEFAULT_IBKR_MARKET_DATA_TYPES)
+        if market_data_type not in {1, 2, 3, 4}:
+            return list(DEFAULT_IBKR_MARKET_DATA_TYPES)
+        if market_data_type not in market_data_types:
+            market_data_types.append(market_data_type)
+    return market_data_types or list(DEFAULT_IBKR_MARKET_DATA_TYPES)
 
 
 def _ib_sleep(ib: Any, seconds: float) -> None:
@@ -718,7 +749,7 @@ class IBKRPaperBroker:
             if qualified:
                 contract = qualified[0]
         snapshots = []
-        market_data_types = [1, 2, 3, 4] if hasattr(ib, "reqMarketDataType") else [None]
+        market_data_types = _market_data_type_sequence() if hasattr(ib, "reqMarketDataType") else [None]
         wait_seconds = _market_data_wait_seconds()
         use_streaming_fallback = snapshot and _streaming_market_data_fallback_enabled()
         for market_data_type in market_data_types:

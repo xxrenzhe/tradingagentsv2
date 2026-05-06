@@ -505,6 +505,64 @@ def test_run_realtime_debate_trader_writes_running_status(tmp_path):
     assert status["events"][-1]["reason"] == "insufficient_scanner_history"
 
 
+def test_run_debate_scanner_daemon_reports_llm_debate_progress(tmp_path):
+    from tradingagents.execution.llm_debate_delayed_strategy import run_debate_delayed_scanner_daemon
+
+    broker = FakeBroker(
+        [
+            {"last": 100.0, "bid": 99.75, "ask": 100.25, "order_ready": True},
+            {"last": 98.0, "bid": 97.75, "ask": 98.25, "order_ready": True},
+            {"last": 97.0, "bid": 96.75, "ask": 97.25, "order_ready": True},
+            {"last": 96.0, "bid": 95.75, "ask": 96.25, "order_ready": True},
+            {"last": 96.5, "bid": 96.25, "ask": 96.75, "order_ready": True},
+            {"last": 96.75, "bid": 96.5, "ask": 97.0, "order_ready": True},
+            {"last": 98.0, "bid": 97.75, "ask": 98.25, "order_ready": True},
+            {"last": 98.0, "bid": 97.75, "ask": 98.25, "order_ready": True},
+            {"last": 98.0, "bid": 97.75, "ask": 98.25, "order_ready": True},
+        ]
+    )
+    progress_events = []
+    plan = DebateExecutionPlan(
+        decision_id="decision-1",
+        feature_set="support_reclaim + entry_candle_up",
+        stance="conditional",
+        recheck_after_seconds=120,
+        long_trigger=101.5,
+        short_trigger=95.0,
+        no_trade_low=95.0,
+        no_trade_high=101.5,
+    )
+
+    run_debate_delayed_scanner_daemon(
+        feature_sets=_scanner_feature_sets(),
+        planner=StaticDebatePlanner(plan),
+        strategy_config=DebateDelayedStrategyConfig(
+            audit_path=tmp_path / "audit.jsonl",
+            state_path=tmp_path / "strategy-state.json",
+            contract=IBKRContractSpec(symbol="MNQ", last_trade_date_or_contract_month="202606"),
+            snapshot_attempts=1,
+            enforce_delay=False,
+        ),
+        scanner_config=FeatureScannerConfig(
+            history_path=tmp_path / "history.jsonl",
+            state_path=tmp_path / "scanner-state.json",
+            min_history_points=7,
+            cooldown_seconds=0,
+            support_reclaim_points=1.0,
+        ),
+        broker=broker,
+        interval_seconds=0,
+        max_iterations=7,
+        on_progress=lambda iteration, events: progress_events.append((iteration, events)),
+    )
+
+    assert progress_events
+    iteration, events = progress_events[0]
+    assert iteration == 7
+    assert events[-1]["status"] == "llm_debate_in_progress"
+    assert events[-1]["minimum_recheck_after_seconds"] == 120
+
+
 def test_run_debate_delayed_strategy_once_dry_runs_after_delay_recheck(tmp_path):
     trigger = FeatureTrigger(
         feature_set="flush_hold",

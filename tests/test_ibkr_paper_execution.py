@@ -378,7 +378,41 @@ def test_market_snapshot_qualifies_contract_and_retries_market_data_types(tmp_pa
     assert snapshot.bid_size == 5
     assert snapshot.ask_size == 7
     assert snapshot.to_dict()["bid_size"] == 5
+    assert fake_ib.market_data_types == [3]
+
+
+def test_market_snapshot_respects_market_data_type_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRADINGAGENTS_IBKR_MARKET_DATA_TYPES", "1,2,3")
+    fake_ib = MarketDataTypeFakeIB()
+    broker = IBKRPaperBroker(
+        connection=IBKRConnectionConfig(port=7497, account="DU123"),
+        risk=_risk(),
+        ib=fake_ib,
+        audit_path=tmp_path / "audit.jsonl",
+    )
+
+    snapshot = broker.market_snapshot(IBKRContractSpec(last_trade_date_or_contract_month="202606"))
+
+    assert snapshot.order_ready
+    assert snapshot.market_data_type == "delayed"
     assert fake_ib.market_data_types == [1, 2, 3]
+
+
+def test_market_snapshot_invalid_market_data_type_override_falls_back_to_delayed_first(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRADINGAGENTS_IBKR_MARKET_DATA_TYPES", "live,invalid,delayed")
+    fake_ib = MarketDataTypeFakeIB()
+    broker = IBKRPaperBroker(
+        connection=IBKRConnectionConfig(port=7497, account="DU123"),
+        risk=_risk(),
+        ib=fake_ib,
+        audit_path=tmp_path / "audit.jsonl",
+    )
+
+    snapshot = broker.market_snapshot(IBKRContractSpec(last_trade_date_or_contract_month="202606"))
+
+    assert snapshot.order_ready
+    assert snapshot.market_data_type == "delayed"
+    assert fake_ib.market_data_types == [3]
 
 
 def test_market_snapshot_uses_streaming_fallback_when_snapshots_are_empty(tmp_path, monkeypatch):
@@ -395,8 +429,8 @@ def test_market_snapshot_uses_streaming_fallback_when_snapshots_are_empty(tmp_pa
 
     assert snapshot.order_ready
     assert snapshot.market_data_type == "delayed"
-    assert fake_ib.requests == [True, False, True, False, True, False]
-    assert len(fake_ib.cancelled) == 3
+    assert fake_ib.requests == [True, False]
+    assert len(fake_ib.cancelled) == 1
 
 
 def test_market_snapshot_connects_before_requesting_live_ib_data(tmp_path):
