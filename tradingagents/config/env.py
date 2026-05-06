@@ -5,10 +5,10 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
-def load_project_env(start: Path | None = None) -> None:
+def load_project_env(start: Path | None = None, *, override: bool = True) -> None:
     root = _find_project_root(start or Path.cwd())
-    load_dotenv(root / ".env", override=False)
-    load_dotenv(root / ".env.enterprise", override=False)
+    load_dotenv(root / ".env", override=override)
+    load_dotenv(root / ".env.enterprise", override=override)
 
 
 def _find_project_root(start: Path) -> Path:
