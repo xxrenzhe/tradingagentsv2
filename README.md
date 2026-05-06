@@ -213,6 +213,12 @@ To run the NQ LLM-debate realtime paper loop in dry-run mode:
 
 This loop runs IBKR paper preflight, scans live NQ/MNQ snapshots for feature triggers with `win_rate > 53%` and `payoff_ratio_r > 1R`, calls the LLM debate planner, waits for the configured recheck, and then routes to long, short, or no-trade. Every market trigger and LLM debate decision is appended to `docs/Strategy/tradelogs/YYYY-MM-DD.md`, including no-trade and dry-run outcomes. Add `--submit` only after the dry-run log and `.tmp/nq-llm-debate-realtime-status.json` are clean.
 
+To check the NQ realtime loop, latest LLM debate decision, trade log, and IBKR paper readiness:
+
+```bash
+.venv/bin/python scripts/check_nq_realtime_debate_status.py
+```
+
 Manual top-of-book signals are still available for diagnostics only:
 
 ```bash

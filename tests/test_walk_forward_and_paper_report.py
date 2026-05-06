@@ -408,6 +408,79 @@ def test_run_daily_paper_validation_stops_on_failure(tmp_path, monkeypatch, caps
     assert '"ok": false' in capsys.readouterr().out
 
 
+def test_check_nq_realtime_debate_status_reports_recent_decision(tmp_path, monkeypatch, capsys):
+    script = _load_script(str(Path(__file__).resolve().parents[1] / "scripts" / "check_nq_realtime_debate_status.py"))
+    status_path = tmp_path / "status.json"
+    audit_path = tmp_path / "audit.jsonl"
+    trade_log_dir = tmp_path / "tradelogs"
+    trade_log_dir.mkdir()
+    status_path.write_text(
+        json.dumps(
+            {
+                "updated_at": "2026-05-06T00:00:00+00:00",
+                "status": "completed",
+                "mode": "dry_run",
+                "iterations": 1,
+                "events": [
+                    {
+                        "status": "dry_run",
+                        "submitted": False,
+                        "trigger": {"feature_set": "support_reclaim + entry_candle_up"},
+                        "route": {"action": "BUY"},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    audit_path.write_text(
+        json.dumps(
+            {
+                "event_type": "nq_llm_debate_delayed_strategy",
+                "status": "dry_run",
+                "submitted": False,
+                "trigger": {"feature_set": "support_reclaim + entry_candle_up"},
+                "plan": {"decision_id": "decision-1"},
+                "route": {"action": "BUY"},
+                "recheck_price": 100.5,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (trade_log_dir / "2026-05-06.md").write_text(
+        "# 交易记录 2026-05-06\n\n## 2026-05-06T00:00:00+00:00 - NQ LLM辩论策略 做多\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(script, "daemon_status", lambda pattern: {"running": True, "submit_enabled": False, "dry_run_enabled": True, "pids": ["123"], "processes": []})
+    monkeypatch.setattr(
+        script,
+        "ready_preflight",
+        lambda **kwargs: {"readiness": {"status": "ready", "missing_requirements": []}, "connection": {"connected": True}, "market_data": {"order_ready": True}},
+    )
+    monkeypatch.setattr(script.time, "time", lambda: 1778025600.0)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "check_nq_realtime_debate_status.py",
+            "--status-path",
+            str(status_path),
+            "--audit-path",
+            str(audit_path),
+            "--trade-log-dir",
+            str(trade_log_dir),
+            "--max-status-age-seconds",
+            "999999999",
+        ],
+    )
+
+    assert script.main() == 0
+    output = capsys.readouterr().out
+    assert '"status": "ready"' in output
+    assert "support_reclaim + entry_candle_up" in output
+    assert "NQ LLM辩论策略 做多" in output
+
+
 def test_build_ibkr_tick_replay_dataset_script_outputs_files(tmp_path, monkeypatch, capsys):
     input_dir = tmp_path / "ticks"
     input_dir.mkdir()
