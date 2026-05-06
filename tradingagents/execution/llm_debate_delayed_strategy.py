@@ -377,7 +377,30 @@ def realtime_preflight(
     session = IBKRPaperTradingSession(broker=broker, contract=contract)
     last_preflight: dict[str, Any] = {}
     for attempt in range(max(1, int(attempts))):
-        last_preflight = session.preflight()
+        try:
+            last_preflight = session.preflight()
+        except Exception as exc:
+            last_preflight = {
+                "event_type": "ibkr_paper_preflight",
+                "created_at": datetime.now(UTC).isoformat(),
+                "socket_ready": False,
+                "connection": {
+                    "status": "blocked",
+                    "connected": False,
+                    "reason": str(exc) or exc.__class__.__name__,
+                    "error_type": exc.__class__.__name__,
+                    "connection": asdict(broker.connection),
+                },
+                "account": {},
+                "contract": {},
+                "market_data": {},
+                "readiness": {
+                    "status": "blocked",
+                    "missing_requirements": ["preflight_error"],
+                    "checked_at": datetime.now(UTC).isoformat(),
+                },
+            }
+            broker._audit(last_preflight)
         readiness = last_preflight.get("readiness", {})
         if isinstance(readiness, dict) and readiness.get("status") == "ready":
             return last_preflight
@@ -556,22 +579,33 @@ def run_debate_delayed_scanner_daemon(
     on_event: Any | None = None,
     on_progress: Any | None = None,
 ) -> dict[str, Any]:
+    strategy_config = strategy_config or DebateDelayedStrategyConfig()
     events = []
     iteration = 0
     while max_iterations is None or iteration < max_iterations:
         iteration += 1
-        event = run_debate_delayed_scanner_once(
-            feature_sets=feature_sets,
-            planner=planner,
-            strategy_config=strategy_config,
-            scanner_config=scanner_config,
-            broker=broker,
-            on_progress=(
-                (lambda progress, current_iteration=iteration: on_progress(current_iteration, events + [progress]))
-                if on_progress is not None
-                else None
-            ),
-        )
+        try:
+            event = run_debate_delayed_scanner_once(
+                feature_sets=feature_sets,
+                planner=planner,
+                strategy_config=strategy_config,
+                scanner_config=scanner_config,
+                broker=broker,
+                on_progress=(
+                    (lambda progress, current_iteration=iteration: on_progress(current_iteration, events + [progress]))
+                    if on_progress is not None
+                    else None
+                ),
+            )
+        except Exception as exc:
+            event = {
+                "status": "runtime_error",
+                "submitted": False,
+                "reason": str(exc) or exc.__class__.__name__,
+                "error_type": exc.__class__.__name__,
+                "created_at": datetime.now(UTC).isoformat(),
+            }
+            audit_and_return(strategy_config.audit_path, event)
         events.append(event)
         if on_event is not None:
             on_event(iteration, events)

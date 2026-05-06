@@ -460,6 +460,55 @@ def test_run_realtime_debate_trader_retries_preflight_in_daemon_mode(tmp_path, m
     assert "preflight_blocked" in (tmp_path / "audit.jsonl").read_text(encoding="utf-8")
 
 
+def test_run_realtime_debate_trader_keeps_waiting_after_preflight_exception(tmp_path, monkeypatch):
+    broker = FakeBroker([{"last": 100.0, "bid": 99.75, "ask": 100.25, "order_ready": True}])
+    calls = {"connect": 0}
+
+    def flaky_connect():
+        calls["connect"] += 1
+        if calls["connect"] == 1:
+            raise ConnectionError("Socket disconnect")
+        return {"status": "connected", "connected": True}
+
+    broker.connect = flaky_connect
+    monkeypatch.setattr("tradingagents.execution.llm_debate_delayed_strategy.time.sleep", lambda seconds: None)
+    monkeypatch.setattr(
+        "tradingagents.execution.llm_debate_delayed_strategy.run_debate_delayed_scanner_daemon",
+        lambda **kwargs: {"status": "completed", "iterations": 1, "events": []},
+    )
+
+    result = run_realtime_debate_trader(
+        feature_sets=_scanner_feature_sets(),
+        planner=StaticDebatePlanner(
+            DebateExecutionPlan(
+                decision_id="decision-1",
+                feature_set="support_reclaim + entry_candle_up",
+                stance="conditional",
+                recheck_after_seconds=120,
+            )
+        ),
+        config=RealtimeDebateTraderConfig(
+            strategy=DebateDelayedStrategyConfig(
+                audit_path=tmp_path / "audit.jsonl",
+                contract=IBKRContractSpec(symbol="MNQ", last_trade_date_or_contract_month="202606"),
+                snapshot_attempts=1,
+            ),
+            scanner=FeatureScannerConfig(history_path=tmp_path / "history.jsonl", state_path=tmp_path / "scanner-state.json", min_history_points=7),
+            interval_seconds=0,
+            max_iterations=None,
+            preflight_attempts=1,
+            status_path=tmp_path / "status.json",
+        ),
+        broker=broker,
+    )
+
+    status = json.loads((tmp_path / "status.json").read_text(encoding="utf-8"))
+    assert calls["connect"] == 2
+    assert result["status"] == "completed"
+    assert status["status"] == "completed"
+    assert "preflight_error" in (tmp_path / "audit.jsonl").read_text(encoding="utf-8")
+
+
 def test_run_realtime_debate_trader_writes_running_status(tmp_path):
     broker = FakeBroker(
         [
@@ -561,6 +610,56 @@ def test_run_debate_scanner_daemon_reports_llm_debate_progress(tmp_path):
     assert iteration == 7
     assert events[-1]["status"] == "llm_debate_in_progress"
     assert events[-1]["minimum_recheck_after_seconds"] == 120
+
+
+def test_run_debate_scanner_daemon_keeps_running_after_socket_disconnect(tmp_path):
+    from tradingagents.execution.llm_debate_delayed_strategy import run_debate_delayed_scanner_daemon
+
+    class FlakyBroker(FakeBroker):
+        def __init__(self):
+            super().__init__([{"last": 100.0, "bid": 99.75, "ask": 100.25, "order_ready": True}])
+            self.calls = 0
+
+        def tick_snapshot(self, spec):
+            self.calls += 1
+            if self.calls == 1:
+                raise ConnectionError("Socket disconnect")
+            return {"last": 100.0, "bid": 99.75, "ask": 100.25, "order_ready": True}
+
+    events_seen = []
+    result = run_debate_delayed_scanner_daemon(
+        feature_sets=_scanner_feature_sets(),
+        planner=StaticDebatePlanner(
+            DebateExecutionPlan(
+                decision_id="decision-1",
+                feature_set="support_reclaim + entry_candle_up",
+                stance="conditional",
+                recheck_after_seconds=120,
+            )
+        ),
+        strategy_config=DebateDelayedStrategyConfig(
+            audit_path=tmp_path / "audit.jsonl",
+            contract=IBKRContractSpec(symbol="MNQ", last_trade_date_or_contract_month="202606"),
+            snapshot_attempts=1,
+        ),
+        scanner_config=FeatureScannerConfig(
+            history_path=tmp_path / "history.jsonl",
+            state_path=tmp_path / "scanner-state.json",
+            min_history_points=7,
+        ),
+        broker=FlakyBroker(),
+        interval_seconds=0,
+        max_iterations=2,
+        on_event=lambda iteration, events: events_seen.append((iteration, list(events))),
+    )
+
+    assert result["status"] == "completed"
+    assert result["iterations"] == 2
+    assert result["events"][0]["status"] == "runtime_error"
+    assert result["events"][0]["reason"] == "Socket disconnect"
+    assert result["events"][1]["status"] == "no_feature_trigger"
+    assert events_seen[-1][0] == 2
+    assert "runtime_error" in (tmp_path / "audit.jsonl").read_text(encoding="utf-8")
 
 
 def test_run_debate_delayed_strategy_once_dry_runs_after_delay_recheck(tmp_path):
@@ -926,6 +1025,10 @@ def test_run_nq_llm_debate_paper_trader_script_wires_realtime_mode(tmp_path, mon
             str(tmp_path / "status.json"),
             "--max-iterations",
             "1",
+            "--client-id",
+            "779",
+            "--account",
+            "DU456",
             "--no-enforce-delay",
         ],
     )
@@ -935,4 +1038,8 @@ def test_run_nq_llm_debate_paper_trader_script_wires_realtime_mode(tmp_path, mon
     assert captured["config"].require_preflight_ready is True
     assert captured["config"].status_path == tmp_path / "status.json"
     assert captured["config"].strategy.enforce_delay is False
+    assert captured["config"].strategy.account == "DU456"
+    assert captured["broker"].connection.client_id == 779
+    assert captured["broker"].connection.account == "DU456"
+    assert captured["broker"].risk.allowed_accounts == ("DU456",)
     assert '"status": "completed"' in capsys.readouterr().out

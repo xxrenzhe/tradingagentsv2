@@ -16,6 +16,7 @@ from tradingagents.execution import (
     IBKRConnectionConfig,
     IBKRContractSpec,
     IBKRPaperBroker,
+    IBKRPaperRiskConfig,
     RealtimeDebateTraderConfig,
     load_tradeable_feature_sets,
     planner_from_env_or_args,
@@ -141,15 +142,29 @@ def main() -> int:
     broker = None
     if args.client_id is not None:
         connection = IBKRConnectionConfig.from_env()
+        risk = IBKRPaperRiskConfig.from_env()
+        allowed_accounts = risk.allowed_accounts
+        if args.account:
+            allowed_accounts = (args.account,)
         broker = IBKRPaperBroker(
             connection=IBKRConnectionConfig(
                 host=connection.host,
                 port=connection.port,
                 client_id=args.client_id,
-                account=connection.account,
+                account=args.account or connection.account,
                 timeout=connection.timeout,
                 readonly=connection.readonly,
-            )
+            ),
+            risk=IBKRPaperRiskConfig(
+                allowed_accounts=allowed_accounts,
+                allowed_symbols=risk.allowed_symbols,
+                max_quantity=risk.max_quantity,
+                max_position_after_fill=risk.max_position_after_fill,
+                require_bracket=risk.require_bracket,
+                kill_switch=risk.kill_switch,
+                paper_only=risk.paper_only,
+                allow_market_orders=risk.allow_market_orders,
+            ),
         )
     if args.scan:
         scanner_config = FeatureScannerConfig(
