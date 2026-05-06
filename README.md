@@ -205,6 +205,14 @@ Accrual mode still blocks if readiness, net points, win rate, or consecutive-los
 
 In status output, `live_candidate_status` / `strict_live_candidate_status` remain `blocked` until the full validation gate passes. `paper_validation_accrual_status` is the separate field to use when intentionally collecting the remaining paper-validation samples.
 
+To run the NQ LLM-debate realtime paper loop in dry-run mode:
+
+```bash
+.venv/bin/python scripts/run_nq_llm_debate_paper_trader.py --realtime --max-iterations 0
+```
+
+This loop runs IBKR paper preflight, scans live NQ/MNQ snapshots for feature triggers with `win_rate > 53%` and `payoff_ratio_r > 1R`, calls the LLM debate planner, waits for the configured recheck, and then routes to long, short, or no-trade. Every market trigger and LLM debate decision is appended to `docs/Strategy/tradelogs/YYYY-MM-DD.md`, including no-trade and dry-run outcomes. Add `--submit` only after the dry-run log and `.tmp/nq-llm-debate-realtime-status.json` are clean.
+
 Manual top-of-book signals are still available for diagnostics only:
 
 ```bash

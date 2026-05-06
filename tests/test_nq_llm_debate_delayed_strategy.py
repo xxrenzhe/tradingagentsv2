@@ -242,6 +242,7 @@ def test_run_debate_delayed_scanner_once_executes_after_scanner_trigger(tmp_path
         enforce_delay=False,
         snapshot_attempts=1,
         max_signal_age_seconds=999999,
+        trade_log_dir=tmp_path / "tradelogs",
     )
     scanner_config = FeatureScannerConfig(
         history_path=tmp_path / "scanner-history.jsonl",
@@ -270,6 +271,10 @@ def test_run_debate_delayed_scanner_once_executes_after_scanner_trigger(tmp_path
     assert result["status"] == "dry_run"
     assert result["route"]["action"] == "BUY"
     assert broker.submitted[0].strategy_id == "nq_llm_debate_delayed"
+    content = next((tmp_path / "tradelogs").glob("*.md")).read_text(encoding="utf-8")
+    assert "NQ LLM辩论策略 做多" in content
+    assert "多头方案" in content
+    assert "support_reclaim + entry_candle_up" in content
 
 
 def test_run_realtime_debate_trader_blocks_when_preflight_not_ready(tmp_path):
@@ -339,6 +344,7 @@ def test_run_debate_delayed_strategy_once_dry_runs_after_delay_recheck(tmp_path)
         enforce_delay=False,
         snapshot_attempts=1,
         max_signal_age_seconds=999999,
+        trade_log_dir=tmp_path / "tradelogs",
     )
 
     result = run_debate_delayed_strategy_once(
@@ -354,6 +360,58 @@ def test_run_debate_delayed_strategy_once_dry_runs_after_delay_recheck(tmp_path)
     assert broker.submitted[0].action == "BUY"
     assert (tmp_path / "state.json").exists()
     assert "nq_llm_debate_delayed_strategy" in (tmp_path / "audit.jsonl").read_text()
+    assert "NQ LLM辩论策略 做多" in next((tmp_path / "tradelogs").glob("*.md")).read_text(encoding="utf-8")
+
+
+def test_run_debate_delayed_strategy_once_logs_no_trade_debate_result(tmp_path):
+    trigger = FeatureTrigger(
+        feature_set="flush_hold",
+        candidate="bar_best",
+        direction="long",
+        trigger_price=25000.0,
+        trigger_time="2026-05-06T00:00:00+00:00",
+        win_rate=0.55,
+        payoff_ratio_r=1.2,
+    )
+    plan = DebateExecutionPlan(
+        decision_id="decision-1",
+        feature_set="flush_hold",
+        stance="conditional",
+        recheck_after_seconds=120,
+        long_trigger=25010.0,
+        short_trigger=24990.0,
+        no_trade_low=24990.0,
+        no_trade_high=25010.0,
+    )
+    broker = FakeBroker(
+        [
+            {"last": 25000.0, "bid": 24999.75, "ask": 25000.25, "order_ready": True},
+            {"last": 25000.0, "bid": 24999.75, "ask": 25000.25, "order_ready": True},
+        ]
+    )
+    config = DebateDelayedStrategyConfig(
+        audit_path=tmp_path / "audit.jsonl",
+        state_path=tmp_path / "state.json",
+        contract=IBKRContractSpec(symbol="MNQ", last_trade_date_or_contract_month="202606"),
+        skip_preflight=True,
+        enforce_delay=False,
+        snapshot_attempts=1,
+        max_signal_age_seconds=999999,
+        trade_log_dir=tmp_path / "tradelogs",
+    )
+
+    result = run_debate_delayed_strategy_once(
+        trigger=trigger,
+        planner=StaticDebatePlanner(plan),
+        config=config,
+        broker=broker,
+    )
+
+    assert result["status"] == "no_trade_after_recheck"
+    content = next((tmp_path / "tradelogs").glob("*.md")).read_text(encoding="utf-8")
+    assert "NQ LLM辩论策略 不交易" in content
+    assert "不交易区" in content
+    assert "price_inside_no_trade_zone" in content
 
 
 def test_run_debate_delayed_strategy_once_skips_duplicate_trigger(tmp_path):
@@ -459,6 +517,8 @@ def test_run_nq_llm_debate_paper_trader_script_wires_arguments(tmp_path, monkeyp
             "DU123",
             "--quantity",
             "1",
+            "--trade-log-dir",
+            str(tmp_path / "tradelogs"),
             "--submit",
             "--skip-preflight",
             "--no-enforce-delay",
@@ -471,6 +531,7 @@ def test_run_nq_llm_debate_paper_trader_script_wires_arguments(tmp_path, monkeyp
     assert captured["config"].submit is True
     assert captured["config"].skip_preflight is True
     assert captured["config"].enforce_delay is False
+    assert captured["config"].trade_log_dir == tmp_path / "tradelogs"
     assert '"status": "dry_run"' in capsys.readouterr().out
 
 

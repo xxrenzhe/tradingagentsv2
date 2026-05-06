@@ -55,6 +55,7 @@ def main() -> int:
     parser.add_argument("--snapshot-retry-seconds", type=float, default=1.0)
     parser.add_argument("--audit-path", default=".tmp/nq-llm-debate-paper-audit.jsonl")
     parser.add_argument("--state-path", default=".tmp/nq-llm-debate-paper-state.json")
+    parser.add_argument("--trade-log-dir", default="docs/Strategy/tradelogs")
     parser.add_argument("--scan", action="store_true", help="Scan IBKR snapshots for a qualifying feature trigger before LLM debate.")
     parser.add_argument("--scanner-history", default=".tmp/nq-llm-debate-scanner-history.jsonl")
     parser.add_argument("--scanner-state", default=".tmp/nq-llm-debate-scanner-state.json")
@@ -114,6 +115,7 @@ def main() -> int:
         snapshot_retry_seconds=args.snapshot_retry_seconds,
         allow_existing_exposure=args.allow_existing_exposure,
         enforce_delay=not args.no_enforce_delay,
+        trade_log_dir=Path(args.trade_log_dir),
     )
     feature_sets = load_tradeable_feature_sets(
         config.feature_sets_path,

@@ -16,6 +16,7 @@ import pandas as pd
 from tradingagents.llm_clients.factory import create_llm_client
 
 from .ibkr import IBKRContractSpec, IBKROrderIntent, IBKRPaperBroker, IBKRPaperTradingSession
+from .trade_log import DEFAULT_TRADE_LOG_DIR
 
 
 @dataclass(frozen=True)
@@ -196,6 +197,7 @@ class DebateDelayedStrategyConfig:
     snapshot_retry_seconds: float = 1.0
     allow_existing_exposure: bool = False
     enforce_delay: bool = True
+    trade_log_dir: Path = DEFAULT_TRADE_LOG_DIR
 
 
 @dataclass(frozen=True)
@@ -315,6 +317,98 @@ def write_realtime_status(path: Path, event: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"updated_at": datetime.now(UTC).isoformat(), **event}
     path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
+
+
+def append_debate_trade_log_safely(result: dict[str, Any], *, log_dir: Path | str = DEFAULT_TRADE_LOG_DIR) -> Path | None:
+    try:
+        return append_debate_trade_log(result, log_dir=log_dir)
+    except Exception as exc:
+        result["trade_log_error"] = str(exc) or exc.__class__.__name__
+        return None
+
+
+def append_debate_trade_log(result: dict[str, Any], *, log_dir: Path | str = DEFAULT_TRADE_LOG_DIR) -> Path:
+    timestamp = debate_log_timestamp(result)
+    output = Path(log_dir) / f"{timestamp.date().isoformat()}.md"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if not output.exists():
+        output.write_text(f"# 交易记录 {timestamp.date().isoformat()}\n\n", encoding="utf-8")
+    decision_id = str((result.get("plan") if isinstance(result.get("plan"), dict) else {}).get("decision_id") or "")
+    trigger_key = str(result.get("trigger_key") or "")
+    existing = output.read_text(encoding="utf-8")
+    marker = f"- 决策ID：`{decision_id}`"
+    if decision_id and trigger_key and marker in existing and f"- 触发Key：`{trigger_key}`" in existing:
+        return output
+    with output.open("a", encoding="utf-8") as handle:
+        handle.write(format_debate_trade_log_entry(result, timestamp))
+    return output
+
+
+def debate_log_timestamp(result: dict[str, Any]) -> datetime:
+    trigger = result.get("trigger") if isinstance(result.get("trigger"), dict) else {}
+    for value in [trigger.get("trigger_time"), result.get("created_at")]:
+        timestamp = parse_timestamp(str(value)) if value else None
+        if timestamp is not None:
+            return timestamp
+    return datetime.now(UTC)
+
+
+def format_debate_trade_log_entry(result: dict[str, Any], timestamp: datetime) -> str:
+    trigger = result.get("trigger") if isinstance(result.get("trigger"), dict) else {}
+    plan = result.get("plan") if isinstance(result.get("plan"), dict) else {}
+    route = result.get("route") if isinstance(result.get("route"), dict) else {}
+    intent = result.get("intent") if isinstance(result.get("intent"), dict) else {}
+    broker_result = result.get("result") if isinstance(result.get("result"), dict) else {}
+    snapshots = result.get("snapshots") if isinstance(result.get("snapshots"), dict) else {}
+    initial = last_snapshot(snapshots.get("initial"))
+    recheck = last_snapshot(snapshots.get("recheck"))
+    debate_summary = plan.get("debate_summary") if isinstance(plan.get("debate_summary"), dict) else {}
+    action = str(route.get("action") or intent.get("action") or "NO_TRADE").upper()
+    action_label = {"BUY": "做多", "SELL": "做空", "NO_TRADE": "不交易"}.get(action, action)
+    lines = [
+        f"## {timestamp.isoformat()} - NQ LLM辩论策略 {action_label}",
+        "",
+        f"- 状态：`{result.get('status', '')}`；是否提交IBKR：`{result.get('submitted', False)}`",
+        f"- 触发Key：`{result.get('trigger_key', '')}`",
+        f"- 特征：`{trigger.get('feature_set', '')}`",
+        f"- 候选：`{trigger.get('candidate', '')}`；过滤：`{trigger.get('filter_name', '')}`",
+        f"- 回测证据：胜率 `{format_percent(trigger.get('win_rate'))}`；盈亏比 `{format_number(trigger.get('payoff_ratio_r'))}R`；净点数 `{format_number(trigger.get('net_points'))}`",
+        f"- 行情触发：价格 `{format_number(trigger.get('trigger_price'))}`；初始 bid/ask/last=`{format_number(initial.get('bid'))}`/`{format_number(initial.get('ask'))}`/`{format_number(initial.get('last'))}`",
+        f"- LLM辩论结论：stance=`{plan.get('stance', '')}`；confidence=`{format_number(plan.get('confidence'))}`；等待复查 `{plan.get('recheck_after_seconds', '')}` 秒",
+        f"- 多头方案：触发 `{format_number(plan.get('long_trigger'))}`；止损 `{format_number(plan.get('long_stop'))}`；止盈 `{format_number(plan.get('long_target'))}`",
+        f"- 空头方案：触发 `{format_number(plan.get('short_trigger'))}`；止损 `{format_number(plan.get('short_stop'))}`；止盈 `{format_number(plan.get('short_target'))}`",
+        f"- 不交易区：`{format_number(plan.get('no_trade_low'))}` - `{format_number(plan.get('no_trade_high'))}`；最大追价 `{format_number(plan.get('max_chase_points'))}` 点",
+        f"- 复查行情：价格 `{format_number(result.get('recheck_price'))}`；bid/ask/last=`{format_number(recheck.get('bid'))}`/`{format_number(recheck.get('ask'))}`/`{format_number(recheck.get('last'))}`",
+        f"- 执行路由：action=`{action}`；reason=`{route.get('reason', result.get('reason', ''))}`；side=`{route.get('side', '')}`",
+        f"- IBKR结果：status=`{broker_result.get('status', '')}`；intent=`{intent.get('intent_id', '')}`；order_type=`{intent.get('order_type', '')}`",
+        f"- 决策ID：`{plan.get('decision_id', '')}`",
+    ]
+    for key in ["long_case", "short_case", "risk_case", "fallback_reason"]:
+        if debate_summary.get(key):
+            lines.append(f"- 辩论摘要/{key}：{debate_summary[key]}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def last_snapshot(value: Any) -> dict[str, Any]:
+    if isinstance(value, list) and value:
+        snapshot = value[-1]
+        return snapshot if isinstance(snapshot, dict) else {}
+    return value if isinstance(value, dict) else {}
+
+
+def format_number(value: Any) -> str:
+    number = optional_float(value)
+    if number is None:
+        return ""
+    return f"{number:.4f}".rstrip("0").rstrip(".")
+
+
+def format_percent(value: Any) -> str:
+    number = optional_float(value)
+    if number is None:
+        return ""
+    return f"{number * 100:.2f}%"
 
 
 def run_debate_delayed_scanner_once(
@@ -533,33 +627,35 @@ def run_debate_delayed_strategy_once(
                 "updated_at": datetime.now(UTC).isoformat(),
             },
         )
-        return audit_and_return(
-            config.audit_path,
-            {
-                "status": "no_trade_after_recheck",
-                "submitted": False,
-                "trigger_key": trigger_key,
-                "reason": route["reason"],
-                "trigger": asdict(trigger),
-                "plan": asdict(plan),
-                "recheck_price": price,
-                "snapshots": {"initial": first_snapshots, "recheck": recheck_snapshots},
-            },
-        )
+        result = {
+            "status": "no_trade_after_recheck",
+            "submitted": False,
+            "trigger_key": trigger_key,
+            "reason": route["reason"],
+            "trigger": asdict(trigger),
+            "plan": asdict(plan),
+            "route": route,
+            "recheck_price": price,
+            "snapshots": {"initial": first_snapshots, "recheck": recheck_snapshots},
+        }
+        append_debate_trade_log_safely(result, log_dir=config.trade_log_dir)
+        return audit_and_return(config.audit_path, result)
     if not config.allow_existing_exposure:
         exposure = active_broker.status_snapshot(config.contract.symbol)
         if int(exposure.get("current_position") or 0) != 0 or exposure.get("open_trades"):
-            return audit_and_return(
-                config.audit_path,
-                {
-                    "status": "exposure_blocked",
-                    "submitted": False,
-                    "trigger_key": trigger_key,
-                    "exposure": exposure,
-                    "trigger": asdict(trigger),
-                    "plan": asdict(plan),
-                },
-            )
+            result = {
+                "status": "exposure_blocked",
+                "submitted": False,
+                "trigger_key": trigger_key,
+                "exposure": exposure,
+                "trigger": asdict(trigger),
+                "plan": asdict(plan),
+                "route": route,
+                "recheck_price": price,
+                "snapshots": {"initial": first_snapshots, "recheck": recheck_snapshots},
+            }
+            append_debate_trade_log_safely(result, log_dir=config.trade_log_dir)
+            return audit_and_return(config.audit_path, result)
     intent = build_intent_from_route(
         trigger,
         plan,
@@ -583,6 +679,7 @@ def run_debate_delayed_strategy_once(
         "result": response,
         "snapshots": {"initial": first_snapshots, "recheck": recheck_snapshots},
     }
+    append_debate_trade_log_safely(result, log_dir=config.trade_log_dir)
     if result["status"] in {"dry_run", "submitted"}:
         save_strategy_state(
             config.state_path,
