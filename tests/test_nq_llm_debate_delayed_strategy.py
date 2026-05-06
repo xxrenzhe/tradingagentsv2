@@ -9,13 +9,16 @@ import pandas as pd
 from tradingagents.execution import (
     DebateDelayedStrategyConfig,
     DebateExecutionPlan,
+    FeatureScannerConfig,
     FeatureTrigger,
     IBKRContractSpec,
     StaticDebatePlanner,
     build_intent_from_route,
     load_tradeable_feature_sets,
     route_plan,
+    run_debate_delayed_scanner_once,
     run_debate_delayed_strategy_once,
+    scan_feature_trigger_once,
 )
 
 
@@ -118,6 +121,125 @@ class FakeBroker:
 
     def _audit(self, event):
         pass
+
+
+def _scanner_feature_sets() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "feature_set": "support_reclaim + entry_candle_up",
+                "candidate": "bar_best_support_reclaim_lb60_thr0.0002_hold30_long_us_late",
+                "filter": "entry_candle_up",
+                "direction": "long",
+                "win_rate": 0.63,
+                "payoff_ratio_r": 1.08,
+                "net_points": 160.0,
+                "future_pass": True,
+                "selected_folds": 1,
+            }
+        ]
+    )
+
+
+def test_scan_feature_trigger_once_detects_support_reclaim_feature(tmp_path):
+    history_path = tmp_path / "scanner-history.jsonl"
+    state_path = tmp_path / "scanner-state.json"
+    snapshots = [
+        {"last": 100.0, "bid": 99.75, "ask": 100.25, "order_ready": True},
+        {"last": 98.0, "bid": 97.75, "ask": 98.25, "order_ready": True},
+        {"last": 97.0, "bid": 96.75, "ask": 97.25, "order_ready": True},
+        {"last": 96.0, "bid": 95.75, "ask": 96.25, "order_ready": True},
+        {"last": 96.5, "bid": 96.25, "ask": 96.75, "order_ready": True},
+        {"last": 96.75, "bid": 96.5, "ask": 97.0, "order_ready": True},
+        {"last": 98.0, "bid": 97.75, "ask": 98.25, "order_ready": True},
+    ]
+    broker = FakeBroker(snapshots)
+    strategy_config = DebateDelayedStrategyConfig(
+        audit_path=tmp_path / "audit.jsonl",
+        contract=IBKRContractSpec(symbol="MNQ", last_trade_date_or_contract_month="202606"),
+        snapshot_attempts=1,
+    )
+    scanner_config = FeatureScannerConfig(
+        history_path=history_path,
+        state_path=state_path,
+        min_history_points=7,
+        support_reclaim_points=1.0,
+    )
+    result = {}
+    for _ in range(7):
+        result = scan_feature_trigger_once(
+            _scanner_feature_sets(),
+            scanner_config=scanner_config,
+            strategy_config=strategy_config,
+            broker=broker,
+        )
+
+    assert result["status"] == "triggered"
+    assert result["trigger"].direction == "long"
+    assert result["trigger"].feature_set == "support_reclaim + entry_candle_up"
+    assert result["evaluation"]["reason"].startswith("support_reclaim")
+    assert state_path.exists()
+
+
+def test_run_debate_delayed_scanner_once_executes_after_scanner_trigger(tmp_path):
+    snapshots = [
+        {"last": 100.0, "bid": 99.75, "ask": 100.25, "order_ready": True},
+        {"last": 98.0, "bid": 97.75, "ask": 98.25, "order_ready": True},
+        {"last": 97.0, "bid": 96.75, "ask": 97.25, "order_ready": True},
+        {"last": 96.0, "bid": 95.75, "ask": 96.25, "order_ready": True},
+        {"last": 96.5, "bid": 96.25, "ask": 96.75, "order_ready": True},
+        {"last": 96.75, "bid": 96.5, "ask": 97.0, "order_ready": True},
+        {"last": 98.0, "bid": 97.75, "ask": 98.25, "order_ready": True},
+        {"last": 98.25, "bid": 98.0, "ask": 98.5, "order_ready": True},
+        {"last": 100.5, "bid": 100.25, "ask": 100.75, "order_ready": True},
+    ]
+    broker = FakeBroker(snapshots)
+    plan = DebateExecutionPlan(
+        decision_id="decision-1",
+        feature_set="support_reclaim + entry_candle_up",
+        stance="conditional",
+        recheck_after_seconds=120,
+        long_trigger=100.0,
+        long_stop=84.0,
+        long_target=124.0,
+    )
+    strategy_config = DebateDelayedStrategyConfig(
+        audit_path=tmp_path / "audit.jsonl",
+        state_path=tmp_path / "strategy-state.json",
+        contract=IBKRContractSpec(symbol="MNQ", last_trade_date_or_contract_month="202606"),
+        submit=False,
+        skip_preflight=True,
+        enforce_delay=False,
+        snapshot_attempts=1,
+        max_signal_age_seconds=999999,
+    )
+    scanner_config = FeatureScannerConfig(
+        history_path=tmp_path / "scanner-history.jsonl",
+        state_path=tmp_path / "scanner-state.json",
+        min_history_points=7,
+        support_reclaim_points=1.0,
+    )
+    result = {}
+    for _ in range(6):
+        result = run_debate_delayed_scanner_once(
+            feature_sets=_scanner_feature_sets(),
+            planner=StaticDebatePlanner(plan),
+            strategy_config=strategy_config,
+            scanner_config=scanner_config,
+            broker=broker,
+        )
+        assert result["status"] == "no_feature_trigger"
+    result = run_debate_delayed_scanner_once(
+        feature_sets=_scanner_feature_sets(),
+        planner=StaticDebatePlanner(plan),
+        strategy_config=strategy_config,
+        scanner_config=scanner_config,
+        broker=broker,
+    )
+
+    assert result["status"] == "dry_run"
+    assert result["route"]["action"] == "BUY"
+    assert broker.submitted[0].strategy_id == "nq_llm_debate_delayed"
 
 
 def test_run_debate_delayed_strategy_once_dry_runs_after_delay_recheck(tmp_path):
@@ -290,3 +412,44 @@ def test_run_nq_llm_debate_paper_trader_script_wires_arguments(tmp_path, monkeyp
     assert captured["config"].skip_preflight is True
     assert captured["config"].enforce_delay is False
     assert '"status": "dry_run"' in capsys.readouterr().out
+
+
+def test_run_nq_llm_debate_paper_trader_script_wires_scan_mode(tmp_path, monkeypatch, capsys):
+    feature_path = tmp_path / "features.csv"
+    _scanner_feature_sets().to_csv(feature_path, index=False)
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "run_nq_llm_debate_paper_trader.py"
+    spec = importlib.util.spec_from_file_location("run_nq_llm_debate_paper_trader", script_path)
+    script = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(script)
+    captured = {}
+
+    def fake_scan_once(*, feature_sets, planner, strategy_config, scanner_config, broker=None):
+        captured["feature_sets"] = feature_sets
+        captured["strategy_config"] = strategy_config
+        captured["scanner_config"] = scanner_config
+        return {"status": "no_feature_trigger", "reason": "no_scanner_rule_matched"}
+
+    monkeypatch.setattr(script, "run_debate_delayed_scanner_once", fake_scan_once)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_nq_llm_debate_paper_trader.py",
+            "--scan",
+            "--feature-sets",
+            str(feature_path),
+            "--feature-set",
+            "support_reclaim + entry_candle_up",
+            "--scanner-history",
+            str(tmp_path / "history.jsonl"),
+            "--scanner-state",
+            str(tmp_path / "scanner-state.json"),
+            "--no-enforce-delay",
+        ],
+    )
+
+    assert script.main() == 0
+    assert captured["feature_sets"].iloc[0]["win_rate"] > 0.53
+    assert captured["scanner_config"].feature_set == "support_reclaim + entry_candle_up"
+    assert captured["strategy_config"].enforce_delay is False
+    assert '"status": "no_feature_trigger"' in capsys.readouterr().out

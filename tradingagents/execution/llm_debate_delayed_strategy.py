@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import time
@@ -197,6 +198,20 @@ class DebateDelayedStrategyConfig:
     enforce_delay: bool = True
 
 
+@dataclass(frozen=True)
+class FeatureScannerConfig:
+    history_path: Path = Path(".tmp/nq-llm-debate-scanner-history.jsonl")
+    state_path: Path = Path(".tmp/nq-llm-debate-scanner-state.json")
+    feature_set: str | None = None
+    min_history_points: int = 7
+    max_history_points: int = 180
+    cooldown_seconds: float = 120.0
+    support_reclaim_points: float = 1.0
+    max_support_reclaim_points: float = 12.0
+    vwap_distance_z_threshold: float = 0.67
+    require_order_ready: bool = True
+
+
 def load_tradeable_feature_sets(
     path: Path | str,
     *,
@@ -217,6 +232,147 @@ def load_tradeable_feature_sets(
     selected["payoff_ratio_r"] = pd.to_numeric(selected[payoff_column], errors="coerce")
     selected["net_points"] = pd.to_numeric(selected[net_column], errors="coerce")
     return selected.reset_index(drop=True)
+
+
+def run_debate_delayed_scanner_once(
+    *,
+    feature_sets: pd.DataFrame,
+    planner: DebatePlanner,
+    strategy_config: DebateDelayedStrategyConfig | None = None,
+    scanner_config: FeatureScannerConfig | None = None,
+    broker: IBKRPaperBroker | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    strategy_config = strategy_config or DebateDelayedStrategyConfig()
+    scanner_config = scanner_config or FeatureScannerConfig()
+    active_broker = broker or IBKRPaperBroker(audit_path=strategy_config.audit_path)
+    scan = scan_feature_trigger_once(
+        feature_sets,
+        scanner_config=scanner_config,
+        strategy_config=strategy_config,
+        broker=active_broker,
+        now=now,
+    )
+    if scan["status"] != "triggered":
+        return audit_and_return(strategy_config.audit_path, {"submitted": False, **scan})
+    return run_debate_delayed_strategy_once(
+        trigger=scan["trigger"],
+        planner=planner,
+        config=strategy_config,
+        broker=active_broker,
+        now=now,
+    )
+
+
+def run_debate_delayed_scanner_daemon(
+    *,
+    feature_sets: pd.DataFrame,
+    planner: DebatePlanner,
+    strategy_config: DebateDelayedStrategyConfig | None = None,
+    scanner_config: FeatureScannerConfig | None = None,
+    broker: IBKRPaperBroker | None = None,
+    interval_seconds: float = 30.0,
+    max_iterations: int | None = 1,
+) -> dict[str, Any]:
+    events = []
+    iteration = 0
+    while max_iterations is None or iteration < max_iterations:
+        iteration += 1
+        event = run_debate_delayed_scanner_once(
+            feature_sets=feature_sets,
+            planner=planner,
+            strategy_config=strategy_config,
+            scanner_config=scanner_config,
+            broker=broker,
+        )
+        events.append(event)
+        if event.get("status") in {"dry_run", "submitted"}:
+            break
+        if max_iterations is None or iteration < max_iterations:
+            time.sleep(max(0.0, float(interval_seconds)))
+    return {"status": "completed", "iterations": iteration, "events": events}
+
+
+def scan_feature_trigger_once(
+    feature_sets: pd.DataFrame,
+    *,
+    scanner_config: FeatureScannerConfig | None = None,
+    strategy_config: DebateDelayedStrategyConfig | None = None,
+    broker: IBKRPaperBroker | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    scanner_config = scanner_config or FeatureScannerConfig()
+    strategy_config = strategy_config or DebateDelayedStrategyConfig()
+    if feature_sets.empty:
+        return {"status": "scanner_blocked", "reason": "no_tradeable_feature_sets"}
+    active_broker = broker or IBKRPaperBroker(audit_path=strategy_config.audit_path)
+    snapshots = collect_snapshots(active_broker, strategy_config)
+    snapshot = snapshots[-1] if snapshots else {}
+    if scanner_config.require_order_ready and not snapshot.get("order_ready"):
+        return {"status": "scanner_blocked", "reason": "market_snapshot_not_order_ready", "snapshot": snapshot}
+    timestamp = now or datetime.now(UTC)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=UTC)
+    timestamp = timestamp.astimezone(UTC)
+    event = scanner_market_event(timestamp, snapshot)
+    append_scanner_history(scanner_config.history_path, event)
+    history = load_scanner_history(scanner_config.history_path, scanner_config.max_history_points)
+    if len(history) < scanner_config.min_history_points:
+        return {
+            "status": "no_feature_trigger",
+            "reason": "insufficient_scanner_history",
+            "history_points": len(history),
+            "required_points": scanner_config.min_history_points,
+            "snapshot": snapshot,
+        }
+    state = load_strategy_state(scanner_config.state_path)
+    candidates = rank_scanner_feature_sets(feature_sets, scanner_config.feature_set)
+    for _, row in candidates.iterrows():
+        evaluation = evaluate_scanner_feature(row, history, scanner_config)
+        if not evaluation["triggered"]:
+            continue
+        trigger = FeatureTrigger.from_series(
+            row,
+            trigger_price=float(evaluation["trigger_price"]),
+            trigger_time=timestamp.isoformat(),
+        )
+        trigger = FeatureTrigger(
+            **(
+                asdict(trigger)
+                | {
+                    "direction": evaluation["direction"],
+                    "context": trigger.context
+                    | {
+                        "scanner": {
+                            key: normalize_json_value(value)
+                            for key, value in evaluation.items()
+                            if key not in {"triggered", "trigger_price", "direction"}
+                        }
+                    },
+                }
+            )
+        )
+        cooldown = scanner_cooldown_status(trigger, state, timestamp, scanner_config.cooldown_seconds)
+        if not cooldown["passed"]:
+            return {"status": "no_feature_trigger", "reason": "scanner_cooldown", "cooldown": cooldown, "trigger": trigger}
+        save_strategy_state(
+            scanner_config.state_path,
+            {
+                "last_scanner_trigger_key": build_trigger_key(trigger),
+                "last_scanner_feature_set": trigger.feature_set,
+                "last_scanner_trigger_at": trigger.trigger_time,
+                "updated_at": datetime.now(UTC).isoformat(),
+            },
+        )
+        return {
+            "status": "triggered",
+            "reason": evaluation["reason"],
+            "trigger": trigger,
+            "evaluation": evaluation,
+            "snapshot": snapshot,
+            "history_points": len(history),
+        }
+    return {"status": "no_feature_trigger", "reason": "no_scanner_rule_matched", "snapshot": snapshot, "history_points": len(history)}
 
 
 def select_feature_trigger(
@@ -367,6 +523,233 @@ def collect_snapshots(broker: IBKRPaperBroker, config: DebateDelayedStrategyConf
         if attempt + 1 < config.snapshot_attempts:
             time.sleep(max(0.0, config.snapshot_retry_seconds))
     return snapshots
+
+
+def scanner_market_event(timestamp: datetime, snapshot: dict[str, Any]) -> dict[str, Any]:
+    bid = optional_float(snapshot.get("bid"))
+    ask = optional_float(snapshot.get("ask"))
+    last = optional_float(snapshot.get("last"))
+    mid = (bid + ask) / 2 if bid is not None and ask is not None else last
+    return {
+        "event_type": "nq_llm_debate_scanner_market_event",
+        "ts": timestamp.isoformat(),
+        "bid": bid,
+        "ask": ask,
+        "last": last,
+        "mid": mid,
+        "spread": optional_float(snapshot.get("spread")),
+        "market_data_type": snapshot.get("market_data_type"),
+        "order_ready": bool(snapshot.get("order_ready")),
+        "snapshot_time": snapshot.get("snapshot_time"),
+    }
+
+
+def append_scanner_history(path: Path, event: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, sort_keys=True, default=str) + "\n")
+
+
+def load_scanner_history(path: Path, max_points: int) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("event_type") != "nq_llm_debate_scanner_market_event":
+            continue
+        event_ts = parse_timestamp(str(event.get("ts", "")))
+        price = optional_float(event.get("last")) or optional_float(event.get("mid"))
+        if event_ts is None or price is None:
+            continue
+        event["ts"] = event_ts
+        event["price"] = price
+        rows.append(event)
+    if not rows:
+        return pd.DataFrame()
+    frame = pd.DataFrame(rows).sort_values("ts").drop_duplicates("ts")
+    return frame.tail(max(1, int(max_points))).reset_index(drop=True)
+
+
+def rank_scanner_feature_sets(feature_sets: pd.DataFrame, feature_set: str | None) -> pd.DataFrame:
+    selected = feature_sets
+    if feature_set:
+        selected = selected[selected["feature_set"].astype(str).eq(feature_set)]
+    if selected.empty:
+        return selected
+    sort_columns = [column for column in ["future_pass", "selected_folds", "net_points", "win_rate", "payoff_ratio_r"] if column in selected.columns]
+    if not sort_columns:
+        return selected
+    ascending = [False] * len(sort_columns)
+    return selected.sort_values(sort_columns, ascending=ascending).reset_index(drop=True)
+
+
+def evaluate_scanner_feature(row: pd.Series, history: pd.DataFrame, config: FeatureScannerConfig) -> dict[str, Any]:
+    prices = pd.to_numeric(history["price"], errors="coerce").dropna().reset_index(drop=True)
+    if len(prices) < config.min_history_points:
+        return {"triggered": False, "reason": "insufficient_scanner_history", "history_points": int(len(prices))}
+    candidate = str(row.get("candidate", row.get("feature_set", ""))).lower()
+    filter_name = str(row.get("filter", "")).lower()
+    direction = inferred_direction(candidate)
+    base = evaluate_base_candidate(candidate, prices, config)
+    if not base["triggered"]:
+        return base | {"direction": direction}
+    filter_result = evaluate_feature_filter(filter_name, prices, config)
+    if not filter_result["triggered"]:
+        return filter_result | {"direction": direction}
+    return {
+        "triggered": True,
+        "reason": f"{base['reason']}+{filter_result['reason']}",
+        "direction": direction,
+        "trigger_price": float(prices.iloc[-1]),
+        "base": base,
+        "filter": filter_result,
+        "last_price": float(prices.iloc[-1]),
+        "return_1m": one_period_return(prices),
+        "momentum_60": momentum_points(prices, min(60, len(prices) - 1)),
+        "z_30": z_score(prices, min(30, len(prices))),
+        "vwap_distance_z": distance_z_score(prices),
+    }
+
+
+def evaluate_base_candidate(candidate: str, prices: pd.Series, config: FeatureScannerConfig) -> dict[str, Any]:
+    if "mean_reversion" in candidate:
+        lookback = extract_int(candidate, "lb", default=30)
+        threshold = extract_float(candidate, "thr", default=1.4)
+        active_lookback = min(lookback, len(prices))
+        current_z = z_score(prices, active_lookback)
+        triggered = current_z is not None and current_z <= -abs(threshold)
+        return {
+            "triggered": bool(triggered),
+            "reason": "mean_reversion_z_flush" if triggered else "mean_reversion_z_not_extreme",
+            "z_score": current_z,
+            "lookback": active_lookback,
+            "threshold": -abs(threshold),
+        }
+    if "support_reclaim" in candidate:
+        lookback = extract_int(candidate, "lb", default=60)
+        active_lookback = min(lookback, len(prices))
+        support = float(prices.tail(active_lookback).min())
+        current = float(prices.iloc[-1])
+        previous = float(prices.iloc[-2])
+        reclaimed = previous <= support + config.support_reclaim_points and current > support + config.support_reclaim_points
+        not_extended = current <= support + config.max_support_reclaim_points
+        return {
+            "triggered": bool(reclaimed and not_extended),
+            "reason": "support_reclaim" if reclaimed and not_extended else "support_not_reclaimed",
+            "support": support,
+            "previous_price": previous,
+            "last_price": current,
+        }
+    if "momentum" in candidate:
+        lookback = extract_int(candidate, "lb", default=60)
+        threshold = extract_float(candidate, "thr", default=0.0006)
+        active_lookback = min(lookback, len(prices) - 1)
+        momentum = normalized_momentum(prices, active_lookback)
+        triggered = momentum is not None and momentum >= threshold
+        return {
+            "triggered": bool(triggered),
+            "reason": "momentum_breakout" if triggered else "momentum_below_threshold",
+            "momentum": momentum,
+            "lookback": active_lookback,
+            "threshold": threshold,
+        }
+    return {"triggered": False, "reason": "unsupported_scanner_candidate"}
+
+
+def evaluate_feature_filter(filter_name: str, prices: pd.Series, config: FeatureScannerConfig) -> dict[str, Any]:
+    if not filter_name or filter_name == "none":
+        return {"triggered": True, "reason": "no_filter"}
+    return_1m = one_period_return(prices)
+    if filter_name == "entry_candle_up" or filter_name == "return_1m_positive":
+        return {"triggered": return_1m is not None and return_1m > 0, "reason": "return_1m_positive", "return_1m": return_1m}
+    if filter_name == "entry_candle_down" or filter_name == "return_1m_negative":
+        return {"triggered": return_1m is not None and return_1m < 0, "reason": "return_1m_negative", "return_1m": return_1m}
+    if filter_name == "momentum_60_positive":
+        momentum = momentum_points(prices, min(60, len(prices) - 1))
+        return {"triggered": momentum is not None and momentum > 0, "reason": "momentum_60_positive", "momentum_60": momentum}
+    if filter_name == "z_30_negative":
+        current_z = z_score(prices, min(30, len(prices)))
+        return {"triggered": current_z is not None and current_z < 0, "reason": "z_30_negative", "z_30": current_z}
+    if filter_name == "vwap_distance_high":
+        distance = distance_z_score(prices)
+        return {
+            "triggered": distance is not None and abs(distance) >= config.vwap_distance_z_threshold,
+            "reason": "vwap_distance_high",
+            "vwap_distance_z": distance,
+            "threshold": config.vwap_distance_z_threshold,
+        }
+    return {"triggered": False, "reason": f"unsupported_filter:{filter_name}"}
+
+
+def scanner_cooldown_status(trigger: FeatureTrigger, state: dict[str, Any], timestamp: datetime, cooldown_seconds: float) -> dict[str, Any]:
+    previous_key = state.get("last_scanner_trigger_key")
+    previous_time = parse_timestamp(str(state.get("last_scanner_trigger_at", "")))
+    if previous_key != build_trigger_key(trigger) or previous_time is None:
+        return {"passed": True}
+    elapsed = (timestamp - previous_time).total_seconds()
+    return {"passed": elapsed >= cooldown_seconds, "elapsed_seconds": elapsed, "cooldown_seconds": cooldown_seconds}
+
+
+def inferred_direction(candidate: str) -> str:
+    if "_short_" in candidate or candidate.endswith("_short"):
+        return "short"
+    if "_long_" in candidate or candidate.endswith("_long"):
+        return "long"
+    return "unknown"
+
+
+def extract_int(text: str, prefix: str, *, default: int) -> int:
+    match = re.search(rf"{re.escape(prefix)}(\d+)", text)
+    return int(match.group(1)) if match else default
+
+
+def extract_float(text: str, prefix: str, *, default: float) -> float:
+    match = re.search(rf"{re.escape(prefix)}(\d+(?:\.\d+)?)", text)
+    return float(match.group(1)) if match else default
+
+
+def one_period_return(prices: pd.Series) -> float | None:
+    if len(prices) < 2:
+        return None
+    previous = float(prices.iloc[-2])
+    current = float(prices.iloc[-1])
+    if previous == 0:
+        return None
+    return current / previous - 1.0
+
+
+def momentum_points(prices: pd.Series, lookback: int) -> float | None:
+    if lookback <= 0 or len(prices) <= lookback:
+        return None
+    return float(prices.iloc[-1] - prices.iloc[-lookback - 1])
+
+
+def normalized_momentum(prices: pd.Series, lookback: int) -> float | None:
+    points = momentum_points(prices, lookback)
+    reference = float(prices.iloc[-lookback - 1]) if lookback > 0 and len(prices) > lookback else 0.0
+    if points is None or reference == 0:
+        return None
+    return points / reference
+
+
+def z_score(prices: pd.Series, lookback: int) -> float | None:
+    if lookback < 2 or len(prices) < lookback:
+        return None
+    window = prices.tail(lookback)
+    mean = float(window.mean())
+    std = float(window.std())
+    if std == 0 or math.isnan(std):
+        return None
+    return (float(prices.iloc[-1]) - mean) / std
+
+
+def distance_z_score(prices: pd.Series) -> float | None:
+    current_z = z_score(prices, min(30, len(prices)))
+    return current_z
 
 
 def build_trigger_key(trigger: FeatureTrigger) -> str:

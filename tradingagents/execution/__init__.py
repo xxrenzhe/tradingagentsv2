@@ -41,6 +41,7 @@ from .walk_forward import WalkForwardConfig, walk_forward_gate_replay
 from .llm_debate_delayed_strategy import (
     DebateDelayedStrategyConfig,
     DebateExecutionPlan,
+    FeatureScannerConfig,
     FeatureTrigger,
     LLMDebatePlanner,
     RuleDebatePlanner,
@@ -50,7 +51,10 @@ from .llm_debate_delayed_strategy import (
     load_tradeable_feature_sets,
     planner_from_env_or_args,
     route_plan,
+    run_debate_delayed_scanner_daemon,
+    run_debate_delayed_scanner_once,
     run_debate_delayed_strategy_once,
+    scan_feature_trigger_once,
     select_feature_trigger,
 )
 
@@ -79,6 +83,7 @@ __all__ = [
     "LiveStrategySpec",
     "DebateDelayedStrategyConfig",
     "DebateExecutionPlan",
+    "FeatureScannerConfig",
     "FeatureTrigger",
     "LLMDebatePlanner",
     "RuleDebatePlanner",
@@ -113,7 +118,10 @@ __all__ = [
     "planner_from_env_or_args",
     "route_plan",
     "submit_ibkr_paper_order",
+    "run_debate_delayed_scanner_daemon",
+    "run_debate_delayed_scanner_once",
     "run_debate_delayed_strategy_once",
+    "scan_feature_trigger_once",
     "select_feature_trigger",
     "walk_forward_gate_replay",
     "evaluate_mean_reversion_signal",

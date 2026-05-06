@@ -12,11 +12,14 @@ if str(ROOT_DIR) not in sys.path:
 from tradingagents.config.env import load_project_env
 from tradingagents.execution import (
     DebateDelayedStrategyConfig,
+    FeatureScannerConfig,
     IBKRConnectionConfig,
     IBKRContractSpec,
     IBKRPaperBroker,
     load_tradeable_feature_sets,
     planner_from_env_or_args,
+    run_debate_delayed_scanner_daemon,
+    run_debate_delayed_scanner_once,
     run_debate_delayed_strategy_once,
     select_feature_trigger,
 )
@@ -32,7 +35,7 @@ def main() -> int:
     )
     parser.add_argument("--feature-sets", default="reports/NQ-5y-high-win-payoff-past-fold-validation.csv")
     parser.add_argument("--feature-set", default=None, help="Exact feature_set to trade. Default selects first qualified row.")
-    parser.add_argument("--trigger-price", type=float, required=True)
+    parser.add_argument("--trigger-price", type=float, default=None)
     parser.add_argument("--trigger-time", default=None, help="ISO timestamp for the script-scanned trigger. Default is now.")
     parser.add_argument("--symbol", default="MNQ")
     parser.add_argument("--contract-month", default="202606")
@@ -50,6 +53,16 @@ def main() -> int:
     parser.add_argument("--snapshot-retry-seconds", type=float, default=1.0)
     parser.add_argument("--audit-path", default=".tmp/nq-llm-debate-paper-audit.jsonl")
     parser.add_argument("--state-path", default=".tmp/nq-llm-debate-paper-state.json")
+    parser.add_argument("--scan", action="store_true", help="Scan IBKR snapshots for a qualifying feature trigger before LLM debate.")
+    parser.add_argument("--scanner-history", default=".tmp/nq-llm-debate-scanner-history.jsonl")
+    parser.add_argument("--scanner-state", default=".tmp/nq-llm-debate-scanner-state.json")
+    parser.add_argument("--scanner-min-history-points", type=int, default=7)
+    parser.add_argument("--scanner-max-history-points", type=int, default=180)
+    parser.add_argument("--scanner-cooldown-seconds", type=float, default=120.0)
+    parser.add_argument("--support-reclaim-points", type=float, default=1.0)
+    parser.add_argument("--max-support-reclaim-points", type=float, default=12.0)
+    parser.add_argument("--vwap-distance-z-threshold", type=float, default=0.67)
+    parser.add_argument("--allow-not-order-ready-scan", action="store_true")
     parser.add_argument("--decision-json", default=None, help="Deterministic debate JSON. Overrides LLM/env planner.")
     parser.add_argument("--llm-provider", default=None, help="LLM provider for debate planner, or env TRADINGAGENTS_NQ_DEBATE_LLM_PROVIDER.")
     parser.add_argument("--llm-model", default=None, help="LLM model for debate planner, or env TRADINGAGENTS_NQ_DEBATE_LLM_MODEL.")
@@ -59,7 +72,15 @@ def main() -> int:
         action="store_true",
         help="Skip waiting recheck_after_seconds. Use for deterministic tests only.",
     )
+    parser.add_argument("--daemon", action="store_true", help="Run scanner loop. Requires --scan.")
+    parser.add_argument("--interval-seconds", type=float, default=30.0)
+    parser.add_argument("--max-iterations", type=int, default=1, help="Use 0 with --daemon to run until stopped.")
     args = parser.parse_args()
+
+    if not args.scan and args.trigger_price is None:
+        raise SystemExit("--trigger-price is required unless --scan is enabled")
+    if args.daemon and not args.scan:
+        raise SystemExit("--daemon requires --scan")
 
     contract = IBKRContractSpec(
         symbol=args.symbol.upper(),
@@ -90,12 +111,6 @@ def main() -> int:
         min_payoff_ratio=config.min_payoff_ratio,
         min_net_points=config.min_net_points,
     )
-    trigger = select_feature_trigger(
-        feature_sets,
-        feature_set=args.feature_set,
-        trigger_price=args.trigger_price,
-        trigger_time=args.trigger_time,
-    )
     planner = planner_from_env_or_args(
         decision_json=args.decision_json,
         provider=args.llm_provider,
@@ -115,9 +130,48 @@ def main() -> int:
                 readonly=connection.readonly,
             )
         )
-    result = run_debate_delayed_strategy_once(trigger=trigger, planner=planner, config=config, broker=broker)
+    if args.scan:
+        scanner_config = FeatureScannerConfig(
+            history_path=Path(args.scanner_history),
+            state_path=Path(args.scanner_state),
+            feature_set=args.feature_set,
+            min_history_points=args.scanner_min_history_points,
+            max_history_points=args.scanner_max_history_points,
+            cooldown_seconds=args.scanner_cooldown_seconds,
+            support_reclaim_points=args.support_reclaim_points,
+            max_support_reclaim_points=args.max_support_reclaim_points,
+            vwap_distance_z_threshold=args.vwap_distance_z_threshold,
+            require_order_ready=not args.allow_not_order_ready_scan,
+        )
+        if args.daemon:
+            result = run_debate_delayed_scanner_daemon(
+                feature_sets=feature_sets,
+                planner=planner,
+                strategy_config=config,
+                scanner_config=scanner_config,
+                broker=broker,
+                interval_seconds=args.interval_seconds,
+                max_iterations=None if args.max_iterations == 0 else args.max_iterations,
+            )
+        else:
+            result = run_debate_delayed_scanner_once(
+                feature_sets=feature_sets,
+                planner=planner,
+                strategy_config=config,
+                scanner_config=scanner_config,
+                broker=broker,
+            )
+    else:
+        trigger = select_feature_trigger(
+            feature_sets,
+            feature_set=args.feature_set,
+            trigger_price=float(args.trigger_price),
+            trigger_time=args.trigger_time,
+        )
+        result = run_debate_delayed_strategy_once(trigger=trigger, planner=planner, config=config, broker=broker)
     print(json.dumps(result, indent=2, sort_keys=True, default=str))
-    return 0 if result.get("status") in {"dry_run", "submitted", "no_trade_after_recheck", "duplicate_skipped"} else 2
+    ok_statuses = {"completed", "dry_run", "submitted", "no_trade_after_recheck", "duplicate_skipped", "no_feature_trigger"}
+    return 0 if result.get("status") in ok_statuses else 2
 
 
 if __name__ == "__main__":
