@@ -70,6 +70,13 @@ def main() -> int:
     parser.add_argument("--llm-provider", default=None, help="LLM provider for debate planner, or env TRADINGAGENTS_NQ_DEBATE_LLM_PROVIDER.")
     parser.add_argument("--llm-model", default=None, help="LLM model for debate planner, or env TRADINGAGENTS_NQ_DEBATE_LLM_MODEL.")
     parser.add_argument("--llm-base-url", default=None)
+    parser.add_argument("--debate-rounds", type=int, default=3, choices=range(2, 5), help="Number of LLM debate rounds before final executable JSON.")
+    parser.add_argument(
+        "--minimum-recheck-after-seconds",
+        type=int,
+        default=120,
+        help="Minimum delay before rechecking the LLM debate plan. Default enforces a two-minute NQ recheck.",
+    )
     parser.add_argument(
         "--no-enforce-delay",
         action="store_true",
@@ -115,6 +122,7 @@ def main() -> int:
         snapshot_retry_seconds=args.snapshot_retry_seconds,
         allow_existing_exposure=args.allow_existing_exposure,
         enforce_delay=not args.no_enforce_delay,
+        minimum_recheck_after_seconds=args.minimum_recheck_after_seconds,
         trade_log_dir=Path(args.trade_log_dir),
     )
     feature_sets = load_tradeable_feature_sets(
@@ -128,6 +136,7 @@ def main() -> int:
         provider=args.llm_provider,
         model=args.llm_model,
         base_url=args.llm_base_url,
+        debate_rounds=args.debate_rounds,
     )
     broker = None
     if args.client_id is not None:

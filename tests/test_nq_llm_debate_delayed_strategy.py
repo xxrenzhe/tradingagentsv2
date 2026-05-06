@@ -10,6 +10,7 @@ import pandas as pd
 from tradingagents.execution import (
     DebateDelayedStrategyConfig,
     DebateExecutionPlan,
+    LLMDebatePlanner,
     invoke_aicode_streaming_json,
     FeatureScannerConfig,
     FeatureTrigger,
@@ -146,6 +147,60 @@ def test_debate_execution_plan_accepts_string_summary():
     )
 
     assert plan.debate_summary == {"summary": "Long case; short case; risk case."}
+
+
+def test_llm_debate_planner_runs_multiple_rounds_before_final_plan():
+    trigger = FeatureTrigger(
+        feature_set="flush_hold",
+        candidate="bar_best",
+        direction="long",
+        trigger_price=25000.0,
+        trigger_time="2026-05-06T00:00:00+00:00",
+        win_rate=0.55,
+        payoff_ratio_r=1.2,
+    )
+    calls = []
+
+    class FakePlanner(LLMDebatePlanner):
+        def invoke(self, prompt):
+            calls.append(prompt)
+            if "ROUND: 1 of 3" in prompt:
+                return json.dumps({"round": 1, "long_case": "hold", "short_case": "fail", "risk_case": "chase", "confidence": 0.55})
+            if "ROUND: 2 of 3" in prompt:
+                assert "PREVIOUS_ROUNDS" in prompt
+                return json.dumps({"round": 2, "long_case": "reclaim", "short_case": "break", "risk_case": "zone", "confidence": 0.58})
+            if "ROUND: 3 of 3" in prompt:
+                assert "reclaim" in prompt
+                return json.dumps({"round": 3, "long_case": "confirmed", "short_case": "invalidated", "risk_case": "wait", "confidence": 0.61})
+            assert "DEBATE_TRANSCRIPT" in prompt
+            return json.dumps(
+                {
+                    "decision_id": "final",
+                    "feature_set": "flush_hold",
+                    "stance": "conditional",
+                    "recheck_after_seconds": 120,
+                    "long_trigger": 25001.0,
+                    "short_trigger": 24990.0,
+                    "no_trade_low": 24990.0,
+                    "no_trade_high": 25001.0,
+                    "long_stop": 24984.0,
+                    "long_target": 25024.0,
+                    "short_stop": 25016.0,
+                    "short_target": 24976.0,
+                    "confidence": 0.62,
+                    "debate_summary": "final plan",
+                }
+            )
+
+    planner = FakePlanner(provider="aicode", model="gpt-5.4", debate_rounds=3)
+
+    plan = planner.build_plan(trigger, [{"last": 25000.0, "bid": 24999.75, "ask": 25000.25}])
+
+    assert len(calls) == 4
+    assert plan.decision_id == "final"
+    assert plan.recheck_after_seconds == 120
+    rounds = json.loads(plan.debate_summary["rounds"])
+    assert [item["round"] for item in rounds] == [1, 2, 3]
 
 
 class FakeBroker:
@@ -358,6 +413,53 @@ def test_run_realtime_debate_trader_blocks_when_preflight_not_ready(tmp_path):
     assert (tmp_path / "status.json").exists()
 
 
+def test_run_realtime_debate_trader_retries_preflight_in_daemon_mode(tmp_path, monkeypatch):
+    broker = FakeBroker([{"last": 100.0, "bid": 99.75, "ask": 100.25, "order_ready": True}])
+    calls = {"connect": 0}
+
+    def flaky_connect():
+        calls["connect"] += 1
+        if calls["connect"] == 1:
+            return {"status": "blocked", "connected": False, "reason": "socket_not_listening"}
+        return {"status": "connected", "connected": True}
+
+    broker.connect = flaky_connect
+    monkeypatch.setattr("tradingagents.execution.llm_debate_delayed_strategy.time.sleep", lambda seconds: None)
+    monkeypatch.setattr(
+        "tradingagents.execution.llm_debate_delayed_strategy.run_debate_delayed_scanner_daemon",
+        lambda **kwargs: {"status": "completed", "iterations": 1, "events": []},
+    )
+
+    result = run_realtime_debate_trader(
+        feature_sets=_scanner_feature_sets(),
+        planner=StaticDebatePlanner(
+            DebateExecutionPlan(
+                decision_id="decision-1",
+                feature_set="support_reclaim + entry_candle_up",
+                stance="conditional",
+                recheck_after_seconds=120,
+            )
+        ),
+        config=RealtimeDebateTraderConfig(
+            strategy=DebateDelayedStrategyConfig(
+                audit_path=tmp_path / "audit.jsonl",
+                contract=IBKRContractSpec(symbol="MNQ", last_trade_date_or_contract_month="202606"),
+                snapshot_attempts=1,
+            ),
+            scanner=FeatureScannerConfig(history_path=tmp_path / "history.jsonl", state_path=tmp_path / "scanner-state.json", min_history_points=7),
+            interval_seconds=0,
+            max_iterations=None,
+            preflight_attempts=1,
+            status_path=tmp_path / "status.json",
+        ),
+        broker=broker,
+    )
+
+    assert calls["connect"] == 2
+    assert result["status"] == "completed"
+    assert "preflight_blocked" in (tmp_path / "audit.jsonl").read_text(encoding="utf-8")
+
+
 def test_run_realtime_debate_trader_writes_running_status(tmp_path):
     broker = FakeBroker(
         [
@@ -424,6 +526,7 @@ def test_run_debate_delayed_strategy_once_dry_runs_after_delay_recheck(tmp_path)
         no_trade_high=25001.0,
         long_stop=24984.0,
         long_target=25024.0,
+        debate_summary={"rounds": json.dumps([{"round": 1}, {"round": 2}, {"round": 3}])},
     )
     broker = FakeBroker(
         [
@@ -456,7 +559,61 @@ def test_run_debate_delayed_strategy_once_dry_runs_after_delay_recheck(tmp_path)
     assert broker.submitted[0].action == "BUY"
     assert (tmp_path / "state.json").exists()
     assert "nq_llm_debate_delayed_strategy" in (tmp_path / "audit.jsonl").read_text()
-    assert "NQ LLM辩论策略 做多" in next((tmp_path / "tradelogs").glob("*.md")).read_text(encoding="utf-8")
+    trade_log = next((tmp_path / "tradelogs").glob("*.md")).read_text(encoding="utf-8")
+    assert "NQ LLM辩论策略 做多" in trade_log
+    assert "LLM辩论轮数：`3`" in trade_log
+
+
+def test_run_debate_delayed_strategy_once_enforces_minimum_recheck_delay(tmp_path, monkeypatch):
+    trigger = FeatureTrigger(
+        feature_set="flush_hold",
+        candidate="bar_best",
+        direction="long",
+        trigger_price=25000.0,
+        trigger_time="2026-05-06T00:00:00+00:00",
+        win_rate=0.55,
+        payoff_ratio_r=1.2,
+    )
+    plan = DebateExecutionPlan(
+        decision_id="decision-1",
+        feature_set="flush_hold",
+        stance="conditional",
+        recheck_after_seconds=20,
+        long_trigger=25001.0,
+        long_stop=24984.0,
+        long_target=25024.0,
+    )
+    broker = FakeBroker(
+        [
+            {"last": 25000.0, "bid": 24999.75, "ask": 25000.25, "order_ready": True},
+            {"last": 25002.0, "bid": 25001.75, "ask": 25002.25, "order_ready": True},
+        ]
+    )
+    sleeps = []
+    monkeypatch.setattr("tradingagents.execution.llm_debate_delayed_strategy.time.sleep", sleeps.append)
+    config = DebateDelayedStrategyConfig(
+        audit_path=tmp_path / "audit.jsonl",
+        state_path=tmp_path / "state.json",
+        contract=IBKRContractSpec(symbol="MNQ", last_trade_date_or_contract_month="202606"),
+        submit=False,
+        skip_preflight=True,
+        enforce_delay=True,
+        minimum_recheck_after_seconds=120,
+        snapshot_attempts=1,
+        max_signal_age_seconds=999999,
+        trade_log_dir=tmp_path / "tradelogs",
+    )
+
+    result = run_debate_delayed_strategy_once(
+        trigger=trigger,
+        planner=StaticDebatePlanner(plan),
+        config=config,
+        broker=broker,
+    )
+
+    assert sleeps == [120]
+    assert result["plan"]["recheck_after_seconds"] == 120
+    assert result["status"] == "dry_run"
 
 
 def test_run_debate_delayed_strategy_once_logs_no_trade_debate_result(tmp_path):
@@ -590,12 +747,17 @@ def test_run_nq_llm_debate_paper_trader_script_wires_arguments(tmp_path, monkeyp
     spec.loader.exec_module(script)
     captured = {}
 
+    def fake_planner_from_env_or_args(**kwargs):
+        captured["planner_kwargs"] = kwargs
+        return StaticDebatePlanner(DebateExecutionPlan(decision_id="decision-1", feature_set="qualified", stance="conditional", recheck_after_seconds=120))
+
     def fake_run_once(*, trigger, planner, config, broker=None):
         captured["trigger"] = trigger
         captured["config"] = config
         captured["broker"] = broker
         return {"status": "dry_run", "submitted": False, "feature_set": trigger.feature_set}
 
+    monkeypatch.setattr(script, "planner_from_env_or_args", fake_planner_from_env_or_args)
     monkeypatch.setattr(script, "run_debate_delayed_strategy_once", fake_run_once)
     monkeypatch.setattr(
         "sys.argv",
@@ -617,6 +779,10 @@ def test_run_nq_llm_debate_paper_trader_script_wires_arguments(tmp_path, monkeyp
             str(tmp_path / "tradelogs"),
             "--submit",
             "--skip-preflight",
+            "--debate-rounds",
+            "4",
+            "--minimum-recheck-after-seconds",
+            "120",
             "--no-enforce-delay",
         ],
     )
@@ -627,6 +793,8 @@ def test_run_nq_llm_debate_paper_trader_script_wires_arguments(tmp_path, monkeyp
     assert captured["config"].submit is True
     assert captured["config"].skip_preflight is True
     assert captured["config"].enforce_delay is False
+    assert captured["config"].minimum_recheck_after_seconds == 120
+    assert captured["planner_kwargs"]["debate_rounds"] == 4
     assert captured["config"].trade_log_dir == tmp_path / "tradelogs"
     assert '"status": "dry_run"' in capsys.readouterr().out
 

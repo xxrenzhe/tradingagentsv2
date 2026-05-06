@@ -5,7 +5,7 @@ import math
 import os
 import re
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -150,26 +150,18 @@ class LLMDebatePlanner:
     model: str
     base_url: str | None = None
     timeout: float = 60.0
+    debate_rounds: int = 3
     fallback: DebatePlanner = field(default_factory=RuleDebatePlanner)
 
     def build_plan(self, trigger: FeatureTrigger, snapshots: list[dict[str, Any]]) -> DebateExecutionPlan:
-        prompt = build_debate_prompt(trigger, snapshots)
         try:
-            if self.provider.lower() == "aicode":
-                content = invoke_aicode_streaming_json(prompt, model=self.model, base_url=self.base_url, timeout=self.timeout)
-            else:
-                llm = create_llm_client(
-                    self.provider,
-                    self.model,
-                    base_url=self.base_url,
-                    timeout=self.timeout,
-                    streaming=False,
-                ).get_llm()
-                response = llm.invoke(prompt)
-                content = getattr(response, "content", response)
+            transcript = self.run_debate_rounds(trigger, snapshots)
+            prompt = build_debate_prompt(trigger, snapshots, transcript=transcript)
+            content = self.invoke(prompt)
             payload = extract_json_object(str(content))
             payload["raw_response"] = str(content)
-            return DebateExecutionPlan.from_dict(payload)
+            plan = DebateExecutionPlan.from_dict(payload)
+            return replace(plan, debate_summary=plan.debate_summary | {"rounds": json.dumps(transcript, ensure_ascii=False)})
         except Exception as exc:
             fallback_plan = self.fallback.build_plan(trigger, snapshots)
             return DebateExecutionPlan(
@@ -182,6 +174,32 @@ class LLMDebatePlanner:
                     }
                 )
             )
+
+    def run_debate_rounds(self, trigger: FeatureTrigger, snapshots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        rounds = max(2, min(4, int(self.debate_rounds)))
+        transcript: list[dict[str, Any]] = []
+        for round_index in range(1, rounds + 1):
+            prompt = build_debate_round_prompt(trigger, snapshots, transcript, round_index=round_index, total_rounds=rounds)
+            content = self.invoke(prompt)
+            try:
+                payload = extract_json_object(str(content))
+            except Exception:
+                payload = {"summary": str(content)}
+            transcript.append({"round": round_index, "raw_response": str(content), **payload})
+        return transcript
+
+    def invoke(self, prompt: str) -> str:
+        if self.provider.lower() == "aicode":
+            return invoke_aicode_streaming_json(prompt, model=self.model, base_url=self.base_url, timeout=self.timeout)
+        llm = create_llm_client(
+            self.provider,
+            self.model,
+            base_url=self.base_url,
+            timeout=self.timeout,
+            streaming=False,
+        ).get_llm()
+        response = llm.invoke(prompt)
+        return str(getattr(response, "content", response))
 
 
 @dataclass(frozen=True)
@@ -202,6 +220,7 @@ class DebateDelayedStrategyConfig:
     snapshot_retry_seconds: float = 1.0
     allow_existing_exposure: bool = False
     enforce_delay: bool = True
+    minimum_recheck_after_seconds: int = 120
     trade_log_dir: Path = DEFAULT_TRADE_LOG_DIR
 
 
@@ -262,21 +281,27 @@ def run_realtime_debate_trader(
 ) -> dict[str, Any]:
     config = config or RealtimeDebateTraderConfig()
     active_broker = broker or IBKRPaperBroker(audit_path=config.strategy.audit_path)
-    preflight = realtime_preflight(
-        broker=active_broker,
-        contract=config.strategy.contract,
-        attempts=config.preflight_attempts,
-        retry_seconds=config.preflight_retry_seconds,
-    )
-    if config.require_preflight_ready and preflight["readiness"].get("status") != "ready":
+    while True:
+        preflight = realtime_preflight(
+            broker=active_broker,
+            contract=config.strategy.contract,
+            attempts=config.preflight_attempts,
+            retry_seconds=config.preflight_retry_seconds,
+        )
+        if not config.require_preflight_ready or preflight["readiness"].get("status") == "ready":
+            break
         result = {
             "status": "preflight_blocked",
             "submitted": False,
             "preflight": preflight,
             "events": [],
+            "mode": "submit" if config.strategy.submit else "dry_run",
         }
         write_realtime_status(config.status_path, result)
-        return audit_and_return(config.strategy.audit_path, result)
+        audit_and_return(config.strategy.audit_path, result)
+        if config.max_iterations is not None:
+            return result
+        time.sleep(max(1.0, float(config.interval_seconds)))
     result = run_debate_delayed_scanner_daemon(
         feature_sets=feature_sets,
         planner=planner,
@@ -403,11 +428,26 @@ def format_debate_trade_log_entry(result: dict[str, Any], timestamp: datetime) -
         f"- IBKR结果：status=`{broker_result.get('status', '')}`；intent=`{intent.get('intent_id', '')}`；order_type=`{intent.get('order_type', '')}`",
         f"- 决策ID：`{plan.get('decision_id', '')}`",
     ]
+    rounds = parse_debate_rounds(debate_summary.get("rounds"))
+    if rounds:
+        lines.append(f"- LLM辩论轮数：`{len(rounds)}`")
     for key in ["long_case", "short_case", "risk_case", "fallback_reason"]:
         if debate_summary.get(key):
             lines.append(f"- 辩论摘要/{key}：{debate_summary[key]}")
     lines.append("")
     return "\n".join(lines)
+
+
+def parse_debate_rounds(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if not isinstance(value, str) or not value.strip():
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    return [item for item in parsed if isinstance(item, dict)] if isinstance(parsed, list) else []
 
 
 def last_snapshot(value: Any) -> dict[str, Any]:
@@ -634,8 +674,13 @@ def run_debate_delayed_strategy_once(
         )
     first_snapshots = collect_snapshots(active_broker, config)
     plan = planner.build_plan(trigger, first_snapshots)
-    if config.enforce_delay and plan.recheck_after_seconds > 0:
-        time.sleep(plan.recheck_after_seconds)
+    recheck_after_seconds = int(plan.recheck_after_seconds)
+    if config.enforce_delay:
+        recheck_after_seconds = max(recheck_after_seconds, int(config.minimum_recheck_after_seconds))
+    if config.enforce_delay and recheck_after_seconds > 0:
+        time.sleep(recheck_after_seconds)
+    if recheck_after_seconds != plan.recheck_after_seconds:
+        plan = replace(plan, recheck_after_seconds=recheck_after_seconds)
     recheck_snapshots = collect_snapshots(active_broker, config)
     recheck = recheck_snapshots[-1] if recheck_snapshots else {}
     price = market_price(recheck, fallback=trigger.trigger_price)
@@ -1021,18 +1066,42 @@ def build_intent_from_route(
     )
 
 
-def build_debate_prompt(trigger: FeatureTrigger, snapshots: list[dict[str, Any]]) -> str:
+def build_debate_round_prompt(
+    trigger: FeatureTrigger,
+    snapshots: list[dict[str, Any]],
+    transcript: list[dict[str, Any]],
+    *,
+    round_index: int,
+    total_rounds: int,
+) -> str:
+    return (
+        "You are one round in a multi-round NQ trade debate. "
+        "A script found a backtested feature trigger; do not output an order plan yet. "
+        "Debate both long and short cases, explicitly challenge the previous rounds, and focus on whether the move has stopped, "
+        "failed, reclaimed, or broken down. Return ONLY JSON with keys: round, long_case, short_case, risk_case, "
+        "key_levels, provisional_bias, confidence, next_round_question.\n\n"
+        f"ROUND: {round_index} of {total_rounds}\n\n"
+        f"FEATURE_TRIGGER:\n{json.dumps(asdict(trigger), ensure_ascii=False, sort_keys=True, default=str)}\n\n"
+        f"IBKR_SNAPSHOTS:\n{json.dumps(snapshots, ensure_ascii=False, sort_keys=True, default=str)}\n\n"
+        f"PREVIOUS_ROUNDS:\n{json.dumps(transcript, ensure_ascii=False, sort_keys=True, default=str)}"
+    )
+
+
+def build_debate_prompt(trigger: FeatureTrigger, snapshots: list[dict[str, Any]], transcript: list[dict[str, Any]] | None = None) -> str:
     return (
         "You are generating an executable NQ paper-trading plan. "
         "A script found a feature with win_rate > 53% and payoff_ratio_r > 1R. "
-        "Debate long and short scenarios and return ONLY JSON with keys: "
+        "Use the completed multi-round debate transcript to make the final executable plan. "
+        "Return ONLY JSON with keys: "
         "decision_id, feature_set, stance, recheck_after_seconds, long_trigger, short_trigger, "
         "no_trade_low, no_trade_high, long_stop, long_target, short_stop, short_target, "
         "max_chase_points, order_type, limit_offset_points, confidence, debate_summary. "
+        "Set recheck_after_seconds to at least 120 for the NQ two-minute confirmation window. "
         "Use conditional levels: buy only if price still holds/starts above long_trigger after recheck; "
         "sell only if price breaks below short_trigger after recheck; otherwise no trade.\n\n"
         f"FEATURE_TRIGGER:\n{json.dumps(asdict(trigger), ensure_ascii=False, sort_keys=True, default=str)}\n\n"
-        f"IBKR_SNAPSHOTS:\n{json.dumps(snapshots, ensure_ascii=False, sort_keys=True, default=str)}"
+        f"IBKR_SNAPSHOTS:\n{json.dumps(snapshots, ensure_ascii=False, sort_keys=True, default=str)}\n\n"
+        f"DEBATE_TRANSCRIPT:\n{json.dumps(transcript or [], ensure_ascii=False, sort_keys=True, default=str)}"
     )
 
 
@@ -1178,6 +1247,7 @@ def planner_from_env_or_args(
     provider: str | None = None,
     model: str | None = None,
     base_url: str | None = None,
+    debate_rounds: int | None = None,
 ) -> DebatePlanner:
     if decision_json:
         return StaticDebatePlanner(DebateExecutionPlan.from_dict(json.loads(decision_json)))
@@ -1188,5 +1258,6 @@ def planner_from_env_or_args(
             provider=active_provider,
             model=active_model,
             base_url=base_url or os.getenv("TRADINGAGENTS_NQ_DEBATE_LLM_BASE_URL") or None,
+            debate_rounds=debate_rounds or int(os.getenv("TRADINGAGENTS_NQ_DEBATE_ROUNDS", "3")),
         )
     return RuleDebatePlanner()
