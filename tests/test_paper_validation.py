@@ -252,7 +252,7 @@ def test_paper_runner_records_ticks_when_enabled(tmp_path):
         "last": 18000.25,
         "spread": 0.25,
         "order_ready": True,
-        "market_data_type": "test",
+        "market_data_type": "1",
         "snapshot_time": "now",
     }
     config = PaperRunnerConfig(
@@ -289,7 +289,7 @@ def test_live_signal_row_uses_ibkr_side_price_and_writes_csv(tmp_path):
         "last": 18000.25,
         "spread": 0.25,
         "order_ready": True,
-        "market_data_type": "test",
+        "market_data_type": "1",
         "snapshot_time": "now",
     }
 
@@ -325,7 +325,7 @@ def test_live_signal_row_retries_until_market_snapshot_ready(tmp_path):
     broker.connect = lambda: {"status": "connected", "connected": True}
     snapshots = [
         {"event_type": "ibkr_tick_snapshot", "symbol": "MNQ", "order_ready": False, "bid": None, "ask": None, "last": None},
-        {"event_type": "ibkr_tick_snapshot", "symbol": "MNQ", "order_ready": True, "bid": 18000.0, "ask": 18000.25, "last": 18000.0},
+        {"event_type": "ibkr_tick_snapshot", "symbol": "MNQ", "order_ready": True, "bid": 18000.0, "ask": 18000.25, "last": 18000.0, "market_data_type": "1"},
     ]
     broker.tick_snapshot = lambda spec: snapshots.pop(0)
 
@@ -336,6 +336,37 @@ def test_live_signal_row_retries_until_market_snapshot_ready(tmp_path):
 
     assert row["entry_price"] == 18000.0
     assert row["signal_source"].endswith(":ibkr_bid")
+
+
+def test_live_signal_row_blocks_delayed_market_data(tmp_path):
+    broker = IBKRPaperBroker(
+        risk=IBKRPaperRiskConfig(allowed_accounts=("DU123",), allowed_symbols=("MNQ")),
+        audit_path=tmp_path / "ibkr.jsonl",
+    )
+    broker.connect = lambda: {"status": "connected", "connected": True}
+    broker.tick_snapshot = lambda spec: {
+        "event_type": "ibkr_tick_snapshot",
+        "symbol": "MNQ",
+        "bid": 18000.0,
+        "ask": 18000.25,
+        "last": 18000.0,
+        "order_ready": True,
+        "market_data_type": "3",
+    }
+
+    result = run_live_paper_trader_once(
+        config=LivePaperTraderConfig(
+            live_signal_path=tmp_path / "live.csv",
+            state_path=tmp_path / "state.json",
+            direction=-1,
+            signal_mode="manual",
+        ),
+        broker=broker,
+    )
+
+    assert result["status"] == "signal_blocked"
+    assert result["submitted"] is False
+    assert "market snapshot is not realtime" in result["reason"]
 
 
 def test_live_paper_trader_refreshes_signal_before_runner(tmp_path, monkeypatch):
@@ -353,7 +384,7 @@ def test_live_paper_trader_refreshes_signal_before_runner(tmp_path, monkeypatch)
         "last": 18000.25,
         "spread": 0.25,
         "order_ready": True,
-        "market_data_type": "test",
+        "market_data_type": "1",
         "snapshot_time": "now",
     }
 
@@ -391,6 +422,7 @@ def test_live_paper_trader_blocks_existing_exposure(tmp_path):
         "last": 18000.25,
         "spread": 0.25,
         "order_ready": True,
+        "market_data_type": "1",
     }
 
     result = run_live_paper_trader_once(
@@ -422,6 +454,7 @@ def test_live_paper_trader_blocks_submit_when_paper_gate_fails(tmp_path, monkeyp
         "last": 18000.25,
         "spread": 0.25,
         "order_ready": True,
+        "market_data_type": "1",
     }
     monkeypatch.setattr(
         "tradingagents.execution.live_paper_trader.run_adaptive_once",
@@ -461,6 +494,7 @@ def test_live_paper_trader_accrual_mode_allows_sample_count_blocker(tmp_path, mo
         "last": 18000.25,
         "spread": 0.25,
         "order_ready": True,
+        "market_data_type": "1",
     }
     monkeypatch.setattr(
         "tradingagents.execution.live_paper_trader.run_adaptive_once",
@@ -502,6 +536,7 @@ def test_live_paper_trader_daemon_runs_one_iteration(tmp_path):
         "last": 18000.25,
         "spread": 0.25,
         "order_ready": True,
+        "market_data_type": "1",
     }
 
     result = run_live_paper_trader_daemon(

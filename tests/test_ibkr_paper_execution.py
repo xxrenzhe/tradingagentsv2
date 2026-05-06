@@ -15,6 +15,7 @@ from tradingagents.execution.ibkr import (
     IBKRPaperTradingSession,
     _bracket_protection_status,
     evaluate_paper_risk,
+    is_realtime_market_data_type,
     market_reference_price,
 )
 from tradingagents.execution.tick_recorder import IBKRTickRecorderConfig, record_ibkr_ticks
@@ -124,7 +125,7 @@ class FakeIB:
         return [SimpleNamespace(contract=contract, minTick=0.25)]
 
     def reqMktData(self, contract, genericTickList, snapshot, regulatorySnapshot):
-        return SimpleNamespace(bid=18000.0, ask=18000.25, last=18000.25, marketDataType="delayed")
+        return SimpleNamespace(bid=18000.0, ask=18000.25, last=18000.25, marketDataType="1")
 
     def reqTickByTickData(self, contract, tickType, numberOfTicks, ignoreSize):
         return SimpleNamespace(
@@ -354,6 +355,56 @@ def test_market_snapshot_qualifies_contract_and_retries_market_data_types(tmp_pa
     assert snapshot.ask_size == 7
     assert snapshot.to_dict()["bid_size"] == 5
     assert fake_ib.market_data_types == [1, 2, 3]
+
+
+def test_paper_session_blocks_delayed_market_data_by_default(tmp_path, monkeypatch):
+    fake_ib = MarketDataTypeFakeIB()
+    broker = IBKRPaperBroker(
+        connection=IBKRConnectionConfig(port=7497, account="DU123"),
+        risk=_risk(),
+        ib=fake_ib,
+        audit_path=tmp_path / "audit.jsonl",
+    )
+    session = IBKRPaperTradingSession(broker=broker, contract=IBKRContractSpec(last_trade_date_or_contract_month="202606"))
+    monkeypatch.setattr(session, "_socket_ready", lambda: True)
+
+    response = session.preflight()
+
+    assert response["readiness"]["status"] == "blocked"
+    assert "market_data_not_realtime" in response["readiness"]["missing_requirements"]
+    assert response["market_data"]["order_ready"] is True
+    assert response["market_data"]["market_data_type"] == "delayed"
+
+
+def test_paper_session_can_opt_out_of_realtime_market_data_gate(tmp_path, monkeypatch):
+    fake_ib = FakeIB()
+    broker = IBKRPaperBroker(
+        connection=IBKRConnectionConfig(port=7497, account="DU123"),
+        risk=_risk(),
+        ib=fake_ib,
+        audit_path=tmp_path / "audit.jsonl",
+    )
+    session = IBKRPaperTradingSession(
+        broker=broker,
+        contract=IBKRContractSpec(last_trade_date_or_contract_month="202606"),
+        require_realtime_market_data=False,
+    )
+    monkeypatch.setattr(session, "_socket_ready", lambda: True)
+
+    response = session.preflight()
+
+    assert response["readiness"]["status"] == "ready"
+    assert "market_data_not_realtime" not in response["readiness"]["missing_requirements"]
+
+
+def test_realtime_market_data_type_classifier():
+    assert is_realtime_market_data_type("1")
+    assert is_realtime_market_data_type("2")
+    assert is_realtime_market_data_type("live")
+    assert is_realtime_market_data_type("frozen")
+    assert not is_realtime_market_data_type("3")
+    assert not is_realtime_market_data_type("4")
+    assert not is_realtime_market_data_type("delayed")
 
 
 def test_market_reference_price_uses_action_side():

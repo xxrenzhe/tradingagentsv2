@@ -8,7 +8,7 @@ from typing import Any
 
 import pandas as pd
 
-from .ibkr import IBKRContractSpec, IBKRPaperBroker
+from .ibkr import IBKRContractSpec, IBKRPaperBroker, is_realtime_market_data_type
 
 
 LIVE_SIGNAL_COLUMNS = [
@@ -64,6 +64,7 @@ class LiveSignalConfig:
     contract: IBKRContractSpec = IBKRContractSpec()
     snapshot_attempts: int = 3
     snapshot_retry_seconds: float = 1.0
+    require_realtime_market_data: bool = True
 
 
 def build_live_signal_row(
@@ -89,6 +90,8 @@ def build_live_signal_row(
         snapshot = _order_ready_snapshot(active_broker, config)
         if not snapshot.get("order_ready"):
             raise ValueError(f"market snapshot is not order-ready: {snapshot}")
+        if config.require_realtime_market_data and not is_realtime_market_data_type(snapshot.get("market_data_type")):
+            raise ValueError(f"market snapshot is not realtime: {snapshot}")
         if config.direction > 0:
             entry_price = float(snapshot["ask"])
             signal_source = f"{signal_source}:ibkr_ask"

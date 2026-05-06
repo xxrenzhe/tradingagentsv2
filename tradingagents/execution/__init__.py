@@ -9,6 +9,7 @@ from .ibkr import (
     IBKRPaperRiskConfig,
     IBKRPaperTradingSession,
     build_nq_future_contract,
+    is_realtime_market_data_type,
     submit_ibkr_paper_order,
 )
 from .live_signal import LIVE_SIGNAL_COLUMNS, LiveSignalConfig, build_live_signal_row, write_live_signal
@@ -85,6 +86,7 @@ __all__ = [
     "BEST_MEAN_REVERSION_ALIAS",
     "BEST_MEAN_REVERSION_STRATEGY_ID",
     "build_nq_future_contract",
+    "is_realtime_market_data_type",
     "build_live_signal_row",
     "build_strategy_live_signal_row",
     "build_candidate_trade_context",
