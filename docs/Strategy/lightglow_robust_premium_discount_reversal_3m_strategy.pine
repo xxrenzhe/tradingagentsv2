@@ -1,4 +1,4 @@
-//@version=5
+//@version=6
 strategy(
      "Lightglow Best Premium/Discount Reversal 1m",
      shorttitle="LG Best P/D 1m",
@@ -23,6 +23,13 @@ showTradeLines = input.bool(true, "Show Entry/Exit Lines", group=strategyGroup)
 showDashboard = input.bool(true, "Show Dashboard", group=strategyGroup)
 pointValue = input.float(2.0, "Point Value", minval=0.0, step=0.25, group=strategyGroup)
 roundTripCostPoints = input.float(0.0, "Round Trip Cost Points", minval=0.0, step=0.25, group=strategyGroup)
+
+rangeGroup = "Backtest Range"
+enableDateFilter = input.bool(true, "Enable Backtesting Range Filter", group=rangeGroup)
+fromDate = input.time(timestamp("01 Jan 2025 00:00 +0000"), "Start Date", group=rangeGroup)
+toDate = input.time(timestamp("30 Jun 2025 23:59 +0000"), "End Date", group=rangeGroup)
+maxClosedTrades = input.int(4000, "Max Closed Trades", minval=100, maxval=4000, group=rangeGroup)
+tradeDateIsAllowed = not enableDateFilter or (time >= fromDate and time <= toDate)
 
 colorGroup = "Colors"
 premiumColor = input.color(color.rgb(242, 54, 69), "Premium Zone", group=colorGroup)
@@ -137,7 +144,9 @@ if exitNow
     manualEntryIndex := na
     manualEntryPrice := na
 
-if barstate.isconfirmed and manualPosition == 0 and orderedDirection == 0 and tradeSignal
+canOpenNewTrade = manualTrades < maxClosedTrades
+
+if barstate.isconfirmed and manualPosition == 0 and orderedDirection == 0 and tradeSignal and tradeDateIsAllowed and canOpenNewTrade
     orderedDirection := reverseSignal
     orderedSignalIndex := bar_index
     scheduledLong := reverseSignal > 0
@@ -167,6 +176,8 @@ if showDashboard and barstate.islast
     dashText = "Lightglow Best P/D 1m\n" +
          "Rules: reverse zone signal, next 1m open, hold 2 bars\n" +
          "Candidate: lightglow_premium_discount_reversal_1m_all_hold2m_reverse_time\n" +
+         "Range Filter: " + (enableDateFilter ? "Enabled" : "Disabled") + "\n" +
+         "Max Closed Trades: " + str.tostring(maxClosedTrades) + "\n" +
          "Trades: " + str.tostring(manualTrades) + "\n" +
          "Win Rate: " + str.tostring(winRate, "#.##") + "%\n" +
          "Net: " + str.tostring(manualEquityPoints, "#.##") + " pts / $" + str.tostring(equityDollars, "#.##") + "\n" +
