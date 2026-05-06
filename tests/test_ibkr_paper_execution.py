@@ -15,7 +15,7 @@ from tradingagents.execution.ibkr import (
     IBKRPaperTradingSession,
     _bracket_protection_status,
     evaluate_paper_risk,
-    is_realtime_market_data_type,
+    is_paper_tradeable_market_data_type,
     market_reference_price,
 )
 from tradingagents.execution.tick_recorder import IBKRTickRecorderConfig, record_ibkr_ticks
@@ -357,7 +357,7 @@ def test_market_snapshot_qualifies_contract_and_retries_market_data_types(tmp_pa
     assert fake_ib.market_data_types == [1, 2, 3]
 
 
-def test_paper_session_blocks_delayed_market_data_by_default(tmp_path, monkeypatch):
+def test_paper_session_accepts_delayed_market_data_for_paper_trading(tmp_path, monkeypatch):
     fake_ib = MarketDataTypeFakeIB()
     broker = IBKRPaperBroker(
         connection=IBKRConnectionConfig(port=7497, account="DU123"),
@@ -370,14 +370,14 @@ def test_paper_session_blocks_delayed_market_data_by_default(tmp_path, monkeypat
 
     response = session.preflight()
 
-    assert response["readiness"]["status"] == "blocked"
-    assert "market_data_not_realtime" in response["readiness"]["missing_requirements"]
+    assert response["readiness"]["status"] == "ready"
+    assert "market_data_not_paper_tradeable" not in response["readiness"]["missing_requirements"]
     assert response["market_data"]["order_ready"] is True
     assert response["market_data"]["market_data_type"] == "delayed"
 
 
-def test_paper_session_can_opt_out_of_realtime_market_data_gate(tmp_path, monkeypatch):
-    fake_ib = FakeIB()
+def test_paper_session_blocks_frozen_delayed_market_data_by_default(tmp_path, monkeypatch):
+    fake_ib = MarketDataTypeFakeIB()
     broker = IBKRPaperBroker(
         connection=IBKRConnectionConfig(port=7497, account="DU123"),
         risk=_risk(),
@@ -387,24 +387,28 @@ def test_paper_session_can_opt_out_of_realtime_market_data_gate(tmp_path, monkey
     session = IBKRPaperTradingSession(
         broker=broker,
         contract=IBKRContractSpec(last_trade_date_or_contract_month="202606"),
-        require_realtime_market_data=False,
     )
     monkeypatch.setattr(session, "_socket_ready", lambda: True)
+    monkeypatch.setattr(
+        broker,
+        "market_snapshot",
+        lambda spec: IBKRMarketSnapshot(symbol="MNQ", bid=18000.0, ask=18000.25, last=18000.0, market_data_type="4", snapshot_time="now"),
+    )
 
     response = session.preflight()
 
-    assert response["readiness"]["status"] == "ready"
-    assert "market_data_not_realtime" not in response["readiness"]["missing_requirements"]
+    assert response["readiness"]["status"] == "blocked"
+    assert "market_data_not_paper_tradeable" in response["readiness"]["missing_requirements"]
 
 
-def test_realtime_market_data_type_classifier():
-    assert is_realtime_market_data_type("1")
-    assert is_realtime_market_data_type("2")
-    assert is_realtime_market_data_type("live")
-    assert is_realtime_market_data_type("frozen")
-    assert not is_realtime_market_data_type("3")
-    assert not is_realtime_market_data_type("4")
-    assert not is_realtime_market_data_type("delayed")
+def test_paper_tradeable_market_data_type_classifier():
+    assert is_paper_tradeable_market_data_type("1")
+    assert is_paper_tradeable_market_data_type("2")
+    assert is_paper_tradeable_market_data_type("3")
+    assert is_paper_tradeable_market_data_type("live")
+    assert is_paper_tradeable_market_data_type("frozen")
+    assert is_paper_tradeable_market_data_type("delayed")
+    assert not is_paper_tradeable_market_data_type("4")
 
 
 def test_market_reference_price_uses_action_side():

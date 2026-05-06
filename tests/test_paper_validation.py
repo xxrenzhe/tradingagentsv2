@@ -338,7 +338,7 @@ def test_live_signal_row_retries_until_market_snapshot_ready(tmp_path):
     assert row["signal_source"].endswith(":ibkr_bid")
 
 
-def test_live_signal_row_blocks_delayed_market_data(tmp_path):
+def test_live_signal_row_accepts_delayed_market_data_for_paper_trading(tmp_path):
     broker = IBKRPaperBroker(
         risk=IBKRPaperRiskConfig(allowed_accounts=("DU123",), allowed_symbols=("MNQ")),
         audit_path=tmp_path / "ibkr.jsonl",
@@ -360,13 +360,14 @@ def test_live_signal_row_blocks_delayed_market_data(tmp_path):
             state_path=tmp_path / "state.json",
             direction=-1,
             signal_mode="manual",
+            account="DU123",
         ),
         broker=broker,
     )
 
-    assert result["status"] == "signal_blocked"
+    assert result["status"] == "dry_run"
     assert result["submitted"] is False
-    assert "market snapshot is not realtime" in result["reason"]
+    assert result["live_signal"]["ibkr_market_data_type"] == "3"
 
 
 def test_live_paper_trader_refreshes_signal_before_runner(tmp_path, monkeypatch):

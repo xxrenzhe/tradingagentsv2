@@ -16,11 +16,13 @@ from tradingagents.execution import (
     IBKRConnectionConfig,
     IBKRContractSpec,
     IBKRPaperBroker,
+    RealtimeDebateTraderConfig,
     load_tradeable_feature_sets,
     planner_from_env_or_args,
     run_debate_delayed_scanner_daemon,
     run_debate_delayed_scanner_once,
     run_debate_delayed_strategy_once,
+    run_realtime_debate_trader,
     select_feature_trigger,
 )
 
@@ -75,8 +77,16 @@ def main() -> int:
     parser.add_argument("--daemon", action="store_true", help="Run scanner loop. Requires --scan.")
     parser.add_argument("--interval-seconds", type=float, default=30.0)
     parser.add_argument("--max-iterations", type=int, default=1, help="Use 0 with --daemon to run until stopped.")
+    parser.add_argument("--realtime", action="store_true", help="Run the full realtime preflight + scanner + LLM debate + IBKR paper loop. Implies --scan --daemon.")
+    parser.add_argument("--status-path", default=".tmp/nq-llm-debate-realtime-status.json")
+    parser.add_argument("--preflight-attempts", type=int, default=3)
+    parser.add_argument("--preflight-retry-seconds", type=float, default=1.0)
+    parser.add_argument("--skip-startup-preflight-gate", action="store_true")
     args = parser.parse_args()
 
+    if args.realtime:
+        args.scan = True
+        args.daemon = True
     if not args.scan and args.trigger_price is None:
         raise SystemExit("--trigger-price is required unless --scan is enabled")
     if args.daemon and not args.scan:
@@ -143,7 +153,23 @@ def main() -> int:
             vwap_distance_z_threshold=args.vwap_distance_z_threshold,
             require_order_ready=not args.allow_not_order_ready_scan,
         )
-        if args.daemon:
+        if args.realtime:
+            result = run_realtime_debate_trader(
+                feature_sets=feature_sets,
+                planner=planner,
+                config=RealtimeDebateTraderConfig(
+                    strategy=config,
+                    scanner=scanner_config,
+                    interval_seconds=args.interval_seconds,
+                    max_iterations=None if args.max_iterations == 0 else args.max_iterations,
+                    preflight_attempts=args.preflight_attempts,
+                    preflight_retry_seconds=args.preflight_retry_seconds,
+                    require_preflight_ready=not args.skip_startup_preflight_gate,
+                    status_path=Path(args.status_path),
+                ),
+                broker=broker,
+            )
+        elif args.daemon:
             result = run_debate_delayed_scanner_daemon(
                 feature_sets=feature_sets,
                 planner=planner,

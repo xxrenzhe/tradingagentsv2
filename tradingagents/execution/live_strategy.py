@@ -15,7 +15,7 @@ from tradingagents.backtesting.multi_timeframe_setup import (
     prepare_multi_timeframe_features,
 )
 
-from .ibkr import IBKRContractSpec, IBKRPaperBroker, is_realtime_market_data_type
+from .ibkr import IBKRContractSpec, IBKRPaperBroker, is_paper_tradeable_market_data_type
 from .live_signal import LiveSignalConfig, build_live_signal_row
 
 
@@ -72,8 +72,8 @@ def build_strategy_live_signal_row(
     top_snapshot = _order_ready_snapshot(active_broker, signal_config)
     if not top_snapshot.get("order_ready"):
         raise ValueError(f"market snapshot is not order-ready: {top_snapshot}")
-    if signal_config.require_realtime_market_data and not is_realtime_market_data_type(top_snapshot.get("market_data_type")):
-        raise ValueError(f"market snapshot is not realtime: {top_snapshot}")
+    if signal_config.require_paper_tradeable_market_data and not is_paper_tradeable_market_data_type(top_snapshot.get("market_data_type")):
+        raise ValueError(f"market snapshot is not paper-tradeable: {top_snapshot}")
     tick_events = _safe_tick_by_tick_snapshot(active_broker, signal_config.contract, strategy_config.tick_interval_seconds)
     market_event = _market_event(timestamp, top_snapshot, tick_events)
     _append_market_event(strategy_config.history_path, market_event)
@@ -112,7 +112,7 @@ def build_strategy_live_signal_row(
             contract=signal_config.contract,
             snapshot_attempts=signal_config.snapshot_attempts,
             snapshot_retry_seconds=signal_config.snapshot_retry_seconds,
-            require_realtime_market_data=signal_config.require_realtime_market_data,
+            require_paper_tradeable_market_data=signal_config.require_paper_tradeable_market_data,
         ),
         broker=active_broker,
         now=timestamp,

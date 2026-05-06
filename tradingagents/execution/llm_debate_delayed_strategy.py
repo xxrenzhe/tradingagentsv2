@@ -212,6 +212,18 @@ class FeatureScannerConfig:
     require_order_ready: bool = True
 
 
+@dataclass(frozen=True)
+class RealtimeDebateTraderConfig:
+    strategy: DebateDelayedStrategyConfig = DebateDelayedStrategyConfig()
+    scanner: FeatureScannerConfig = FeatureScannerConfig()
+    interval_seconds: float = 30.0
+    max_iterations: int | None = 1
+    preflight_attempts: int = 3
+    preflight_retry_seconds: float = 1.0
+    require_preflight_ready: bool = True
+    status_path: Path = Path(".tmp/nq-llm-debate-realtime-status.json")
+
+
 def load_tradeable_feature_sets(
     path: Path | str,
     *,
@@ -232,6 +244,77 @@ def load_tradeable_feature_sets(
     selected["payoff_ratio_r"] = pd.to_numeric(selected[payoff_column], errors="coerce")
     selected["net_points"] = pd.to_numeric(selected[net_column], errors="coerce")
     return selected.reset_index(drop=True)
+
+
+def run_realtime_debate_trader(
+    *,
+    feature_sets: pd.DataFrame,
+    planner: DebatePlanner,
+    config: RealtimeDebateTraderConfig | None = None,
+    broker: IBKRPaperBroker | None = None,
+) -> dict[str, Any]:
+    config = config or RealtimeDebateTraderConfig()
+    active_broker = broker or IBKRPaperBroker(audit_path=config.strategy.audit_path)
+    preflight = realtime_preflight(
+        broker=active_broker,
+        contract=config.strategy.contract,
+        attempts=config.preflight_attempts,
+        retry_seconds=config.preflight_retry_seconds,
+    )
+    if config.require_preflight_ready and preflight["readiness"].get("status") != "ready":
+        result = {
+            "status": "preflight_blocked",
+            "submitted": False,
+            "preflight": preflight,
+            "events": [],
+        }
+        write_realtime_status(config.status_path, result)
+        return audit_and_return(config.strategy.audit_path, result)
+    result = run_debate_delayed_scanner_daemon(
+        feature_sets=feature_sets,
+        planner=planner,
+        strategy_config=config.strategy,
+        scanner_config=config.scanner,
+        broker=active_broker,
+        interval_seconds=config.interval_seconds,
+        max_iterations=config.max_iterations,
+    )
+    result = {
+        **result,
+        "preflight": {
+            "status": preflight["readiness"].get("status"),
+            "missing_requirements": preflight["readiness"].get("missing_requirements", []),
+            "market_data": preflight.get("market_data", {}),
+        },
+        "mode": "submit" if config.strategy.submit else "dry_run",
+    }
+    write_realtime_status(config.status_path, result)
+    return audit_and_return(config.strategy.audit_path, result)
+
+
+def realtime_preflight(
+    *,
+    broker: IBKRPaperBroker,
+    contract: IBKRContractSpec,
+    attempts: int,
+    retry_seconds: float,
+) -> dict[str, Any]:
+    session = IBKRPaperTradingSession(broker=broker, contract=contract)
+    last_preflight: dict[str, Any] = {}
+    for attempt in range(max(1, int(attempts))):
+        last_preflight = session.preflight()
+        readiness = last_preflight.get("readiness", {})
+        if isinstance(readiness, dict) and readiness.get("status") == "ready":
+            return last_preflight
+        if attempt + 1 < attempts:
+            time.sleep(max(0.0, float(retry_seconds)))
+    return last_preflight
+
+
+def write_realtime_status(path: Path, event: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"updated_at": datetime.now(UTC).isoformat(), **event}
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
 
 
 def run_debate_delayed_scanner_once(

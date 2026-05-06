@@ -11,12 +11,15 @@ from tradingagents.execution import (
     DebateExecutionPlan,
     FeatureScannerConfig,
     FeatureTrigger,
+    IBKRConnectionConfig,
     IBKRContractSpec,
+    RealtimeDebateTraderConfig,
     StaticDebatePlanner,
     build_intent_from_route,
     load_tradeable_feature_sets,
     route_plan,
     run_debate_delayed_scanner_once,
+    run_realtime_debate_trader,
     run_debate_delayed_strategy_once,
     scan_feature_trigger_once,
 )
@@ -96,9 +99,8 @@ def test_build_intent_from_route_creates_bracketed_buy_and_sell_orders():
 
 
 class FakeBroker:
-    connection = None
-
     def __init__(self, snapshots):
+        self.connection = IBKRConnectionConfig(port=7497, account="DU123")
         self.snapshots = list(snapshots)
         self.submitted = []
 
@@ -107,6 +109,34 @@ class FakeBroker:
 
     def status_snapshot(self, symbol):
         return {"positions": [], "current_position": 0, "open_trades": [], "fills": []}
+
+    def connect(self):
+        return {"status": "connected", "connected": True}
+
+    def account_summary(self):
+        return {"account": "DU123", "account_type": "paper", "paper": True}
+
+    def contract_details(self, spec):
+        return {
+            "symbol": spec.symbol,
+            "exchange": spec.exchange,
+            "currency": spec.currency,
+            "tick_size": spec.expected_tick_size,
+            "point_value": spec.expected_point_value,
+        }
+
+    def market_snapshot(self, spec):
+        snapshot = self.tick_snapshot(spec)
+        from tradingagents.execution.ibkr import IBKRMarketSnapshot
+
+        return IBKRMarketSnapshot(
+            symbol=spec.symbol,
+            bid=snapshot.get("bid"),
+            ask=snapshot.get("ask"),
+            last=snapshot.get("last"),
+            market_data_type=str(snapshot.get("market_data_type", "1")),
+            snapshot_time=str(snapshot.get("snapshot_time", "")),
+        )
 
     def submit(self, intent, *, dry_run=True, current_position=0):
         self.submitted.append(intent)
@@ -240,6 +270,36 @@ def test_run_debate_delayed_scanner_once_executes_after_scanner_trigger(tmp_path
     assert result["status"] == "dry_run"
     assert result["route"]["action"] == "BUY"
     assert broker.submitted[0].strategy_id == "nq_llm_debate_delayed"
+
+
+def test_run_realtime_debate_trader_blocks_when_preflight_not_ready(tmp_path):
+    broker = FakeBroker([])
+    broker.connect = lambda: {"status": "blocked", "connected": False, "reason": "socket_not_listening"}
+    result = run_realtime_debate_trader(
+        feature_sets=_scanner_feature_sets(),
+        planner=StaticDebatePlanner(
+            DebateExecutionPlan(
+                decision_id="decision-1",
+                feature_set="support_reclaim + entry_candle_up",
+                stance="conditional",
+                recheck_after_seconds=120,
+            )
+        ),
+        config=RealtimeDebateTraderConfig(
+            strategy=DebateDelayedStrategyConfig(
+                audit_path=tmp_path / "audit.jsonl",
+                contract=IBKRContractSpec(symbol="MNQ", last_trade_date_or_contract_month="202606"),
+            ),
+            scanner=FeatureScannerConfig(history_path=tmp_path / "history.jsonl", state_path=tmp_path / "scanner-state.json"),
+            preflight_attempts=1,
+            status_path=tmp_path / "status.json",
+        ),
+        broker=broker,
+    )
+
+    assert result["status"] == "preflight_blocked"
+    assert result["submitted"] is False
+    assert (tmp_path / "status.json").exists()
 
 
 def test_run_debate_delayed_strategy_once_dry_runs_after_delay_recheck(tmp_path):
@@ -453,3 +513,43 @@ def test_run_nq_llm_debate_paper_trader_script_wires_scan_mode(tmp_path, monkeyp
     assert captured["scanner_config"].feature_set == "support_reclaim + entry_candle_up"
     assert captured["strategy_config"].enforce_delay is False
     assert '"status": "no_feature_trigger"' in capsys.readouterr().out
+
+
+def test_run_nq_llm_debate_paper_trader_script_wires_realtime_mode(tmp_path, monkeypatch, capsys):
+    feature_path = tmp_path / "features.csv"
+    _scanner_feature_sets().to_csv(feature_path, index=False)
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "run_nq_llm_debate_paper_trader.py"
+    spec = importlib.util.spec_from_file_location("run_nq_llm_debate_paper_trader", script_path)
+    script = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(script)
+    captured = {}
+
+    def fake_realtime(*, feature_sets, planner, config, broker=None):
+        captured["feature_sets"] = feature_sets
+        captured["config"] = config
+        captured["broker"] = broker
+        return {"status": "completed", "iterations": 1, "events": []}
+
+    monkeypatch.setattr(script, "run_realtime_debate_trader", fake_realtime)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_nq_llm_debate_paper_trader.py",
+            "--realtime",
+            "--feature-sets",
+            str(feature_path),
+            "--status-path",
+            str(tmp_path / "status.json"),
+            "--max-iterations",
+            "1",
+            "--no-enforce-delay",
+        ],
+    )
+
+    assert script.main() == 0
+    assert captured["config"].max_iterations == 1
+    assert captured["config"].require_preflight_ready is True
+    assert captured["config"].status_path == tmp_path / "status.json"
+    assert captured["config"].strategy.enforce_delay is False
+    assert '"status": "completed"' in capsys.readouterr().out

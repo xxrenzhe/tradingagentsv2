@@ -23,7 +23,7 @@ PAPER_PORTS = {7497, 4002}
 ALLOWED_ACTIONS = {"BUY", "SELL"}
 ALLOWED_ORDER_TYPES = {"MKT", "LMT"}
 ACTIVE_ORDER_STATUSES = {"ApiPending", "PendingSubmit", "PreSubmitted", "Submitted"}
-REALTIME_MARKET_DATA_TYPES = {"1", "2", "live", "frozen"}
+PAPER_TRADEABLE_MARKET_DATA_TYPES = {"1", "2", "3", "live", "frozen", "delayed"}
 
 
 @dataclass(frozen=True)
@@ -912,8 +912,12 @@ def market_reference_price(action: str, market_data: dict[str, Any] | None) -> f
     return None
 
 
+def is_paper_tradeable_market_data_type(value: Any) -> bool:
+    return str(value or "").strip().lower() in PAPER_TRADEABLE_MARKET_DATA_TYPES
+
+
 def is_realtime_market_data_type(value: Any) -> bool:
-    return str(value or "").strip().lower() in REALTIME_MARKET_DATA_TYPES
+    return is_paper_tradeable_market_data_type(value)
 
 
 def _reason_float(reason: str, key: str) -> float | None:
@@ -936,7 +940,7 @@ class IBKRPaperTradingSession:
     contract: IBKRContractSpec = IBKRContractSpec()
     max_spread_ticks: float = 4.0
     require_market_data: bool = True
-    require_realtime_market_data: bool = True
+    require_paper_tradeable_market_data: bool = True
 
     @classmethod
     def from_env(cls, broker: IBKRPaperBroker | None = None) -> "IBKRPaperTradingSession":
@@ -955,7 +959,7 @@ class IBKRPaperTradingSession:
             contract=contract,
             max_spread_ticks=float(os.getenv("TRADINGAGENTS_IBKR_MAX_SPREAD_TICKS", "4")),
             require_market_data=os.getenv("TRADINGAGENTS_IBKR_REQUIRE_MARKET_DATA", "true").lower() not in {"0", "false", "no"},
-            require_realtime_market_data=os.getenv("TRADINGAGENTS_IBKR_REQUIRE_REALTIME_MARKET_DATA", "true").lower()
+            require_paper_tradeable_market_data=os.getenv("TRADINGAGENTS_IBKR_REQUIRE_PAPER_TRADEABLE_MARKET_DATA", "true").lower()
             not in {"0", "false", "no"},
         )
 
@@ -1068,8 +1072,8 @@ class IBKRPaperTradingSession:
                 for field in ["bid", "ask", "last"]:
                     if _finite_price(market_snapshot.get(field)) is None:
                         missing.append(f"market_data_missing_{field}")
-            if self.require_realtime_market_data and not is_realtime_market_data_type(market_snapshot.get("market_data_type")):
-                missing.append("market_data_not_realtime")
+            if self.require_paper_tradeable_market_data and not is_paper_tradeable_market_data_type(market_snapshot.get("market_data_type")):
+                missing.append("market_data_not_paper_tradeable")
             spread = market_snapshot.get("spread")
             if spread is not None and spread > self.max_spread_ticks * self.contract.expected_tick_size:
                 missing.append("spread_too_wide")
