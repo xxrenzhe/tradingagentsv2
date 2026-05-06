@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from dataclasses import asdict
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from tradingagents.execution import (
     run_debate_delayed_strategy_once,
     scan_feature_trigger_once,
 )
+from tradingagents.execution.ibkr import IBKRPaperRiskConfig
 
 
 def test_load_tradeable_feature_sets_requires_win_rate_above_53_percent_and_payoff_above_1r(tmp_path):
@@ -101,6 +103,7 @@ def test_build_intent_from_route_creates_bracketed_buy_and_sell_orders():
 class FakeBroker:
     def __init__(self, snapshots):
         self.connection = IBKRConnectionConfig(port=7497, account="DU123")
+        self.risk = IBKRPaperRiskConfig(allowed_accounts=("DU123",), allowed_symbols=("MNQ",))
         self.snapshots = list(snapshots)
         self.submitted = []
 
@@ -305,6 +308,51 @@ def test_run_realtime_debate_trader_blocks_when_preflight_not_ready(tmp_path):
     assert result["status"] == "preflight_blocked"
     assert result["submitted"] is False
     assert (tmp_path / "status.json").exists()
+
+
+def test_run_realtime_debate_trader_writes_running_status(tmp_path):
+    broker = FakeBroker(
+        [
+            {"last": 100.0, "bid": 99.75, "ask": 100.25, "order_ready": True},
+            {"last": 99.5, "bid": 99.25, "ask": 99.75, "order_ready": True},
+            {"last": 99.0, "bid": 98.75, "ask": 99.25, "order_ready": True},
+        ]
+    )
+    result = run_realtime_debate_trader(
+        feature_sets=_scanner_feature_sets(),
+        planner=StaticDebatePlanner(
+            DebateExecutionPlan(
+                decision_id="decision-1",
+                feature_set="support_reclaim + entry_candle_up",
+                stance="conditional",
+                recheck_after_seconds=120,
+            )
+        ),
+        config=RealtimeDebateTraderConfig(
+            strategy=DebateDelayedStrategyConfig(
+                audit_path=tmp_path / "audit.jsonl",
+                contract=IBKRContractSpec(symbol="MNQ", last_trade_date_or_contract_month="202606"),
+                snapshot_attempts=1,
+            ),
+            scanner=FeatureScannerConfig(
+                history_path=tmp_path / "history.jsonl",
+                state_path=tmp_path / "scanner-state.json",
+                min_history_points=7,
+            ),
+            interval_seconds=0,
+            max_iterations=2,
+            preflight_attempts=1,
+            status_path=tmp_path / "status.json",
+        ),
+        broker=broker,
+    )
+
+    status = json.loads((tmp_path / "status.json").read_text(encoding="utf-8"))
+    assert result["status"] == "completed"
+    assert status["status"] == "completed"
+    assert status["mode"] == "dry_run"
+    assert status["iterations"] == 2
+    assert status["events"][-1]["reason"] == "insufficient_scanner_history"
 
 
 def test_run_debate_delayed_strategy_once_dry_runs_after_delay_recheck(tmp_path):

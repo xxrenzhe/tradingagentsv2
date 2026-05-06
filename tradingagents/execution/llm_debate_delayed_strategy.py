@@ -280,6 +280,21 @@ def run_realtime_debate_trader(
         broker=active_broker,
         interval_seconds=config.interval_seconds,
         max_iterations=config.max_iterations,
+        stop_after_trade=config.max_iterations is not None,
+        on_event=lambda iteration, events: write_realtime_status(
+            config.status_path,
+            {
+                "status": "running",
+                "iterations": iteration,
+                "events": events,
+                "preflight": {
+                    "status": preflight["readiness"].get("status"),
+                    "missing_requirements": preflight["readiness"].get("missing_requirements", []),
+                    "market_data": preflight.get("market_data", {}),
+                },
+                "mode": "submit" if config.strategy.submit else "dry_run",
+            },
+        ),
     )
     result = {
         **result,
@@ -450,6 +465,8 @@ def run_debate_delayed_scanner_daemon(
     broker: IBKRPaperBroker | None = None,
     interval_seconds: float = 30.0,
     max_iterations: int | None = 1,
+    stop_after_trade: bool = True,
+    on_event: Any | None = None,
 ) -> dict[str, Any]:
     events = []
     iteration = 0
@@ -463,7 +480,9 @@ def run_debate_delayed_scanner_daemon(
             broker=broker,
         )
         events.append(event)
-        if event.get("status") in {"dry_run", "submitted"}:
+        if on_event is not None:
+            on_event(iteration, events)
+        if stop_after_trade and event.get("status") in {"dry_run", "submitted"}:
             break
         if max_iterations is None or iteration < max_iterations:
             time.sleep(max(0.0, float(interval_seconds)))
