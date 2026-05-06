@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
 
+import httpx
 import pandas as pd
 
 from tradingagents.llm_clients.factory import create_llm_client
@@ -88,7 +89,7 @@ class DebateExecutionPlan:
             order_type=str(payload.get("order_type", "MKT")).upper(),
             limit_offset_points=float(payload.get("limit_offset_points", 0.0)),
             confidence=float(payload.get("confidence", 0.0)),
-            debate_summary=dict(payload.get("debate_summary") or {}),
+            debate_summary=normalize_debate_summary(payload.get("debate_summary")),
             raw_response=str(payload.get("raw_response", "")),
         )
 
@@ -154,14 +155,18 @@ class LLMDebatePlanner:
     def build_plan(self, trigger: FeatureTrigger, snapshots: list[dict[str, Any]]) -> DebateExecutionPlan:
         prompt = build_debate_prompt(trigger, snapshots)
         try:
-            llm = create_llm_client(
-                self.provider,
-                self.model,
-                base_url=self.base_url,
-                timeout=self.timeout,
-            ).get_llm()
-            response = llm.invoke(prompt)
-            content = getattr(response, "content", response)
+            if self.provider.lower() == "aicode":
+                content = invoke_aicode_streaming_json(prompt, model=self.model, base_url=self.base_url, timeout=self.timeout)
+            else:
+                llm = create_llm_client(
+                    self.provider,
+                    self.model,
+                    base_url=self.base_url,
+                    timeout=self.timeout,
+                    streaming=False,
+                ).get_llm()
+                response = llm.invoke(prompt)
+                content = getattr(response, "content", response)
             payload = extract_json_object(str(content))
             payload["raw_response"] = str(content)
             return DebateExecutionPlan.from_dict(payload)
@@ -1049,6 +1054,56 @@ def extract_json_object(text: str) -> dict[str, Any]:
         if isinstance(payload, dict):
             return payload
     raise ValueError("LLM response did not contain a JSON object")
+
+
+def normalize_debate_summary(value: Any) -> dict[str, str]:
+    if isinstance(value, dict):
+        return {str(key): str(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return {f"point_{index + 1}": str(item) for index, item in enumerate(value)}
+    if value is None or value == "":
+        return {}
+    return {"summary": str(value)}
+
+
+def invoke_aicode_streaming_json(prompt: str, *, model: str, base_url: str | None = None, timeout: float = 60.0) -> str:
+    api_key = os.getenv("AICODE_API_KEY") or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("Missing API key for aicode provider. Set AICODE_API_KEY or OPENAI_API_KEY in .env.")
+    url = f"{(base_url or os.getenv('AICODE_BASE_URL') or 'https://aicode.cat').rstrip('/')}/v1/chat/completions"
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": True,
+    }
+    parts: list[str] = []
+    with httpx.stream(
+        "POST",
+        url,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=timeout,
+    ) as response:
+        response.raise_for_status()
+        for line in response.iter_lines():
+            if not line or not line.startswith("data: "):
+                continue
+            data = line.removeprefix("data: ").strip()
+            if data == "[DONE]":
+                break
+            try:
+                event = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            for choice in event.get("choices", []):
+                delta = choice.get("delta", {})
+                content = delta.get("content")
+                if content:
+                    parts.append(str(content))
+    content = "".join(parts)
+    if not content.strip():
+        raise ValueError("aicode stream completed without content")
+    return content
 
 
 def parse_timestamp(value: str) -> datetime | None:

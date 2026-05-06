@@ -31,3 +31,11 @@ def test_aicode_requires_api_key(monkeypatch):
         assert "AICODE_API_KEY" in str(error)
     else:
         raise AssertionError("Expected missing aicode API key error")
+
+
+def test_aicode_allows_streaming_override(monkeypatch):
+    monkeypatch.setenv("AICODE_API_KEY", "aicode-key")
+
+    llm = OpenAIClient("gpt-5.5", provider="aicode", streaming=False).get_llm()
+
+    assert llm.streaming is False

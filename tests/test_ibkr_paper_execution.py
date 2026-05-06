@@ -166,6 +166,30 @@ class MarketDataTypeFakeIB(FakeIB):
         return SimpleNamespace(bid=None, ask=None, last=None, marketDataType=str(self.current_market_data_type))
 
 
+class StreamingFallbackFakeIB(MarketDataTypeFakeIB):
+    def __init__(self):
+        super().__init__()
+        self.requests = []
+        self.cancelled = []
+
+    def reqMktData(self, contract, genericTickList, snapshot, regulatorySnapshot):
+        self.requests.append(snapshot)
+        if not snapshot and self.current_market_data_type == 3:
+            return SimpleNamespace(
+                bid=18000.0,
+                ask=18000.25,
+                last=18000.25,
+                bidSize=5,
+                askSize=7,
+                lastSize=2,
+                marketDataType="delayed",
+            )
+        return SimpleNamespace(bid=None, ask=None, last=None, marketDataType=str(self.current_market_data_type))
+
+    def cancelMktData(self, contract):
+        self.cancelled.append(contract)
+
+
 class FailsOnSecondConnectIB(FakeIB):
     def __init__(self):
         super().__init__()
@@ -355,6 +379,39 @@ def test_market_snapshot_qualifies_contract_and_retries_market_data_types(tmp_pa
     assert snapshot.ask_size == 7
     assert snapshot.to_dict()["bid_size"] == 5
     assert fake_ib.market_data_types == [1, 2, 3]
+
+
+def test_market_snapshot_uses_streaming_fallback_when_snapshots_are_empty(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRADINGAGENTS_IBKR_MARKET_DATA_WAIT_SECONDS", "0")
+    fake_ib = StreamingFallbackFakeIB()
+    broker = IBKRPaperBroker(
+        connection=IBKRConnectionConfig(port=7497, account="DU123"),
+        risk=_risk(),
+        ib=fake_ib,
+        audit_path=tmp_path / "audit.jsonl",
+    )
+
+    snapshot = broker.market_snapshot(IBKRContractSpec(last_trade_date_or_contract_month="202606"))
+
+    assert snapshot.order_ready
+    assert snapshot.market_data_type == "delayed"
+    assert fake_ib.requests == [True, False, True, False, True, False]
+    assert len(fake_ib.cancelled) == 3
+
+
+def test_market_snapshot_connects_before_requesting_live_ib_data(tmp_path):
+    fake_ib = FakeIB()
+    broker = IBKRPaperBroker(
+        connection=IBKRConnectionConfig(port=7497, account="DU123"),
+        risk=_risk(),
+        ib=fake_ib,
+        audit_path=tmp_path / "audit.jsonl",
+    )
+
+    snapshot = broker.market_snapshot(IBKRContractSpec(last_trade_date_or_contract_month="202606"))
+
+    assert snapshot.order_ready
+    assert fake_ib.connected is True
 
 
 def test_paper_session_accepts_delayed_market_data_for_paper_trading(tmp_path, monkeypatch):

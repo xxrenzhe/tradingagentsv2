@@ -179,6 +179,25 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _market_data_wait_seconds() -> float:
+    value = os.getenv("TRADINGAGENTS_IBKR_MARKET_DATA_WAIT_SECONDS", "2")
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        return 2.0
+
+
+def _streaming_market_data_fallback_enabled() -> bool:
+    return os.getenv("TRADINGAGENTS_IBKR_STREAMING_MARKET_DATA_FALLBACK", "true").lower() not in {"0", "false", "no"}
+
+
+def _ib_sleep(ib: Any, seconds: float) -> None:
+    if hasattr(ib, "sleep"):
+        ib.sleep(seconds)
+    elif seconds > 0:
+        time.sleep(seconds)
+
+
 def _load_ib_class(name: str) -> type:
     try:
         import ib_insync
@@ -690,6 +709,7 @@ class IBKRPaperBroker:
         return details
 
     def market_snapshot(self, spec: IBKRContractSpec, *, snapshot: bool = True) -> IBKRMarketSnapshot:
+        self._ensure_connected_for_market_data()
         ib = self._ib()
         intent = IBKROrderIntent(action="BUY", quantity=1, **spec.to_intent_fields())
         contract = _contract_for_broker(intent, self.ib)
@@ -699,27 +719,69 @@ class IBKRPaperBroker:
                 contract = qualified[0]
         snapshots = []
         market_data_types = [1, 2, 3, 4] if hasattr(ib, "reqMarketDataType") else [None]
+        wait_seconds = _market_data_wait_seconds()
+        use_streaming_fallback = snapshot and _streaming_market_data_fallback_enabled()
         for market_data_type in market_data_types:
             if market_data_type is not None:
                 ib.reqMarketDataType(market_data_type)
-            ticker = ib.reqMktData(contract, "", snapshot, False) if hasattr(ib, "reqMktData") else None
-            if hasattr(ib, "sleep"):
-                ib.sleep(1)
-            current = IBKRMarketSnapshot(
-                symbol=spec.symbol,
-                bid=_optional_float(getattr(ticker, "bid", None)),
-                ask=_optional_float(getattr(ticker, "ask", None)),
-                last=_optional_float(getattr(ticker, "last", None)),
-                bid_size=_optional_float(getattr(ticker, "bidSize", None)),
-                ask_size=_optional_float(getattr(ticker, "askSize", None)),
-                last_size=_optional_float(getattr(ticker, "lastSize", None)),
-                market_data_type=str(getattr(ticker, "marketDataType", market_data_type or "unknown")),
-                snapshot_time=_now(),
+            current = self._market_snapshot_for_request(
+                ib,
+                contract,
+                spec.symbol,
+                market_data_type=market_data_type,
+                snapshot=snapshot,
+                wait_seconds=wait_seconds,
             )
             snapshots.append(current)
             if current.order_ready:
                 return current
+            if use_streaming_fallback:
+                current = self._market_snapshot_for_request(
+                    ib,
+                    contract,
+                    spec.symbol,
+                    market_data_type=market_data_type,
+                    snapshot=False,
+                    wait_seconds=wait_seconds,
+                )
+                snapshots.append(current)
+                if current.order_ready:
+                    return current
         return snapshots[-1] if snapshots else IBKRMarketSnapshot(symbol=spec.symbol, bid=None, ask=None, last=None, snapshot_time=_now())
+
+    def _market_snapshot_for_request(
+        self,
+        ib: Any,
+        contract: Any,
+        symbol: str,
+        *,
+        market_data_type: int | None,
+        snapshot: bool,
+        wait_seconds: float,
+    ) -> IBKRMarketSnapshot:
+        ticker = ib.reqMktData(contract, "", snapshot, False) if hasattr(ib, "reqMktData") else None
+        _ib_sleep(ib, wait_seconds)
+        current = IBKRMarketSnapshot(
+            symbol=symbol,
+            bid=_optional_float(getattr(ticker, "bid", None)),
+            ask=_optional_float(getattr(ticker, "ask", None)),
+            last=_optional_float(getattr(ticker, "last", None)),
+            bid_size=_optional_float(getattr(ticker, "bidSize", None)),
+            ask_size=_optional_float(getattr(ticker, "askSize", None)),
+            last_size=_optional_float(getattr(ticker, "lastSize", None)),
+            market_data_type=str(getattr(ticker, "marketDataType", market_data_type or "unknown")),
+            snapshot_time=_now(),
+        )
+        if not snapshot and ticker is not None and hasattr(ib, "cancelMktData"):
+            ib.cancelMktData(contract)
+        return current
+
+    def _ensure_connected_for_market_data(self) -> None:
+        ib = self._ib()
+        if hasattr(ib, "isConnected") and not ib.isConnected():
+            connection = self.connect()
+            if not connection.get("connected"):
+                raise ConnectionError(connection.get("reason") or "IBKR connection is not available")
 
     def tick_snapshot(self, spec: IBKRContractSpec) -> dict[str, Any]:
         snapshot = self.market_snapshot(spec, snapshot=True).to_dict()

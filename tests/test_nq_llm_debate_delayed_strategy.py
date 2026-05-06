@@ -10,6 +10,7 @@ import pandas as pd
 from tradingagents.execution import (
     DebateDelayedStrategyConfig,
     DebateExecutionPlan,
+    invoke_aicode_streaming_json,
     FeatureScannerConfig,
     FeatureTrigger,
     IBKRConnectionConfig,
@@ -98,6 +99,53 @@ def test_build_intent_from_route_creates_bracketed_buy_and_sell_orders():
     assert sell.stop_loss_price == 25016.0
     assert sell.take_profit_price == 24976.0
     assert sell.account == "DU123"
+
+
+def test_invoke_aicode_streaming_json_collects_chat_deltas(monkeypatch):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        def iter_lines(self):
+            return iter(
+                [
+                    'data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}',
+                    'data: {"choices":[{"delta":{"content":"{\\"decision_id\\":\\"ok\\""},"finish_reason":null}]}',
+                    'data: {"choices":[{"delta":{"content":",\\"stance\\":\\"conditional\\"}"},"finish_reason":null}]}',
+                    "data: [DONE]",
+                ]
+            )
+
+    def fake_stream(method, url, headers, json, timeout):
+        assert method == "POST"
+        assert json["stream"] is True
+        return FakeResponse()
+
+    monkeypatch.setenv("AICODE_API_KEY", "aicode-key")
+    monkeypatch.setattr("tradingagents.execution.llm_debate_delayed_strategy.httpx.stream", fake_stream)
+
+    content = invoke_aicode_streaming_json("prompt", model="gpt-5.4")
+
+    assert json.loads(content) == {"decision_id": "ok", "stance": "conditional"}
+
+
+def test_debate_execution_plan_accepts_string_summary():
+    plan = DebateExecutionPlan.from_dict(
+        {
+            "decision_id": "llm-decision",
+            "feature_set": "flush_hold",
+            "stance": "conditional",
+            "debate_summary": "Long case; short case; risk case.",
+        }
+    )
+
+    assert plan.debate_summary == {"summary": "Long case; short case; risk case."}
 
 
 class FakeBroker:
