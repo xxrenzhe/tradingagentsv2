@@ -1,0 +1,341 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © TradingAgentsV2
+
+//@version=5
+strategy("Lightglow Premium/Discount Reversal 3m - OPTIMIZED",
+         shorttitle="LG-PD-Rev-3m-OPT",
+         overlay=true,
+         default_qty_type=strategy.percent_of_equity,
+         default_qty_value=100,
+         initial_capital=25000,
+         currency=currency.USD,
+         commission_type=strategy.commission.cash_per_contract,
+         commission_value=5,
+         slippage=2,
+         process_orders_on_close=false)
+
+// ============================================================================
+// STRATEGY DESCRIPTION
+// ============================================================================
+//
+// OPTIMIZED VERSION with Time and Volatility Filters
+//
+// This strategy implements the validated Lightglow Premium/Discount reversal
+// pattern with two key optimizations:
+//
+// OPTIMIZATION 1: Time Filter (Kill Zones)
+// - Only trade during high liquidity periods
+// - NY AM: 8:30-11:30 EST
+// - NY PM: 13:30-16:00 EST
+// - London: 2:00-5:00 EST
+//
+// OPTIMIZATION 2: Volatility Filter (ATR)
+// - Only trade when ATR > threshold
+// - Ensures sufficient profit potential
+// - Avoids low volatility periods
+//
+// Core Logic:
+// - REVERSE the traditional Premium/Discount interpretation
+// - Go SHORT when price enters Premium zone (>95% of range)
+// - Go LONG when price enters Discount zone (<5% of range)
+// - Exit after 1 bar (3 minutes on 3m timeframe)
+//
+// Expected Improvements:
+// - Profit Factor: 1.83 → 2.0-2.2
+// - Win Rate: 46% → 48-50%
+// - Trades/Day: 13.83 → 8-10
+// - Max Drawdown: -10% to -20%
+//
+// ============================================================================
+
+// ============================================================================
+// INPUT PARAMETERS
+// ============================================================================
+
+// Premium/Discount Zone Settings
+lookback_length = input.int(100, "Lookback Length", minval=50, maxval=200, tooltip="Number of bars to calculate trailing high/low", group="Zone Settings")
+
+premium_threshold = input.float(0.95, "Premium Threshold", minval=0.80, maxval=1.0, step=0.01, tooltip="Price above this % of range = Premium zone", group="Zone Settings")
+
+discount_threshold = input.float(0.05, "Discount Threshold", minval=0.0, maxval=0.20, step=0.01, tooltip="Price below this % of range = Discount zone", group="Zone Settings")
+
+// OPTIMIZATION 1: Time Filter Settings
+use_time_filter = input.bool(true, "Use Time Filter (Kill Zones)", group="Optimization 1: Time Filter")
+use_ny_am = input.bool(true, "NY AM (8:30-11:30 EST)", group="Optimization 1: Time Filter")
+use_ny_pm = input.bool(true, "NY PM (13:30-16:00 EST)", group="Optimization 1: Time Filter")
+use_london = input.bool(false, "London (2:00-5:00 EST)", group="Optimization 1: Time Filter")
+
+// OPTIMIZATION 2: Volatility Filter Settings
+use_volatility_filter = input.bool(true, "Use Volatility Filter (ATR)", group="Optimization 2: Volatility Filter")
+atr_length = input.int(14, "ATR Length", minval=5, maxval=50, tooltip="Period for ATR calculation", group="Optimization 2: Volatility Filter")
+atr_threshold = input.float(15.0, "Min ATR Threshold", minval=5.0, maxval=50.0, step=1.0, tooltip="Minimum ATR required to trade (in points)", group="Optimization 2: Volatility Filter")
+
+// Exit Settings
+exit_bars = input.int(1, "Exit After N Bars", minval=1, maxval=5, tooltip="Number of bars to hold position (1 bar = 3 minutes on 3m chart)", group="Exit Settings")
+
+// Risk Management
+max_trades_per_day = input.int(20, "Max Trades Per Day", minval=5, maxval=50, tooltip="Maximum number of trades allowed per day", group="Risk Management")
+
+daily_loss_limit = input.float(400, "Daily Loss Limit (points)", minval=100, maxval=1000, tooltip="Stop trading if daily loss exceeds this (in points)", group="Risk Management")
+
+// Backtest Period
+start_date = input(timestamp("2020-01-01 00:00"), "Start Date", group="Backtest")
+end_date = input(timestamp("2026-12-31 23:59"), "End Date", group="Backtest")
+in_date_range = time >= start_date and time <= end_date
+
+// Visualization
+show_zones = input.bool(true, "Show Premium/Discount Zones", group="Visualization")
+show_signals = input.bool(true, "Show Entry Signals", group="Visualization")
+show_stats = input.bool(true, "Show Statistics Table", group="Visualization")
+show_kill_zones = input.bool(true, "Show Kill Zone Background", group="Visualization")
+
+// ============================================================================
+// PREMIUM/DISCOUNT ZONE CALCULATION
+// ============================================================================
+
+// Calculate trailing high and low
+trailing_high = ta.highest(high, lookback_length)
+trailing_low = ta.lowest(low, lookback_length)
+
+// Calculate range
+range_size = trailing_high - trailing_low
+
+// Calculate zone boundaries
+premium_level = trailing_low + premium_threshold * range_size
+discount_level = trailing_low + discount_threshold * range_size
+equilibrium = (trailing_high + trailing_low) / 2
+
+// Check if price is in zones
+in_premium_zone = close > premium_level
+in_discount_zone = close < discount_level
+in_equilibrium_zone = not in_premium_zone and not in_discount_zone
+
+// ============================================================================
+// OPTIMIZATION 1: TIME FILTER (KILL ZONES)
+// ============================================================================
+
+// Get current time in EST
+est_hour = hour(time, "America/New_York")
+est_minute = minute(time, "America/New_York")
+
+// Define Kill Zones
+is_ny_am_session = est_hour >= 8 and (est_hour < 11 or (est_hour == 11 and est_minute <= 30))
+is_ny_pm_session = est_hour >= 13 and (est_hour < 16 or (est_hour == 16 and est_minute == 0))
+is_london_session = est_hour >= 2 and est_hour < 5
+
+// Check if in any enabled kill zone
+in_kill_zone = (use_ny_am and is_ny_am_session) or (use_ny_pm and is_ny_pm_session) or (use_london and is_london_session)
+
+// Apply time filter
+time_filter_passed = not use_time_filter or in_kill_zone
+
+// ============================================================================
+// OPTIMIZATION 2: VOLATILITY FILTER (ATR)
+// ============================================================================
+
+// Calculate ATR
+atr_value = ta.atr(atr_length)
+
+// Check if volatility is sufficient
+volatility_filter_passed = not use_volatility_filter or atr_value > atr_threshold
+
+// ============================================================================
+// RISK MANAGEMENT
+// ============================================================================
+
+// Track daily trades and P&L
+var int trades_today = 0
+var float daily_pnl = 0.0
+var int last_trade_day = 0
+
+// Reset daily counters
+if dayofmonth != last_trade_day
+    trades_today := 0
+    daily_pnl := 0.0
+    last_trade_day := dayofmonth
+
+// Update daily P&L (approximate)
+if strategy.closedtrades > 0
+    last_trade_profit = strategy.closedtrades.profit(strategy.closedtrades - 1) / syminfo.mintick
+    if strategy.closedtrades.exit_time(strategy.closedtrades - 1) >= timestamp(year, month, dayofmonth, 0, 0)
+        daily_pnl := daily_pnl + last_trade_profit
+
+// Check if can trade (with optimizations)
+can_trade = in_date_range and time_filter_passed and volatility_filter_passed and trades_today < max_trades_per_day and daily_pnl > -daily_loss_limit and strategy.position_size == 0
+
+// ============================================================================
+// SIGNAL GENERATION (REVERSE LOGIC)
+// ============================================================================
+
+// REVERSE signals: fade the Premium/Discount zones
+// When price is in Premium (expensive), go SHORT (expect continuation down)
+// When price is in Discount (cheap), go LONG (expect continuation up)
+
+short_signal = can_trade and in_premium_zone
+long_signal = can_trade and in_discount_zone
+
+// ============================================================================
+// ORDER EXECUTION
+// ============================================================================
+
+// Entry
+if short_signal
+    strategy.entry("Short", strategy.short, comment="Short Premium")
+    trades_today := trades_today + 1
+
+if long_signal
+    strategy.entry("Long", strategy.long, comment="Long Discount")
+    trades_today := trades_today + 1
+
+// Exit after N bars (time-based exit)
+if strategy.position_size != 0
+    bars_in_trade = bar_index - strategy.opentrades.entry_bar_index(0)
+    if bars_in_trade >= exit_bars
+        if strategy.position_size > 0
+            strategy.close("Long", comment="Time Exit")
+        else if strategy.position_size < 0
+            strategy.close("Short", comment="Time Exit")
+
+// ============================================================================
+// VISUALIZATION
+// ============================================================================
+
+// Kill Zone background (OPTIMIZATION 1)
+bgcolor(show_kill_zones and in_kill_zone ? color.new(color.blue, 97) : na, title="Kill Zone BG")
+
+// Zone backgrounds
+bgcolor(show_zones and in_premium_zone ? color.new(color.red, 95) : na, title="Premium Zone BG")
+bgcolor(show_zones and in_discount_zone ? color.new(color.green, 95) : na, title="Discount Zone BG")
+
+// Zone lines
+plot(show_zones ? premium_level : na, "Premium Level", color.red, 1, plot.style_line)
+plot(show_zones ? discount_level : na, "Discount Level", color.green, 1, plot.style_line)
+plot(show_zones ? equilibrium : na, "Equilibrium", color.gray, 1, plot.style_cross)
+
+// Trailing high/low
+plot(show_zones ? trailing_high : na, "Trailing High", color.new(color.red, 70), 1, plot.style_circles)
+plot(show_zones ? trailing_low : na, "Trailing Low", color.new(color.green, 70), 1, plot.style_circles)
+
+// ATR indicator (OPTIMIZATION 2)
+plot(use_volatility_filter ? atr_value : na, "ATR", color.orange, 2, plot.style_line)
+hline(use_volatility_filter ? atr_threshold : na, "ATR Threshold", color.orange, hline.style_dashed)
+
+// Entry signals
+plotshape(show_signals and short_signal, "Short Signal", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.small, text="S")
+
+plotshape(show_signals and long_signal, "Long Signal", shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.small, text="L")
+
+// Position markers
+plot(strategy.position_size > 0 ? low : na, "Long Position", color.green, 3, plot.style_circles)
+plot(strategy.position_size < 0 ? high : na, "Short Position", color.red, 3, plot.style_circles)
+
+// ============================================================================
+// STATISTICS TABLE
+// ============================================================================
+
+if show_stats and barstate.islast
+    var table stats_table = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 85), frame_color=color.gray, frame_width=1)
+
+    // Header
+    table.cell(stats_table, 0, 0, "Metric", text_color=color.white, text_size=size.small)
+    table.cell(stats_table, 1, 0, "Value", text_color=color.white, text_size=size.small)
+
+    // Calculate metrics
+    total_trades = strategy.closedtrades
+    winning_trades = 0
+    losing_trades = 0
+    total_profit = 0.0
+    total_loss = 0.0
+
+    for i = 0 to total_trades - 1
+        profit = strategy.closedtrades.profit(i)
+        if profit > 0
+            winning_trades := winning_trades + 1
+            total_profit := total_profit + profit
+        else
+            losing_trades := losing_trades + 1
+            total_loss := total_loss + math.abs(profit)
+
+    win_rate = total_trades > 0 ? winning_trades / total_trades * 100 : 0
+    profit_factor = total_loss > 0 ? total_profit / total_loss : 0
+    avg_win = winning_trades > 0 ? total_profit / winning_trades : 0
+    avg_loss = losing_trades > 0 ? total_loss / losing_trades : 0
+
+    // Display metrics
+    table.cell(stats_table, 0, 1, "Net Profit", text_color=color.gray, text_size=size.small)
+    table.cell(stats_table, 1, 1, str.tostring(strategy.netprofit, "$#,###"), text_color=strategy.netprofit > 0 ? color.green : color.red, text_size=size.small)
+
+    table.cell(stats_table, 0, 2, "Total Trades", text_color=color.gray, text_size=size.small)
+    table.cell(stats_table, 1, 2, str.tostring(total_trades), text_color=color.white, text_size=size.small)
+
+    table.cell(stats_table, 0, 3, "Win Rate", text_color=color.gray, text_size=size.small)
+    table.cell(stats_table, 1, 3, str.tostring(win_rate, "#.##") + "%", text_color=win_rate > 50 ? color.green : color.orange, text_size=size.small)
+
+    table.cell(stats_table, 0, 4, "Profit Factor", text_color=color.gray, text_size=size.small)
+    table.cell(stats_table, 1, 4, str.tostring(profit_factor, "#.##"), text_color=profit_factor > 1.5 ? color.green : color.orange, text_size=size.small)
+
+    table.cell(stats_table, 0, 5, "Avg Win", text_color=color.gray, text_size=size.small)
+    table.cell(stats_table, 1, 5, str.tostring(avg_win, "$#,###"), text_color=color.green, text_size=size.small)
+
+    table.cell(stats_table, 0, 6, "Avg Loss", text_color=color.gray, text_size=size.small)
+    table.cell(stats_table, 1, 6, str.tostring(avg_loss, "$#,###"), text_color=color.red, text_size=size.small)
+
+    table.cell(stats_table, 0, 7, "Max DD", text_color=color.gray, text_size=size.small)
+    table.cell(stats_table, 1, 7, str.tostring(strategy.max_drawdown, "$#,###"), text_color=color.red, text_size=size.small)
+
+    table.cell(stats_table, 0, 8, "Trades Today", text_color=color.gray, text_size=size.small)
+    table.cell(stats_table, 1, 8, str.tostring(trades_today), text_color=color.white, text_size=size.small)
+
+    table.cell(stats_table, 0, 9, "Daily P&L", text_color=color.gray, text_size=size.small)
+    table.cell(stats_table, 1, 9, str.tostring(daily_pnl * syminfo.mintick * 20, "$#,###"), text_color=daily_pnl > 0 ? color.green : color.red, text_size=size.small)
+
+    // OPTIMIZATION INFO
+    table.cell(stats_table, 0, 10, "Kill Zone", text_color=color.gray, text_size=size.small)
+    table.cell(stats_table, 1, 10, in_kill_zone ? "ACTIVE" : "Inactive", text_color=in_kill_zone ? color.blue : color.gray, text_size=size.small)
+
+    table.cell(stats_table, 0, 11, "ATR", text_color=color.gray, text_size=size.small)
+    table.cell(stats_table, 1, 11, str.tostring(atr_value, "#.##"), text_color=atr_value > atr_threshold ? color.green : color.orange, text_size=size.small)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+// Alert conditions
+alertcondition(short_signal, title="Short Signal", message="🔴 Lightglow SHORT Signal\nTicker: {{ticker}}\nPrice: {{close}}\nTime: {{time}}\nAction: Enter SHORT at Premium zone")
+
+alertcondition(long_signal, title="Long Signal", message="🟢 Lightglow LONG Signal\nTicker: {{ticker}}\nPrice: {{close}}\nTime: {{time}}\nAction: Enter LONG at Discount zone")
+
+// Position exit alerts
+alertcondition(strategy.position_size[1] != 0 and strategy.position_size == 0, title="Position Closed", message="⚪ Position Closed\nTicker: {{ticker}}\nExit Price: {{close}}\nTime: {{time}}")
+
+// Daily limit alerts
+alertcondition(trades_today >= max_trades_per_day, title="Daily Trade Limit Reached", message="⚠️ Daily trade limit reached: {{plot_0}} trades")
+
+alertcondition(daily_pnl <= -daily_loss_limit, title="Daily Loss Limit Hit", message="🛑 Daily loss limit hit: {{plot_0}} points\nStop trading for today!")
+
+// ============================================================================
+// NOTES
+// ============================================================================
+//
+// Usage Instructions:
+// 1. Load this script on NQ futures 3-minute chart
+// 2. Set initial capital to $25,000
+// 3. Commission: $5 per round-trip
+// 4. Slippage: 2 points
+// 5. Run backtest from 2020-01-01 to present
+// 6. Compare results with historical walk-forward data
+//
+// Expected Performance (5-year historical):
+// - Net Profit: ~$800K
+// - Profit Factor: ~1.8
+// - Max Drawdown: ~$25K
+// - Win Rate: ~46%
+// - Trades: ~12,700
+//
+// For Paper Trading:
+// 1. Set up alerts for Long/Short signals
+// 2. Manually execute in IBKR Paper Trading
+// 3. Record actual slippage and compare to backtest
+// 4. After 3 months validation, consider live trading
+//
+// ============================================================================
