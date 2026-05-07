@@ -276,7 +276,9 @@ class LightglowRealtimeTrader:
         # First, load historical bars to initialize
         print("📥 Loading historical bars for initialization...")
         end_time = datetime.now()
-        duration = f"{self.lookback + self.atr_length + 10} D"  # Extra days for safety
+        # Request smaller chunks to avoid timeout
+        # IBKR limits: max 1 day for 1-min bars
+        duration = "1 D"  # Just 1 day of 1-min bars
 
         historical_bars = self.ib.reqHistoricalData(
             self.contract,
@@ -286,6 +288,7 @@ class LightglowRealtimeTrader:
             whatToShow="TRADES",
             useRTH=False,
             formatDate=1,
+            timeout=30,  # 30 second timeout
         )
 
         if historical_bars:
@@ -307,6 +310,7 @@ class LightglowRealtimeTrader:
 
         # Request real-time bars (1 minute)
         try:
+            print("📡 Attempting to subscribe to real-time bars...")
             bars = self.ib.reqRealTimeBars(
                 self.contract,
                 barSize=60,  # 60 seconds = 1 minute
@@ -321,27 +325,35 @@ class LightglowRealtimeTrader:
             print("⏳ Monitoring for signals...\n")
 
         except Exception as e:
-            print(f"⚠️ Real-time bars failed: {e}")
+            print(f"⚠️ Real-time bars subscription failed: {e}")
             print("💡 Falling back to polling historical bars every minute...")
+            print("   (This is normal for Paper accounts without market data subscription)\n")
 
             # Fallback: poll historical bars
+            last_bar_time = None
+            if self.bars:
+                last_bar_time = self.bars[-1]["time"]
+
             while True:
                 try:
+                    # Request latest bars
                     latest_bars = self.ib.reqHistoricalData(
                         self.contract,
                         endDateTime="",
-                        durationStr="2 D",
+                        durationStr="60 S",  # Last 60 seconds
                         barSizeSetting="1 min",
                         whatToShow="TRADES",
                         useRTH=False,
                         formatDate=1,
+                        timeout=10,
                     )
 
                     if latest_bars:
                         latest_bar = latest_bars[-1]
                         # Check if this is a new bar
-                        if not self.bars or latest_bar.date != self.bars[-1]["time"]:
+                        if last_bar_time is None or latest_bar.date != last_bar_time:
                             self.on_bar_update([latest_bar], True)
+                            last_bar_time = latest_bar.date
 
                     self.ib.sleep(60)  # Wait 1 minute
 
