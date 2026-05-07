@@ -269,20 +269,86 @@ class LightglowRealtimeTrader:
         print(f"Dry Run: {self.dry_run}")
         print(f"{'='*60}\n")
 
-        # Request real-time bars (1 minute)
-        bars = self.ib.reqRealTimeBars(
+        # First, load historical bars to initialize
+        print("📥 Loading historical bars for initialization...")
+        end_time = datetime.now()
+        duration = f"{self.lookback + self.atr_length + 10} D"  # Extra days for safety
+
+        historical_bars = self.ib.reqHistoricalData(
             self.contract,
-            barSize=60,  # 60 seconds = 1 minute
+            endDateTime=end_time,
+            durationStr=duration,
+            barSizeSetting="1 min",
             whatToShow="TRADES",
-            useRTH=False,  # Include extended hours
+            useRTH=False,
+            formatDate=1,
         )
 
-        # Set up callback
-        bars.updateEvent += self.on_bar_update
+        if historical_bars:
+            # Take last N bars
+            recent_bars = historical_bars[-(self.lookback + self.atr_length):]
+            for bar in recent_bars:
+                bar_dict = {
+                    "time": bar.date,
+                    "open": bar.open,
+                    "high": bar.high,
+                    "low": bar.low,
+                    "close": bar.close,
+                    "volume": bar.volume,
+                }
+                self.bars.append(bar_dict)
+            print(f"✅ Loaded {len(self.bars)} historical bars")
+        else:
+            print("⚠️ No historical bars loaded, will wait for real-time data")
 
-        print("✅ Subscribed to real-time 1-minute bars")
-        print("⏳ Waiting for bars to accumulate...")
-        print(f"   Need {self.lookback} bars for signals\n")
+        # Request real-time bars (1 minute)
+        try:
+            bars = self.ib.reqRealTimeBars(
+                self.contract,
+                barSize=60,  # 60 seconds = 1 minute
+                whatToShow="TRADES",
+                useRTH=False,  # Include extended hours
+            )
+
+            # Set up callback
+            bars.updateEvent += self.on_bar_update
+
+            print("✅ Subscribed to real-time 1-minute bars")
+            print("⏳ Monitoring for signals...\n")
+
+        except Exception as e:
+            print(f"⚠️ Real-time bars failed: {e}")
+            print("💡 Falling back to polling historical bars every minute...")
+
+            # Fallback: poll historical bars
+            while True:
+                try:
+                    latest_bars = self.ib.reqHistoricalData(
+                        self.contract,
+                        endDateTime="",
+                        durationStr="2 D",
+                        barSizeSetting="1 min",
+                        whatToShow="TRADES",
+                        useRTH=False,
+                        formatDate=1,
+                    )
+
+                    if latest_bars:
+                        latest_bar = latest_bars[-1]
+                        # Check if this is a new bar
+                        if not self.bars or latest_bar.date != self.bars[-1]["time"]:
+                            self.on_bar_update([latest_bar], True)
+
+                    self.ib.sleep(60)  # Wait 1 minute
+
+                except KeyboardInterrupt:
+                    print("\n\n⚠️ Interrupted by user")
+                    break
+                except Exception as e:
+                    print(f"❌ Error in polling loop: {e}")
+                    self.ib.sleep(60)
+
+            return
 
         # Keep running
         try:
