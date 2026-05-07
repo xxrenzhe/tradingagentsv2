@@ -207,9 +207,10 @@ def run_backtest(bars: pd.DataFrame, signal_column: str, hold_bars: int, costs: 
                 pnl_dollars = pnl_points * 2.0  # MNQ multiplier
 
                 # Apply costs
-                total_commission = costs.commission_per_contract * 2
-                total_slippage = costs.slippage_points * 2.0
-                net_pnl = pnl_dollars - total_commission - total_slippage
+                slippage_points = costs.tick_size * costs.slippage_ticks_per_side * 2
+                slippage_dollars = slippage_points * costs.point_value
+                commission_dollars = costs.commission_per_contract * 2
+                net_pnl = pnl_dollars - commission_dollars - slippage_dollars
 
                 trades.append({
                     "entry_index": entry_index,
