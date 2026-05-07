@@ -1,0 +1,33 @@
+{
+  "original": {
+    "total_trades": 544713,
+    "net_profit": -9604734.5,
+    "gross_profit": 1825399.0,
+    "gross_loss": 11430133.5,
+    "profit_factor": 0.15970058442449514,
+    "win_rate": 0.06745019854492182,
+    "win_count": 36741,
+    "loss_count": 506633,
+    "avg_win": 49.682888326392856,
+    "avg_loss": -22.56097313045143,
+    "max_drawdown": 9604713.0
+  },
+  "filtered": {
+    "total_trades": 27407,
+    "net_profit": -200012.0,
+    "gross_profit": 370735.5,
+    "gross_loss": 570747.5,
+    "profit_factor": 0.6495613208993469,
+    "win_rate": 0.09545006750100339,
+    "win_count": 2616,
+    "loss_count": 24720,
+    "avg_win": 141.7184633027523,
+    "avg_loss": -23.088491100323626,
+    "max_drawdown": 251097.0
+  },
+  "improvement": {
+    "net_profit_change": 9404722.5,
+    "profit_factor_change": 0.4898607364748518,
+    "win_rate_change": 0.027999868956081572
+  }
+}
