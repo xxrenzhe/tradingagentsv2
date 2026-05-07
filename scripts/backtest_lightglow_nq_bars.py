@@ -916,6 +916,7 @@ def main() -> int:
     parser.add_argument("--timeframes", type=int, nargs="+", default=[1, 3, 5, 15])
     parser.add_argument("--sessions", nargs="+", default=["all", "europe", "us_rth", "us_late", "asia"])
     parser.add_argument("--hold-bars", type=int, nargs="+", default=[1, 2, 3, 5])
+    parser.add_argument("--signals", nargs="+", default=None, help="Optional subset of Lightglow signal columns to test.")
     parser.add_argument("--direction-modes", nargs="+", choices=["native", "reverse"], default=["native", "reverse"])
     parser.add_argument("--exit-profiles", nargs="+", default=["time"])
     parser.add_argument("--train-days", type=int, default=365)
@@ -949,6 +950,11 @@ def main() -> int:
         "internal_choch_zone",
         "fvg_zone",
     ]
+    if args.signals is not None:
+        unknown = sorted(set(args.signals).difference(signal_names))
+        if unknown:
+            raise ValueError(f"unknown Lightglow signals: {unknown}")
+        signal_names = list(args.signals)
     candidates = candidate_pool(args, signal_names)
     folds, aggregate, trades, full_sample = walk_forward(frames_by_timeframe, candidates, args)
     for output_path, frame in [

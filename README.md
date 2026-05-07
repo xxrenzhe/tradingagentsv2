@@ -174,6 +174,15 @@ To run the selected best MBP strategy through the same guarded IBKR paper path:
 
 This locks the paper runner to `adv_wf_best_mean_reversion_lb6_thr0.8_min1_max6_reverse_europe_all_imb0.3` from `.tmp/mbp-best-strategy-trades.csv` and defaults to dry-run. Add `--daemon --max-iterations 0` for continuous monitoring. Add `--submit` only after readiness and paper-validation gates pass.
 
+To export and dry-run the selected robust Lightglow strategy for MNQ paper validation:
+
+```bash
+.venv/bin/python scripts/export_lightglow_robust_strategy_trades.py
+.venv/bin/python scripts/run_lightglow_robust_strategy_paper_trader.py --record-ticks
+```
+
+This locks validation to `lightglow_premium_discount_reversal_3m_all_hold3m_reverse_time`, using 3-minute bars, reversed premium/discount zone signals, one MNQ contract, and a time exit after one 3-minute bar. Do not substitute the higher-return 1-minute Lightglow variant for this validation. Real `--submit` is blocked until a timed-exit manager is available, because this strategy is not backed by stop-loss/take-profit brackets.
+
 To run the guarded automation supervisor for that strategy:
 
 ```bash

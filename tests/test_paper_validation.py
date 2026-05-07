@@ -107,6 +107,32 @@ def test_build_paper_intent_from_short_trade():
     assert intent.take_profit_price == 24976.0
 
 
+def test_build_paper_intent_allows_time_exit_without_bracket():
+    trade = pd.Series(
+        {
+            "direction": 1,
+            "entry_price": 25000.0,
+            "trade_date": "2026-05-01",
+            "portfolio_rule": "lightglow_premium_discount_reversal_3m_all_hold3m_reverse_time",
+            "selected_alias": "lightglow_robust_3m_premium_discount_reverse",
+            "exit_reason": "time",
+        }
+    )
+
+    intent = build_paper_intent_from_trade(
+        trade,
+        contract_month="202606",
+        stop_loss_points=None,
+        take_profit_points=None,
+    )
+
+    assert intent.action == "BUY"
+    assert intent.stop_loss_price is None
+    assert intent.take_profit_price is None
+    assert "stop_loss_points=none" in intent.reason
+    assert "take_profit_points=none" in intent.reason
+
+
 def test_select_trade_sample_filters_and_row_index():
     trades = pd.DataFrame(
         [
@@ -1076,6 +1102,127 @@ def test_best_strategy_paper_trader_script_locks_strategy_filters(tmp_path, monk
     assert '"status": "dry_run"' in output
     assert f'"strategy_id": "{best_strategy}"' in output
     assert '"portfolio_rule": "other_strategy"' not in output
+
+
+def test_lightglow_robust_paper_trader_locks_strategy_and_disables_bracket(tmp_path, monkeypatch, capsys):
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "run_lightglow_robust_strategy_paper_trader.py"
+    spec = importlib.util.spec_from_file_location("run_lightglow_robust_strategy_paper_trader", script_path)
+    script = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(script)
+    trades_path = tmp_path / "trades.csv"
+    robust_strategy = "lightglow_premium_discount_reversal_3m_all_hold3m_reverse_time"
+    pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-05-01",
+                "entry_ts": "2026-05-01 10:30:00",
+                "exit_ts": "2026-05-01 10:33:00",
+                "direction": -1,
+                "entry_price": 18025.25,
+                "portfolio_rule": robust_strategy,
+                "selected_alias": "lightglow_robust_3m_premium_discount_reverse",
+                "exit_reason": "time",
+                "holding_minutes": 3,
+            },
+            {
+                "trade_date": "2026-05-01",
+                "entry_ts": "2026-05-01 10:40:00",
+                "exit_ts": "2026-05-01 10:42:00",
+                "direction": 1,
+                "entry_price": 18030.25,
+                "portfolio_rule": "lightglow_premium_discount_reversal_1m_all_hold2m_reverse_time",
+                "selected_alias": "lightglow_robust_3m_premium_discount_reverse",
+                "exit_reason": "time",
+            },
+        ]
+    ).to_csv(trades_path, index=False)
+    captured = {}
+
+    def fake_run_once(**kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "dry_run",
+            "submitted": False,
+            "intent": {
+                "strategy_id": robust_strategy,
+                "symbol": "MNQ",
+                "quantity": 1,
+                "stop_loss_price": None,
+                "take_profit_price": None,
+            },
+            "selected_trade": {
+                "portfolio_rule": robust_strategy,
+                "selected_alias": "lightglow_robust_3m_premium_discount_reverse",
+            },
+        }
+
+    monkeypatch.setattr(script, "run_adaptive_portfolio_paper_once", fake_run_once)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_lightglow_robust_strategy_paper_trader.py",
+            "--trades",
+            str(trades_path),
+            "--state-path",
+            str(tmp_path / "state.json"),
+            "--account",
+            "DU123",
+        ],
+    )
+
+    assert script.main() == 0
+    assert captured["portfolio_rule"] == robust_strategy
+    assert captured["selected_alias"] == "lightglow_robust_3m_premium_discount_reverse"
+    assert captured["config"].quantity == 1
+    assert captured["config"].stop_loss_points is None
+    assert captured["config"].take_profit_points is None
+    output = capsys.readouterr().out
+    assert '"status": "dry_run"' in output
+    assert f'"strategy_id": "{robust_strategy}"' in output
+    assert '"stop_loss_price": null' in output
+    assert '"take_profit_price": null' in output
+    assert '"exit_policy": "time_exit_after_one_3m_bar"' in output
+
+
+def test_lightglow_robust_exporter_locks_3m_candidate():
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "export_lightglow_robust_strategy_trades.py"
+    spec = importlib.util.spec_from_file_location("export_lightglow_robust_strategy_trades", script_path)
+    script = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(script)
+
+    candidate = script.robust_lightglow_candidate()
+
+    assert candidate.name == "lightglow_premium_discount_reversal_3m_all_hold3m_reverse_time"
+    assert candidate.signal == "premium_discount_reversal"
+    assert candidate.timeframe_minutes == 3
+    assert candidate.hold_bars == 1
+    assert candidate.direction_mode == "reverse"
+    assert candidate.stop_loss_points is None
+    assert candidate.take_profit_points is None
+
+
+def test_lightglow_robust_paper_trader_blocks_submit_without_timed_exit(tmp_path, monkeypatch, capsys):
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "run_lightglow_robust_strategy_paper_trader.py"
+    spec = importlib.util.spec_from_file_location("run_lightglow_robust_strategy_paper_trader", script_path)
+    script = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(script)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_lightglow_robust_strategy_paper_trader.py",
+            "--submit",
+            "--trades",
+            str(tmp_path / "missing.csv"),
+        ],
+    )
+
+    assert script.main() == 2
+    output = capsys.readouterr().out
+    assert '"status": "blocked"' in output
+    assert '"reason": "timed_exit_manager_required"' in output
 
 
 def test_best_strategy_automation_dry_run_executes_without_submit_gate(tmp_path, monkeypatch, capsys):

@@ -23,8 +23,8 @@ class PaperRunnerConfig:
     contract_month: str = "202606"
     account: str | None = None
     quantity: int = 1
-    stop_loss_points: float = 16.0
-    take_profit_points: float = 24.0
+    stop_loss_points: float | None = 16.0
+    take_profit_points: float | None = 24.0
     submit: bool = False
     skip_preflight: bool = False
     require_agent_gate: bool = False

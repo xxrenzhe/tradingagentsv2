@@ -51,8 +51,8 @@ def _signed_direction(value: Any) -> int:
     return 1 if direction > 0 else -1
 
 
-def _round_price(value: float) -> float:
-    return round(float(value), 2)
+def _round_price(value: float | None) -> float | None:
+    return None if value is None else round(float(value), 2)
 
 
 def build_paper_intent_from_trade(
@@ -61,8 +61,8 @@ def build_paper_intent_from_trade(
     contract_month: str,
     account: str | None = None,
     quantity: int = 1,
-    stop_loss_points: float = 16.0,
-    take_profit_points: float = 24.0,
+    stop_loss_points: float | None = 16.0,
+    take_profit_points: float | None = 24.0,
     strategy_id: str | None = None,
     symbol: str = "MNQ",
     exchange: str = "CME",
@@ -74,12 +74,12 @@ def build_paper_intent_from_trade(
     entry_price = float(reference_price if reference_price is not None else trade["entry_price"])
     if direction > 0:
         action = "BUY"
-        stop_loss_price = entry_price - float(stop_loss_points)
-        take_profit_price = entry_price + float(take_profit_points)
+        stop_loss_price = None if stop_loss_points is None else entry_price - float(stop_loss_points)
+        take_profit_price = None if take_profit_points is None else entry_price + float(take_profit_points)
     else:
         action = "SELL"
-        stop_loss_price = entry_price + float(stop_loss_points)
-        take_profit_price = entry_price - float(take_profit_points)
+        stop_loss_price = None if stop_loss_points is None else entry_price + float(stop_loss_points)
+        take_profit_price = None if take_profit_points is None else entry_price - float(take_profit_points)
     trade_date = str(trade.get("trade_date", "unknown"))
     selected_alias = str(trade.get("selected_alias", "unknown"))
     portfolio_rule = str(trade.get("portfolio_rule", "adaptive_portfolio"))
@@ -90,8 +90,8 @@ def build_paper_intent_from_trade(
         f"portfolio_rule={portfolio_rule}",
         f"selected_alias={selected_alias}",
         f"exit_reason={exit_reason}",
-        f"stop_loss_points={float(stop_loss_points):.4f}",
-        f"take_profit_points={float(take_profit_points):.4f}",
+        f"stop_loss_points={_format_optional_points(stop_loss_points)}",
+        f"take_profit_points={_format_optional_points(take_profit_points)}",
     ]
     if reference_source:
         reason_parts.append(f"reference_source={reference_source}")
@@ -110,3 +110,7 @@ def build_paper_intent_from_trade(
         strategy_id=strategy_id or portfolio_rule,
         reason=" | ".join(reason_parts),
     )
+
+
+def _format_optional_points(value: float | None) -> str:
+    return "none" if value is None else f"{float(value):.4f}"
