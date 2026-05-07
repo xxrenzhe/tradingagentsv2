@@ -88,16 +88,18 @@ class LightglowRealtimeTrader:
         print(f"✅ Contract qualified: {self.contract}")
 
     def is_kill_zone(self, dt: datetime) -> bool:
-        """Check if current time is in NY Kill Zone."""
-        # Convert to EST (UTC-5)
-        hour_utc = dt.hour
-        minute_utc = dt.minute
+        """Check if current time is in NY Kill Zone.
 
-        # NY AM: 8:30-11:30 EST (13:30-16:30 UTC)
-        ny_am = (hour_utc == 13 and minute_utc >= 30) or (14 <= hour_utc < 16) or (hour_utc == 16 and minute_utc <= 30)
+        Note: dt is already in EST/EDT timezone from IBKR.
+        """
+        hour = dt.hour
+        minute = dt.minute
 
-        # NY PM: 13:30-16:00 EST (18:30-21:00 UTC)
-        ny_pm = (hour_utc == 18 and minute_utc >= 30) or (19 <= hour_utc < 21)
+        # NY AM: 8:30-11:30 EST
+        ny_am = (hour == 8 and minute >= 30) or (9 <= hour < 11) or (hour == 11 and minute <= 30)
+
+        # NY PM: 13:30-16:00 EST
+        ny_pm = (hour == 13 and minute >= 30) or (14 <= hour < 16)
 
         return ny_am or ny_pm
 
