@@ -1,0 +1,18 @@
+{
+  "total_trades": 18450,
+  "net_profit": -102845.5,
+  "gross_profit": 237373.5,
+  "gross_loss": 340219.0,
+  "profit_factor": 0.6977079469400592,
+  "win_rate": 0.27615176151761517,
+  "win_count": 5095,
+  "loss_count": 13213,
+  "avg_win": 46.58949950932286,
+  "avg_loss": -25.748807992128963,
+  "max_drawdown": 116771.5,
+  "sharpe_ratio": -1.1068031517210342,
+  "reversal_trades": 18449,
+  "reversal_profit": -102847.5,
+  "trend_trades": 1,
+  "trend_profit": 2.0
+}
