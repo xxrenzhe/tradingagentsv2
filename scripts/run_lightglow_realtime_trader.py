@@ -76,6 +76,10 @@ class LightglowRealtimeTrader:
         self.ib.connect(host, port, clientId=client_id)
         print(f"✅ Connected to IBKR at {host}:{port}")
 
+        # Request delayed market data (free for paper accounts)
+        self.ib.reqMarketDataType(3)  # 3 = delayed data (15-20 min delay)
+        print(f"✅ Requested delayed market data (free for paper accounts)")
+
         # Create contract
         self.contract = Future(self.symbol, self.contract_month, "CME")
         self.ib.qualifyContracts(self.contract)
