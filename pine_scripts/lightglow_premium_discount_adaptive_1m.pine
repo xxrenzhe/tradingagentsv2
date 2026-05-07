@@ -402,10 +402,12 @@ if show_stats and barstate.islast
 // ALERTS
 // ============================================================================
 
-// Alert conditions
-alertcondition(long_signal, title="Long Signal", message="🟢 Lightglow LONG Signal (" + market_regime + ")\nTicker: {{ticker}}\nPrice: {{close}}\nTime: {{time}}")
+// Alert conditions - separate for trend and range (alertcondition message must be constant)
+alertcondition(trend_long_signal, title="Long Trend Signal", message="🟢 Lightglow LONG Signal (TREND)\nTicker: {{ticker}}\nPrice: {{close}}\nTime: {{time}}")
+alertcondition(range_long_signal, title="Long Range Signal", message="🟢 Lightglow LONG Signal (RANGE)\nTicker: {{ticker}}\nPrice: {{close}}\nTime: {{time}}")
 
-alertcondition(short_signal, title="Short Signal", message="🔴 Lightglow SHORT Signal (" + market_regime + ")\nTicker: {{ticker}}\nPrice: {{close}}\nTime: {{time}}")
+alertcondition(trend_short_signal, title="Short Trend Signal", message="🔴 Lightglow SHORT Signal (TREND)\nTicker: {{ticker}}\nPrice: {{close}}\nTime: {{time}}")
+alertcondition(range_short_signal, title="Short Range Signal", message="🔴 Lightglow SHORT Signal (RANGE)\nTicker: {{ticker}}\nPrice: {{close}}\nTime: {{time}}")
 
 // Position exit alerts
 alertcondition(strategy.position_size[1] != 0 and strategy.position_size == 0, title="Position Closed", message="⚪ Position Closed\nTicker: {{ticker}}\nExit Price: {{close}}\nTime: {{time}}")
@@ -415,7 +417,7 @@ alertcondition(trades_today >= max_trades_per_day, title="Daily Trade Limit Reac
 
 alertcondition(daily_pnl <= -daily_loss_limit, title="Daily Loss Limit Hit", message="🛑 Daily loss limit hit\nStop trading for today!")
 
-alertcondition(is_paused, title="Trading Paused", message="⏸️ Trading paused due to consecutive losses\nPause duration: " + str.tostring(pause_minutes) + " minutes")
+alertcondition(is_paused, title="Trading Paused", message="⏸️ Trading paused due to consecutive losses")
 
 // ============================================================================
 // NOTES
