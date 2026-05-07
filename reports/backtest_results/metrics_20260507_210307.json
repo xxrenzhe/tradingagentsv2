@@ -1,0 +1,32 @@
+{
+  "optimized": {
+    "strategy": "Optimized",
+    "net_profit": 5996565.0,
+    "total_trades": 24393,
+    "winning_trades": 14158,
+    "losing_trades": 9991,
+    "win_rate": 58.041241339728614,
+    "profit_factor": 4.728731722634863,
+    "avg_win": 537.1358949004097,
+    "avg_loss": 160.96536883194875,
+    "max_drawdown": -39695.0,
+    "max_drawdown_pct": -158.78,
+    "sharpe_ratio": 4.996591160864848,
+    "final_equity": 6021565.0
+  },
+  "adaptive": {
+    "strategy": "Adaptive",
+    "net_profit": 3943335.0,
+    "total_trades": 19685,
+    "winning_trades": 10035,
+    "losing_trades": 9470,
+    "win_rate": 50.977901955803915,
+    "profit_factor": 2.725567117676918,
+    "avg_win": 620.6851021425013,
+    "avg_loss": 241.31362196409714,
+    "max_drawdown": -219705.0,
+    "max_drawdown_pct": -878.8199999999999,
+    "sharpe_ratio": 3.6258047954134365,
+    "final_equity": 3968335.0
+  }
+}
