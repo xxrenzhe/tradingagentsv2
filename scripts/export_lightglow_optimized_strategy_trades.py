@@ -25,7 +25,7 @@ from tradingagents.backtesting.short_patterns import BacktestCosts
 from tradingagents.dataflows.databento import _bar_zip_path
 
 
-LIGHTGLOW_OPTIMIZED_STRATEGY_ID = "lightglow_premium_discount_optimized_1m_killzone_atr8"
+LIGHTGLOW_OPTIMIZED_STRATEGY_ID = "lightglow_premium_discount_reversal_1m_all_hold2m_reverse_time"
 LIGHTGLOW_OPTIMIZED_SELECTED_ALIAS = "lightglow_optimized_1m_premium_discount"
 
 
@@ -34,12 +34,12 @@ def optimized_lightglow_candidate() -> LightglowCandidate:
     Optimized Lightglow strategy parameters based on backtest results.
 
     Strategy: Premium/Discount Reversal
-    - Lookback: 100 bars
-    - Premium: 0.95 (95%)
-    - Discount: 0.05 (5%)
+    - Lookback: 100 bars (hardcoded in build_lightglow_signals)
+    - Premium: 0.95 (95%) (hardcoded in build_lightglow_signals)
+    - Discount: 0.05 (5%) (hardcoded in build_lightglow_signals)
     - Exit: 2 bars
-    - ATR Filter: > 8.0
-    - Time Filter: NY Kill Zone (8:30-11:30, 13:30-16:00 EST)
+    - ATR Filter: > 8.0 (applied in build_trades)
+    - Time Filter: NY Kill Zone (session="all" for now, filter in paper trader)
 
     Backtest Results (2020-2026):
     - Net Profit: $5,996,565
@@ -51,15 +51,11 @@ def optimized_lightglow_candidate() -> LightglowCandidate:
     return LightglowCandidate(
         signal="premium_discount_reversal",
         timeframe_minutes=1,
-        session="killzone",  # NY Kill Zone only
+        session="all",  # Filter in paper trader
         hold_bars=2,
         direction_mode="reverse",
         stop_loss_points=None,
         take_profit_points=None,
-        atr_threshold=8.0,
-        lookback=100,
-        premium_threshold=0.95,
-        discount_threshold=0.05,
     )
 
 
