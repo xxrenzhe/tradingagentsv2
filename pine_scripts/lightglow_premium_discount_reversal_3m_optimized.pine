@@ -216,9 +216,11 @@ plot(show_zones ? equilibrium : na, "Equilibrium", color.gray, 1, plot.style_cro
 plot(show_zones ? trailing_high : na, "Trailing High", color.new(color.red, 70), 1, plot.style_circles)
 plot(show_zones ? trailing_low : na, "Trailing Low", color.new(color.green, 70), 1, plot.style_circles)
 
-// ATR indicator (OPTIMIZATION 2)
-plot(use_volatility_filter ? atr_value : na, "ATR", color.orange, 2, plot.style_line)
-hline(use_volatility_filter ? atr_threshold : na, "ATR Threshold", color.orange, hline.style_dashed)
+// ATR indicator (OPTIMIZATION 2) - Display as overlay text instead of plot to avoid scale issues
+// Note: ATR value is shown in the statistics table
+// Uncomment below to plot ATR in a separate pane (not recommended for overlay=true)
+// plot(use_volatility_filter ? atr_value : na, "ATR", color.orange, 2, plot.style_line)
+// hline(use_volatility_filter ? atr_threshold : na, "ATR Threshold", color.orange, hline.style_dashed)
 
 // Entry signals
 plotshape(show_signals and short_signal, "Short Signal", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.small, text="S")
