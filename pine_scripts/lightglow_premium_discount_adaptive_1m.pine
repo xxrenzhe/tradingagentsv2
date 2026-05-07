@@ -312,10 +312,12 @@ plot(show_zones ? equilibrium : na, "Equilibrium", color.gray, 1, plot.style_cro
 plot(show_zones ? trailing_high : na, "Trailing High", color.new(color.red, 70), 1, plot.style_circles)
 plot(show_zones ? trailing_low : na, "Trailing Low", color.new(color.green, 70), 1, plot.style_circles)
 
-// Entry signals
-plotshape(show_signals and long_signal, "Long Signal", shape.triangleup, location.belowbar, is_trending ? color.new(color.orange, 0) : color.new(color.green, 0), size=size.small, text=is_trending ? "LT" : "LR")
+// Entry signals - separate for trend and range to use constant text
+plotshape(show_signals and trend_long_signal, "Long Trend Signal", shape.triangleup, location.belowbar, color.new(color.orange, 0), size=size.small, text="LT")
+plotshape(show_signals and range_long_signal, "Long Range Signal", shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.small, text="LR")
 
-plotshape(show_signals and short_signal, "Short Signal", shape.triangledown, location.abovebar, is_trending ? color.new(color.orange, 0) : color.new(color.red, 0), size=size.small, text=is_trending ? "ST" : "SR")
+plotshape(show_signals and trend_short_signal, "Short Trend Signal", shape.triangledown, location.abovebar, color.new(color.orange, 0), size=size.small, text="ST")
+plotshape(show_signals and range_short_signal, "Short Range Signal", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.small, text="SR")
 
 // Position markers
 plot(strategy.position_size > 0 ? low : na, "Long Position", color.green, 3, plot.style_circles)
