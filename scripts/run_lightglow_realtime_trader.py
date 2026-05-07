@@ -326,11 +326,11 @@ class LightglowRealtimeTrader:
                 poll_count += 1
                 print(f"📡 Poll #{poll_count}: Requesting latest bars...")
 
-                # Request latest bars (last 5 minutes to ensure we get data)
+                # Request latest bars (last 1 hour to ensure we get data)
                 latest_bars = self.ib.reqHistoricalData(
                     self.contract,
                     endDateTime="",
-                    durationStr="300 S",  # Last 5 minutes
+                    durationStr="3600 S",  # Last 1 hour
                     barSizeSetting="1 min",
                     whatToShow="TRADES",
                     useRTH=False,
