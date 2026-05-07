@@ -310,63 +310,58 @@ class LightglowRealtimeTrader:
         else:
             print("⚠️ No historical bars loaded, will wait for real-time data")
 
-        # Request real-time bars (1 minute)
-        try:
-            print("📡 Attempting to subscribe to real-time bars...")
-            bars = self.ib.reqRealTimeBars(
-                self.contract,
-                barSize=60,  # 60 seconds = 1 minute
-                whatToShow="TRADES",
-                useRTH=False,  # Include extended hours
-            )
+        # For Paper accounts, use polling mode directly
+        # Real-time bars require market data subscription
+        print("💡 Using polling mode (recommended for Paper accounts)")
+        print("   Polling historical bars every 60 seconds...\n")
 
-            # Set up callback
-            bars.updateEvent += self.on_bar_update
+        last_bar_time = None
+        if self.bars:
+            last_bar_time = self.bars[-1]["time"]
+            print(f"   Last bar loaded: {last_bar_time}")
 
-            print("✅ Subscribed to real-time 1-minute bars")
-            print("⏳ Monitoring for signals...\n")
+        poll_count = 0
+        while True:
+            try:
+                poll_count += 1
+                print(f"📡 Poll #{poll_count}: Requesting latest bar...")
 
-        except Exception as e:
-            print(f"⚠️ Real-time bars subscription failed: {e}")
-            print("💡 Falling back to polling historical bars every minute...")
-            print("   (This is normal for Paper accounts without market data subscription)\n")
+                # Request latest bars (last 60 seconds)
+                latest_bars = self.ib.reqHistoricalData(
+                    self.contract,
+                    endDateTime="",
+                    durationStr="60 S",
+                    barSizeSetting="1 min",
+                    whatToShow="TRADES",
+                    useRTH=False,
+                    formatDate=1,
+                    timeout=10,
+                )
 
-            # Fallback: poll historical bars
-            last_bar_time = None
-            if self.bars:
-                last_bar_time = self.bars[-1]["time"]
+                if latest_bars:
+                    latest_bar = latest_bars[-1]
+                    print(f"   Latest bar: {latest_bar.date} | C:{latest_bar.close}")
 
-            while True:
-                try:
-                    # Request latest bars
-                    latest_bars = self.ib.reqHistoricalData(
-                        self.contract,
-                        endDateTime="",
-                        durationStr="60 S",  # Last 60 seconds
-                        barSizeSetting="1 min",
-                        whatToShow="TRADES",
-                        useRTH=False,
-                        formatDate=1,
-                        timeout=10,
-                    )
+                    # Check if this is a new bar
+                    if last_bar_time is None or latest_bar.date != last_bar_time:
+                        print(f"   ✅ New bar detected!")
+                        self.on_bar_update([latest_bar], True)
+                        last_bar_time = latest_bar.date
+                    else:
+                        print(f"   ⏸️  Same bar, waiting...")
+                else:
+                    print(f"   ⚠️  No bars returned")
 
-                    if latest_bars:
-                        latest_bar = latest_bars[-1]
-                        # Check if this is a new bar
-                        if last_bar_time is None or latest_bar.date != last_bar_time:
-                            self.on_bar_update([latest_bar], True)
-                            last_bar_time = latest_bar.date
+                print(f"   Sleeping 60 seconds...\n")
+                self.ib.sleep(60)
 
-                    self.ib.sleep(60)  # Wait 1 minute
-
-                except KeyboardInterrupt:
-                    print("\n\n⚠️ Interrupted by user")
-                    break
-                except Exception as e:
-                    print(f"❌ Error in polling loop: {e}")
-                    self.ib.sleep(60)
-
-            return
+            except KeyboardInterrupt:
+                print("\n\n⚠️ Interrupted by user")
+                break
+            except Exception as e:
+                print(f"❌ Error in polling loop: {e}")
+                print(f"   Retrying in 60 seconds...\n")
+                self.ib.sleep(60)
 
         # Keep running
         try:
