@@ -377,7 +377,7 @@ def main() -> int:
     parser.add_argument("--contract-month", default="202606", help="Contract month")
     parser.add_argument("--host", default="127.0.0.1", help="IBKR host")
     parser.add_argument("--port", type=int, default=7497, help="IBKR port")
-    parser.add_argument("--client-id", type=int, default=1, help="IBKR client ID")
+    parser.add_argument("--client-id", type=int, default=None, help="IBKR client ID (random if not specified)")
     parser.add_argument("--lookback", type=int, default=100, help="Lookback period")
     parser.add_argument("--premium", type=float, default=0.95, help="Premium threshold")
     parser.add_argument("--discount", type=float, default=0.05, help="Discount threshold")
@@ -387,6 +387,12 @@ def main() -> int:
     parser.add_argument("--max-position", type=int, default=1, help="Max position size")
     parser.add_argument("--submit", action="store_true", help="Submit real orders (not dry-run)")
     args = parser.parse_args()
+
+    # Use random client ID if not specified
+    if args.client_id is None:
+        import random
+        args.client_id = random.randint(100, 9999)
+        print(f"Using random client ID: {args.client_id}")
 
     trader = LightglowRealtimeTrader(
         symbol=args.symbol,
