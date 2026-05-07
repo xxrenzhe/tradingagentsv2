@@ -201,8 +201,7 @@ if show_stats and barstate.islast
     avg_loss = math.abs(strategy.grossloss) / strategy.losstrades
 
     table.cell(stats_table, 0, 1, "Net Profit", text_size=size.small)
-    table.cell(stats_table, 1, 1, str.tostring(strategy.netprofit, "$#,###"),
-        text_color=strategy.netprofit > 0 ? color.green : color.red, text_size=size.small)
+    table.cell(stats_table, 1, 1, str.tostring(strategy.netprofit, "$#,###"), text_color=strategy.netprofit > 0 ? color.green : color.red, text_size=size.small)
 
     table.cell(stats_table, 0, 2, "Total Trades", text_size=size.small)
     table.cell(stats_table, 1, 2, str.tostring(strategy.closedtrades), text_size=size.small)
@@ -223,12 +222,10 @@ if show_stats and barstate.islast
     table.cell(stats_table, 1, 7, str.tostring(trades_today), text_size=size.small)
 
     table.cell(stats_table, 0, 8, "Today PnL", text_size=size.small)
-    table.cell(stats_table, 1, 8, str.tostring(daily_pnl, "#.#") + " pts",
-        text_color=daily_pnl > 0 ? color.green : color.red, text_size=size.small)
+    table.cell(stats_table, 1, 8, str.tostring(daily_pnl, "#.#") + " pts", text_color=daily_pnl > 0 ? color.green : color.red, text_size=size.small)
 
     table.cell(stats_table, 0, 9, "ATR", text_size=size.small)
-    table.cell(stats_table, 1, 9, str.tostring(atr, "#.##"),
-        text_color=atr > atr_threshold ? color.green : color.gray, text_size=size.small)
+    table.cell(stats_table, 1, 9, str.tostring(atr, "#.##"), text_color=atr > atr_threshold ? color.green : color.gray, text_size=size.small)
 
 // ============================================================================
 // ALERTS
