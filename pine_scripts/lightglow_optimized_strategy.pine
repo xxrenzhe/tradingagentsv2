@@ -43,30 +43,23 @@ strategy("Lightglow Premium/Discount Optimized",
 // ============================================================================
 
 // Premium/Discount Parameters
-lookback_length = input.int(100, "Lookback Length", minval=10, maxval=500,
-    tooltip="用于计算Premium/Discount区域的回溯周期")
-premium_threshold = input.float(0.95, "Premium Threshold", minval=0.5, maxval=1.0, step=0.01,
-    tooltip="Premium区域阈值（0.95 = 95%）")
-discount_threshold = input.float(0.05, "Discount Threshold", minval=0.0, maxval=0.5, step=0.01,
-    tooltip="Discount区域阈值（0.05 = 5%）")
+lookback_length = input.int(100, "Lookback Length", minval=10, maxval=500, tooltip="用于计算Premium/Discount区域的回溯周期")
+premium_threshold = input.float(0.95, "Premium Threshold", minval=0.5, maxval=1.0, step=0.01, tooltip="Premium区域阈值（0.95 = 95%）")
+discount_threshold = input.float(0.05, "Discount Threshold", minval=0.0, maxval=0.5, step=0.01, tooltip="Discount区域阈值（0.05 = 5%）")
 
 // Exit Parameters
-exit_bars = input.int(2, "Exit After N Bars", minval=1, maxval=10,
-    tooltip="持仓N根K线后平仓")
+exit_bars = input.int(2, "Exit After N Bars", minval=1, maxval=10, tooltip="持仓N根K线后平仓")
 
 // ATR Filter
 atr_length = input.int(14, "ATR Length", minval=5, maxval=50)
-atr_threshold = input.float(8.0, "ATR Threshold", minval=0.0, maxval=50.0, step=0.5,
-    tooltip="只在ATR大于此值时交易")
+atr_threshold = input.float(8.0, "ATR Threshold", minval=0.0, maxval=50.0, step=0.5, tooltip="只在ATR大于此值时交易")
 
 // Time Filter
-use_time_filter = input.bool(true, "Use Kill Zone Filter",
-    tooltip="只在NY Kill Zone交易")
+use_time_filter = input.bool(true, "Use Kill Zone Filter", tooltip="只在NY Kill Zone交易")
 
 // Risk Management
 max_trades_per_day = input.int(50, "Max Trades Per Day", minval=1, maxval=100)
-daily_loss_limit = input.float(400, "Daily Loss Limit (points)", minval=0, maxval=1000,
-    tooltip="每日最大亏损点数")
+daily_loss_limit = input.float(400, "Daily Loss Limit (points)", minval=0, maxval=1000, tooltip="每日最大亏损点数")
 
 // Display Options
 show_zones = input.bool(true, "Show Premium/Discount Zones")
