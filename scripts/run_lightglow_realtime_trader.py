@@ -324,13 +324,13 @@ class LightglowRealtimeTrader:
         while True:
             try:
                 poll_count += 1
-                print(f"📡 Poll #{poll_count}: Requesting latest bar...")
+                print(f"📡 Poll #{poll_count}: Requesting latest bars...")
 
-                # Request latest bars (last 60 seconds)
+                # Request latest bars (last 5 minutes to ensure we get data)
                 latest_bars = self.ib.reqHistoricalData(
                     self.contract,
                     endDateTime="",
-                    durationStr="60 S",
+                    durationStr="300 S",  # Last 5 minutes
                     barSizeSetting="1 min",
                     whatToShow="TRADES",
                     useRTH=False,
@@ -340,7 +340,7 @@ class LightglowRealtimeTrader:
 
                 if latest_bars:
                     latest_bar = latest_bars[-1]
-                    print(f"   Latest bar: {latest_bar.date} | C:{latest_bar.close}")
+                    print(f"   Latest bar: {latest_bar.date} | O:{latest_bar.open} H:{latest_bar.high} L:{latest_bar.low} C:{latest_bar.close}")
 
                     # Check if this is a new bar
                     if last_bar_time is None or latest_bar.date != last_bar_time:
@@ -350,7 +350,7 @@ class LightglowRealtimeTrader:
                     else:
                         print(f"   ⏸️  Same bar, waiting...")
                 else:
-                    print(f"   ⚠️  No bars returned")
+                    print(f"   ⚠️  No bars returned (market may be closed)")
 
                 print(f"   Sleeping 60 seconds...\n")
                 self.ib.sleep(60)
