@@ -42,37 +42,19 @@ strategy("Lightglow Premium/Discount Reversal 3m",
 // ============================================================================
 
 // Premium/Discount Zone Settings
-lookback_length = input.int(100, "Lookback Length",
-                            minval=50, maxval=200,
-                            tooltip="Number of bars to calculate trailing high/low",
-                            group="Zone Settings")
+lookback_length = input.int(100, "Lookback Length", minval=50, maxval=200, tooltip="Number of bars to calculate trailing high/low", group="Zone Settings")
 
-premium_threshold = input.float(0.95, "Premium Threshold",
-                               minval=0.80, maxval=1.0, step=0.01,
-                               tooltip="Price above this % of range = Premium zone",
-                               group="Zone Settings")
+premium_threshold = input.float(0.95, "Premium Threshold", minval=0.80, maxval=1.0, step=0.01, tooltip="Price above this % of range = Premium zone", group="Zone Settings")
 
-discount_threshold = input.float(0.05, "Discount Threshold",
-                                minval=0.0, maxval=0.20, step=0.01,
-                                tooltip="Price below this % of range = Discount zone",
-                                group="Zone Settings")
+discount_threshold = input.float(0.05, "Discount Threshold", minval=0.0, maxval=0.20, step=0.01, tooltip="Price below this % of range = Discount zone", group="Zone Settings")
 
 // Exit Settings
-exit_bars = input.int(1, "Exit After N Bars",
-                     minval=1, maxval=5,
-                     tooltip="Number of bars to hold position (1 bar = 3 minutes on 3m chart)",
-                     group="Exit Settings")
+exit_bars = input.int(1, "Exit After N Bars", minval=1, maxval=5, tooltip="Number of bars to hold position (1 bar = 3 minutes on 3m chart)", group="Exit Settings")
 
 // Risk Management
-max_trades_per_day = input.int(20, "Max Trades Per Day",
-                              minval=5, maxval=50,
-                              tooltip="Maximum number of trades allowed per day",
-                              group="Risk Management")
+max_trades_per_day = input.int(20, "Max Trades Per Day", minval=5, maxval=50, tooltip="Maximum number of trades allowed per day", group="Risk Management")
 
-daily_loss_limit = input.float(400, "Daily Loss Limit (points)",
-                              minval=100, maxval=1000,
-                              tooltip="Stop trading if daily loss exceeds this (in points)",
-                              group="Risk Management")
+daily_loss_limit = input.float(400, "Daily Loss Limit (points)", minval=100, maxval=1000, tooltip="Stop trading if daily loss exceeds this (in points)", group="Risk Management")
 
 // Backtest Period
 start_date = input(timestamp("2020-01-01 00:00"), "Start Date", group="Backtest")
