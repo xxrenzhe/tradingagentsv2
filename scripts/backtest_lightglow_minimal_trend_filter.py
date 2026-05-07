@@ -321,7 +321,7 @@ def main():
     print()
 
     # Run backtest
-    costs = BacktestCosts(commission_per_contract=5.0, slippage_points=2.0)
+    costs = BacktestCosts(commission_per_contract=5.0, slippage_ticks_per_side=1.0)
     results = backtest_with_trend_filter(bars, hold_bars=args.hold_bars, costs=costs)
 
     # Print results
