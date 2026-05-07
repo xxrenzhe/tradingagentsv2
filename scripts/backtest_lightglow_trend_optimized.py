@@ -435,6 +435,8 @@ def main():
     parser.add_argument("--start-date", default="2020-01-01", help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end-date", default="2026-05-08", help="End date (YYYY-MM-DD)")
     parser.add_argument("--cache", default=".tmp/nq-trend-optimized-cache.pkl", help="Cache file")
+    parser.add_argument("--chunk-size", type=int, default=500_000, help="Chunk size for loading")
+    parser.add_argument("--min-volume", type=float, default=1.0, help="Minimum volume filter")
     parser.add_argument("--timeframe", type=int, default=1, help="Timeframe in minutes")
     parser.add_argument("--output", default="reports/lightglow_trend_optimized_backtest.json", help="Output file")
     args = parser.parse_args()
