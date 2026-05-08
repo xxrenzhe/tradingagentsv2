@@ -22,15 +22,18 @@ import sys
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 import pandas as pd
-from ib_insync import IB, Future, util
+from ib_insync import IB, Future, MarketOrder
 
 from tradingagents.config.env import load_project_env
+
+NY_TZ = ZoneInfo("America/New_York")
 
 
 class LightglowRealtimeTrader:
@@ -70,30 +73,57 @@ class LightglowRealtimeTrader:
         # IBKR connection
         self.ib = IB()
         self.contract = None
+        self.host = "127.0.0.1"
+        self.port = 7497
+        self.client_id = 1
 
     def connect(self, host: str = "127.0.0.1", port: int = 7497, client_id: int = 1):
         """Connect to IBKR TWS/Gateway."""
+        self.host = host
+        self.port = port
+        self.client_id = client_id
+        if self.ib.isConnected():
+            return
         self.ib.connect(host, port, clientId=client_id)
         print(f"✅ Connected to IBKR at {host}:{port}")
 
-        # Request delayed/frozen market data (available for paper accounts)
+        # Request delayed market data (available for paper accounts)
         # Type 3 = Delayed (15-20 min delay)
         # Type 4 = Delayed frozen
-        self.ib.reqMarketDataType(4)  # Use frozen delayed data
-        print(f"✅ Requested delayed frozen market data (available for paper accounts)")
+        self.ib.reqMarketDataType(3)
+        print(f"✅ Requested delayed market data (available for paper accounts)")
 
         # Create contract
         self.contract = Future(self.symbol, self.contract_month, "CME")
         self.ib.qualifyContracts(self.contract)
         print(f"✅ Contract qualified: {self.contract}")
 
+    def ensure_connected(self) -> None:
+        """Reconnect to IBKR after transient TWS/Gateway disconnects."""
+        if self.ib.isConnected():
+            return
+        print("⚠️ IBKR disconnected; reconnecting...")
+        try:
+            self.ib.disconnect()
+        except Exception:
+            pass
+        self.connect(self.host, self.port, self.client_id)
+
+    def to_ny_time(self, dt: datetime) -> datetime:
+        """Convert IBKR bar timestamps to New York time for Kill Zone checks."""
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=NY_TZ)
+        return dt.astimezone(NY_TZ)
+
     def is_kill_zone(self, dt: datetime) -> bool:
         """Check if current time is in NY Kill Zone.
 
-        Note: dt is already in EST/EDT timezone from IBKR.
+        IBKR futures bars may be returned in exchange/local time, so normalize
+        to America/New_York before applying the strategy time filter.
         """
-        hour = dt.hour
-        minute = dt.minute
+        ny_dt = self.to_ny_time(dt)
+        hour = ny_dt.hour
+        minute = ny_dt.minute
 
         # NY AM: 8:30-11:30 EST
         ny_am = (hour == 8 and minute >= 30) or (9 <= hour < 11) or (hour == 11 and minute <= 30)
@@ -227,7 +257,7 @@ class LightglowRealtimeTrader:
             # Submit order to IBKR
             order = self.ib.placeOrder(
                 self.contract,
-                util.MarketOrder(action, abs(direction)),
+                MarketOrder(action, abs(direction)),
             )
             print(f"✅ Order submitted: {order}")
 
@@ -237,7 +267,7 @@ class LightglowRealtimeTrader:
             return
 
         pnl_points = (price - self.entry_price) * self.position
-        pnl_dollars = pnl_points * 20  # MNQ multiplier
+        pnl_dollars = pnl_points * 2  # MNQ multiplier
 
         print(f"\n{'='*60}")
         print(f"⚪ EXITING POSITION")
@@ -253,7 +283,7 @@ class LightglowRealtimeTrader:
             action = "SELL" if self.position > 0 else "BUY"
             order = self.ib.placeOrder(
                 self.contract,
-                util.MarketOrder(action, abs(self.position)),
+                MarketOrder(action, abs(self.position)),
             )
             print(f"✅ Exit order submitted: {order}")
 
@@ -326,6 +356,7 @@ class LightglowRealtimeTrader:
         while True:
             try:
                 poll_count += 1
+                self.ensure_connected()
                 print(f"📡 Poll #{poll_count}: Requesting latest bars...")
 
                 # Request latest bars (last 1 hour to ensure we get data)
