@@ -1,0 +1,330 @@
+{
+  "strategy_name": "Bearish CHoCH (5-Minute Kill Zone)",
+  "total_signals": 1362,
+  "total_return": -407.3812320189513,
+  "profit_factor": 4.9215773592199294,
+  "win_rate": 47.28340675477239,
+  "avg_return": 1.183918102046265,
+  "avg_win": 3.142363564382329,
+  "avg_loss": -0.572682006232879,
+  "max_drawdown": -113.6813234016485,
+  "sharpe_ratio": 0.45805036389823545,
+  "start_date": "2022-01-05",
+  "end_date": "2026-04-23",
+  "initial_capital": 10000,
+  "final_equity": -30738.123201895134,
+  "monthly_returns": [
+    {
+      "year_month": "2022-01",
+      "Total Return (%)": 127.75658340637486,
+      "Trades": 38,
+      "Avg Return (%)": 3.362015352799338
+    },
+    {
+      "year_month": "2022-02",
+      "Total Return (%)": 1551.34729088922,
+      "Trades": 22,
+      "Avg Return (%)": 70.51578594951
+    },
+    {
+      "year_month": "2022-03",
+      "Total Return (%)": 8.927370172624517,
+      "Trades": 34,
+      "Avg Return (%)": 0.2625697109595446
+    },
+    {
+      "year_month": "2022-04",
+      "Total Return (%)": -1.3673214664288615,
+      "Trades": 34,
+      "Avg Return (%)": -0.04021533724790769
+    },
+    {
+      "year_month": "2022-05",
+      "Total Return (%)": -12.646670295699918,
+      "Trades": 23,
+      "Avg Return (%)": -0.5498552302478226
+    },
+    {
+      "year_month": "2022-06",
+      "Total Return (%)": -19.87600166935387,
+      "Trades": 41,
+      "Avg Return (%)": -0.4847805285208261
+    },
+    {
+      "year_month": "2022-07",
+      "Total Return (%)": -8.330163496866753,
+      "Trades": 20,
+      "Avg Return (%)": -0.41650817484333763
+    },
+    {
+      "year_month": "2022-08",
+      "Total Return (%)": -4.71052782924515,
+      "Trades": 32,
+      "Avg Return (%)": -0.14720399466391093
+    },
+    {
+      "year_month": "2022-09",
+      "Total Return (%)": -0.16495316887776362,
+      "Trades": 40,
+      "Avg Return (%)": -0.004123829221944091
+    },
+    {
+      "year_month": "2022-10",
+      "Total Return (%)": -1.3933173648867072,
+      "Trades": 32,
+      "Avg Return (%)": -0.0435411676527096
+    },
+    {
+      "year_month": "2022-11",
+      "Total Return (%)": 0.7718951330928335,
+      "Trades": 31,
+      "Avg Return (%)": 0.02489984300299463
+    },
+    {
+      "year_month": "2022-12",
+      "Total Return (%)": -0.12693623373035623,
+      "Trades": 29,
+      "Avg Return (%)": -0.004377111507943318
+    },
+    {
+      "year_month": "2023-01",
+      "Total Return (%)": 1.2184393375781233,
+      "Trades": 12,
+      "Avg Return (%)": 0.1015366114648436
+    },
+    {
+      "year_month": "2023-02",
+      "Total Return (%)": -1.2671420948034229,
+      "Trades": 28,
+      "Avg Return (%)": -0.04525507481440796
+    },
+    {
+      "year_month": "2023-03",
+      "Total Return (%)": -0.9336340603403481,
+      "Trades": 28,
+      "Avg Return (%)": -0.033344073583583864
+    },
+    {
+      "year_month": "2023-04",
+      "Total Return (%)": 0.3072258286968431,
+      "Trades": 15,
+      "Avg Return (%)": 0.020481721913122874
+    },
+    {
+      "year_month": "2023-05",
+      "Total Return (%)": -0.3990563465105369,
+      "Trades": 23,
+      "Avg Return (%)": -0.017350275935240734
+    },
+    {
+      "year_month": "2023-06",
+      "Total Return (%)": 1.8635119465924093,
+      "Trades": 32,
+      "Avg Return (%)": 0.05823474833101279
+    },
+    {
+      "year_month": "2023-07",
+      "Total Return (%)": -0.7439169663514644,
+      "Trades": 26,
+      "Avg Return (%)": -0.028612191013517863
+    },
+    {
+      "year_month": "2023-08",
+      "Total Return (%)": -2.4642684348644033,
+      "Trades": 27,
+      "Avg Return (%)": -0.0912692012912742
+    },
+    {
+      "year_month": "2023-09",
+      "Total Return (%)": 2.2185723399888184,
+      "Trades": 24,
+      "Avg Return (%)": 0.09244051416620076
+    },
+    {
+      "year_month": "2023-10",
+      "Total Return (%)": -0.8368680379722545,
+      "Trades": 35,
+      "Avg Return (%)": -0.02391051537063584
+    },
+    {
+      "year_month": "2023-11",
+      "Total Return (%)": -0.9065568421900222,
+      "Trades": 17,
+      "Avg Return (%)": -0.05332687307000131
+    },
+    {
+      "year_month": "2023-12",
+      "Total Return (%)": -5.684531709441026,
+      "Trades": 15,
+      "Avg Return (%)": -0.3789687806294017
+    },
+    {
+      "year_month": "2024-01",
+      "Total Return (%)": -0.14611134929944203,
+      "Trades": 33,
+      "Avg Return (%)": -0.004427616645437637
+    },
+    {
+      "year_month": "2024-02",
+      "Total Return (%)": -0.06605184451169172,
+      "Trades": 20,
+      "Avg Return (%)": -0.0033025922255845858
+    },
+    {
+      "year_month": "2024-03",
+      "Total Return (%)": -3.0208443838047,
+      "Trades": 22,
+      "Avg Return (%)": -0.1373111083547591
+    },
+    {
+      "year_month": "2024-04",
+      "Total Return (%)": 1.6414624008752345,
+      "Trades": 26,
+      "Avg Return (%)": 0.0631331692644321
+    },
+    {
+      "year_month": "2024-05",
+      "Total Return (%)": -0.6713433011415009,
+      "Trades": 21,
+      "Avg Return (%)": -0.03196872862578576
+    },
+    {
+      "year_month": "2024-06",
+      "Total Return (%)": -1.7701584781228494,
+      "Trades": 23,
+      "Avg Return (%)": -0.0769634120922978
+    },
+    {
+      "year_month": "2024-07",
+      "Total Return (%)": -0.6425766916731098,
+      "Trades": 25,
+      "Avg Return (%)": -0.025703067666924394
+    },
+    {
+      "year_month": "2024-08",
+      "Total Return (%)": -1.5463141532049822,
+      "Trades": 25,
+      "Avg Return (%)": -0.06185256612819929
+    },
+    {
+      "year_month": "2024-09",
+      "Total Return (%)": -0.23517420578035103,
+      "Trades": 24,
+      "Avg Return (%)": -0.00979892524084796
+    },
+    {
+      "year_month": "2024-10",
+      "Total Return (%)": 0.2213095986143148,
+      "Trades": 20,
+      "Avg Return (%)": 0.01106547993071574
+    },
+    {
+      "year_month": "2024-11",
+      "Total Return (%)": 0.33497069549396724,
+      "Trades": 13,
+      "Avg Return (%)": 0.02576697657645902
+    },
+    {
+      "year_month": "2024-12",
+      "Total Return (%)": 0.7543244534659681,
+      "Trades": 20,
+      "Avg Return (%)": 0.037716222673298404
+    },
+    {
+      "year_month": "2025-01",
+      "Total Return (%)": -0.9636958913891119,
+      "Trades": 28,
+      "Avg Return (%)": -0.034417710406753996
+    },
+    {
+      "year_month": "2025-02",
+      "Total Return (%)": -5.246341904167795,
+      "Trades": 25,
+      "Avg Return (%)": -0.2098536761667118
+    },
+    {
+      "year_month": "2025-03",
+      "Total Return (%)": 1.4992348553452035,
+      "Trades": 38,
+      "Avg Return (%)": 0.03945354882487378
+    },
+    {
+      "year_month": "2025-04",
+      "Total Return (%)": 3.438985245840974,
+      "Trades": 22,
+      "Avg Return (%)": 0.15631751117458972
+    },
+    {
+      "year_month": "2025-05",
+      "Total Return (%)": -2.4350781005955726,
+      "Trades": 26,
+      "Avg Return (%)": -0.09365685002290663
+    },
+    {
+      "year_month": "2025-06",
+      "Total Return (%)": -1.6955073295366576,
+      "Trades": 22,
+      "Avg Return (%)": -0.07706851497893898
+    },
+    {
+      "year_month": "2025-07",
+      "Total Return (%)": -0.6175313649690133,
+      "Trades": 22,
+      "Avg Return (%)": -0.02806960749859151
+    },
+    {
+      "year_month": "2025-08",
+      "Total Return (%)": -1.3920016129577755,
+      "Trades": 24,
+      "Avg Return (%)": -0.058000067206573976
+    },
+    {
+      "year_month": "2025-09",
+      "Total Return (%)": -0.8235120387060967,
+      "Trades": 22,
+      "Avg Return (%)": -0.037432365395731665
+    },
+    {
+      "year_month": "2025-10",
+      "Total Return (%)": -0.5075546744405282,
+      "Trades": 29,
+      "Avg Return (%)": -0.017501885325535455
+    },
+    {
+      "year_month": "2025-11",
+      "Total Return (%)": -1.8084138148437412,
+      "Trades": 34,
+      "Avg Return (%)": -0.05318864161305121
+    },
+    {
+      "year_month": "2025-12",
+      "Total Return (%)": -1.401348012545141,
+      "Trades": 24,
+      "Avg Return (%)": -0.05838950052271421
+    },
+    {
+      "year_month": "2026-01",
+      "Total Return (%)": -0.20111832643916983,
+      "Trades": 28,
+      "Avg Return (%)": -0.007182797372827494
+    },
+    {
+      "year_month": "2026-02",
+      "Total Return (%)": -1.010839516923069,
+      "Trades": 26,
+      "Avg Return (%)": -0.038878442958579576
+    },
+    {
+      "year_month": "2026-03",
+      "Total Return (%)": -0.6492716789705502,
+      "Trades": 43,
+      "Avg Return (%)": -0.015099341371408143
+    },
+    {
+      "year_month": "2026-04",
+      "Total Return (%)": -1.1020666252054583,
+      "Trades": 19,
+      "Avg Return (%)": -0.058003506589760966
+    }
+  ]
+}
