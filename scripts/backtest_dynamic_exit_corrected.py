@@ -201,6 +201,7 @@ def main():
         end_date="2026-04-28",
         min_volume=0,
         cache=".cache/nq_bars.pkl",
+        chunk_size=100000,
     )
 
     # Load data using original method
