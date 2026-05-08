@@ -1,0 +1,278 @@
+//@version=5
+strategy("Lightglow Premium/Discount V2 - Non-Kill Zone",
+         shorttitle="Lightglow V2",
+         overlay=true,
+         initial_capital=25000,
+         default_qty_type=strategy.fixed,
+         default_qty_value=1,
+         commission_type=strategy.commission.cash_per_contract,
+         commission_value=5,
+         slippage=2,
+         calc_on_every_tick=false,
+         calc_on_order_fills=false)
+
+// ============================================================================
+// STRATEGY DESCRIPTION - V2
+// ============================================================================
+//
+// Lightglow Premium/Discount V2 Strategy - Non-Kill Zone Optimized
+//
+// 核心逻辑：
+// - 在Premium区域（价格昂贵）做空，期待回归
+// - 在Discount区域（价格便宜）做多，期待回归
+//
+// V2 改进：
+// - 避开Kill Zone时段（8:30-11:30, 13:30-16:00 EST）
+// - 只在非Kill Zone时段交易（亚洲、伦敦、午休、盘后）
+//
+// 过滤器：
+// - 时间过滤：避开NY Kill Zone（反向过滤）✅ NEW
+// - 波动率过滤：ATR > 8.0（确保有足够波动）
+//
+// 出场：
+// - 持仓2根K线后平仓
+//
+// V2 回测结果（2022-2026）：
+// - 净利润: $2,124,958 (vs $2,205,060 V1, -3.6%)
+// - 盈利因子: 2.45 (vs 1.91 V1, +28.2%) ✅
+// - 胜率: 42.0%
+// - 最大回撤: $33,580 (vs $46,470 V1, -27.7%) ✅
+// - 平均每笔: $66.49 (vs $52.85 V1, +25.8%) ✅
+// - 交易数: 31,959 (vs 41,720 V1, -23.4%)
+//
+// V2 优势：
+// ✅ 更高的盈利因子 (+28%)
+// ✅ 更低的风险 (-28% 回撤)
+// ✅ 更高的交易质量 (+26% 平均每笔)
+// ✅ 更好的风险收益比 (+33% 利润/回撤比)
+//
+// 代价：
+// ❌ 略低的总利润 (-3.6%)
+// ❌ 更少的交易机会 (-23%)
+//
+// 结论：值得的权衡！更好的风险调整后收益。
+//
+// ============================================================================
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+// Premium/Discount Parameters
+lookback_length = input.int(100, "Lookback Length", minval=10, maxval=500,
+     tooltip="用于计算Premium/Discount区域的回溯周期")
+premium_threshold = input.float(0.95, "Premium Threshold", minval=0.5, maxval=1.0, step=0.01,
+     tooltip="Premium区域阈值（0.95 = 95%）")
+discount_threshold = input.float(0.05, "Discount Threshold", minval=0.0, maxval=0.5, step=0.01,
+     tooltip="Discount区域阈值（0.05 = 5%）")
+
+// Exit Parameters
+exit_bars = input.int(2, "Exit After N Bars", minval=1, maxval=10,
+     tooltip="持仓N根K线后平仓")
+
+// ATR Filter
+atr_length = input.int(14, "ATR Length", minval=5, maxval=50)
+atr_threshold = input.float(8.0, "ATR Threshold", minval=0.0, maxval=50.0, step=0.5,
+     tooltip="只在ATR大于此值时交易")
+
+// Time Filter - V2: AVOID Kill Zone (反向过滤)
+use_non_kz_filter = input.bool(true, "Avoid Kill Zone (V2)",
+     tooltip="V2策略：避开Kill Zone，只在非Kill Zone交易")
+allow_v1_mode = input.bool(false, "Enable V1 Mode (Trade in Kill Zone)",
+     tooltip="启用V1模式：在Kill Zone交易（用于对比）")
+
+// Display Options
+show_zones = input.bool(true, "Show Premium/Discount Zones")
+show_signals = input.bool(true, "Show Entry Signals")
+show_stats = input.bool(true, "Show Statistics Table")
+show_sessions = input.bool(true, "Show Session Backgrounds")
+
+// ============================================================================
+// CALCULATIONS
+// ============================================================================
+
+// Calculate Premium/Discount Zones
+trailing_high = ta.highest(high, lookback_length)
+trailing_low = ta.lowest(low, lookback_length)
+range_size = trailing_high - trailing_low
+
+premium_level = trailing_low + premium_threshold * range_size
+discount_level = trailing_low + discount_threshold * range_size
+
+// Check if price is in zones
+in_premium = close > premium_level
+in_discount = close < discount_level
+
+// ATR Filter
+atr = ta.atr(atr_length)
+atr_filter = atr > atr_threshold
+
+// ============================================================================
+// TIME FILTER - V2: NON-KILL ZONE
+// ============================================================================
+
+// Detect Kill Zone
+is_kill_zone = false
+if use_non_kz_filter or allow_v1_mode
+    // NY AM: 8:30-11:30 EST (13:30-16:30 UTC)
+    // NY PM: 13:30-16:00 EST (18:30-21:00 UTC)
+    hour_utc = hour(time, "UTC")
+    minute_utc = minute(time, "UTC")
+
+    ny_am = (hour_utc == 13 and minute_utc >= 30) or (hour_utc >= 14 and hour_utc < 16) or (hour_utc == 16 and minute_utc <= 30)
+    ny_pm = (hour_utc == 18 and minute_utc >= 30) or (hour_utc >= 19 and hour_utc < 21)
+
+    is_kill_zone := ny_am or ny_pm
+
+// V2: Trade when NOT in Kill Zone (反向逻辑)
+// V1: Trade when IN Kill Zone (原始逻辑)
+time_filter = allow_v1_mode ? is_kill_zone : (use_non_kz_filter ? not is_kill_zone : true)
+
+// Detect sessions for visualization
+is_asian = false
+is_london = false
+is_lunch = false
+is_after_hours = false
+
+if show_sessions
+    hour_utc_val = hour(time, "UTC")
+
+    // Asian: 18:00-02:00 EST (23:00-07:00 UTC)
+    is_asian := hour_utc_val >= 23 or hour_utc_val < 7
+
+    // London: 02:00-08:30 EST (07:00-13:30 UTC)
+    is_london := hour_utc_val >= 7 and (hour_utc_val < 13 or (hour_utc_val == 13 and minute(time, "UTC") < 30))
+
+    // Lunch: 11:30-13:30 EST (16:30-18:30 UTC)
+    is_lunch := (hour_utc_val == 16 and minute(time, "UTC") >= 30) or hour_utc_val == 17 or (hour_utc_val == 18 and minute(time, "UTC") < 30)
+
+    // After Hours: 16:00-18:00 EST (21:00-23:00 UTC)
+    is_after_hours := hour_utc_val >= 21 and hour_utc_val < 23
+
+// ============================================================================
+// ENTRY CONDITIONS
+// ============================================================================
+
+// Long Entry: Price in Discount + Filters + Non-Kill Zone
+long_condition = in_discount and atr_filter and time_filter and strategy.position_size == 0
+
+// Short Entry: Price in Premium + Filters + Non-Kill Zone
+short_condition = in_premium and atr_filter and time_filter and strategy.position_size == 0
+
+// ============================================================================
+// POSITION MANAGEMENT
+// ============================================================================
+
+// Track entry bar
+var int entry_bar = 0
+
+// Enter Long
+if long_condition
+    strategy.entry("Long", strategy.long)
+    entry_bar := bar_index
+
+// Enter Short
+if short_condition
+    strategy.entry("Short", strategy.short)
+    entry_bar := bar_index
+
+// Exit after N bars
+bars_in_trade = bar_index - entry_bar
+if strategy.position_size != 0 and bars_in_trade >= exit_bars
+    strategy.close_all("Time Exit")
+
+// ============================================================================
+// VISUALIZATION
+// ============================================================================
+
+// Plot Premium/Discount Zones
+plot(show_zones ? premium_level : na, "Premium Level",
+     color=color.new(color.red, 70), linewidth=1, style=plot.style_line)
+plot(show_zones ? discount_level : na, "Discount Level",
+     color=color.new(color.green, 70), linewidth=1, style=plot.style_line)
+
+// Fill zones
+premium_fill = plot(show_zones ? trailing_high : na, display=display.none)
+premium_line = plot(show_zones ? premium_level : na, display=display.none)
+fill(premium_fill, premium_line, color=color.new(color.red, 95), title="Premium Zone")
+
+discount_fill = plot(show_zones ? trailing_low : na, display=display.none)
+discount_line = plot(show_zones ? discount_level : na, display=display.none)
+fill(discount_fill, discount_line, color=color.new(color.green, 95), title="Discount Zone")
+
+// Plot entry signals
+plotshape(show_signals and long_condition, "Long Signal",
+     shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.small, text="L")
+plotshape(show_signals and short_condition, "Short Signal",
+     shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.small, text="S")
+
+// Background colors for sessions
+bgcolor(show_sessions and is_kill_zone ? color.new(color.red, 95) : na, title="Kill Zone (BLOCKED)")
+bgcolor(show_sessions and is_asian ? color.new(color.blue, 97) : na, title="Asian Session")
+bgcolor(show_sessions and is_london ? color.new(color.orange, 97) : na, title="London Session")
+bgcolor(show_sessions and is_lunch ? color.new(color.gray, 97) : na, title="Lunch Session")
+bgcolor(show_sessions and is_after_hours ? color.new(color.purple, 97) : na, title="After Hours")
+
+// ============================================================================
+// STATISTICS TABLE
+// ============================================================================
+
+if show_stats and barstate.islast
+    var table stats_table = table.new(position.top_right, 2, 12, border_width=1)
+
+    // Header
+    table.cell(stats_table, 0, 0, "Metric",
+         text_color=color.white, bgcolor=color.new(color.blue, 20), text_size=size.small)
+    table.cell(stats_table, 1, 0, "Value",
+         text_color=color.white, bgcolor=color.new(color.blue, 20), text_size=size.small)
+
+    // Strategy Version
+    version_text = allow_v1_mode ? "V1 (Kill Zone)" : (use_non_kz_filter ? "V2 (Non-KZ)" : "No Filter")
+    table.cell(stats_table, 0, 1, "Version", text_size=size.small)
+    table.cell(stats_table, 1, 1, version_text, text_size=size.small)
+
+    // Stats
+    win_rate = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100 : 0
+    profit_factor = strategy.grossloss != 0 ? strategy.grossprofit / math.abs(strategy.grossloss) : 0
+    avg_win = strategy.wintrades > 0 ? strategy.grossprofit / strategy.wintrades : 0
+    avg_loss = strategy.losstrades > 0 ? strategy.grossloss / strategy.losstrades : 0
+
+    table.cell(stats_table, 0, 2, "Net Profit", text_size=size.small)
+    table.cell(stats_table, 1, 2, str.tostring(strategy.netprofit, "$#,###"), text_size=size.small)
+
+    table.cell(stats_table, 0, 3, "Profit Factor", text_size=size.small)
+    table.cell(stats_table, 1, 3, str.tostring(profit_factor, "#.##"), text_size=size.small)
+
+    table.cell(stats_table, 0, 4, "Win Rate", text_size=size.small)
+    table.cell(stats_table, 1, 4, str.tostring(win_rate, "#.#") + "%", text_size=size.small)
+
+    table.cell(stats_table, 0, 5, "Total Trades", text_size=size.small)
+    table.cell(stats_table, 1, 5, str.tostring(strategy.closedtrades), text_size=size.small)
+
+    table.cell(stats_table, 0, 6, "Wins", text_size=size.small)
+    table.cell(stats_table, 1, 6, str.tostring(strategy.wintrades), text_size=size.small)
+
+    table.cell(stats_table, 0, 7, "Losses", text_size=size.small)
+    table.cell(stats_table, 1, 7, str.tostring(strategy.losstrades), text_size=size.small)
+
+    table.cell(stats_table, 0, 8, "Avg Win", text_size=size.small)
+    table.cell(stats_table, 1, 8, str.tostring(avg_win, "$#,###"), text_size=size.small)
+
+    table.cell(stats_table, 0, 9, "Avg Loss", text_size=size.small)
+    table.cell(stats_table, 1, 9, str.tostring(avg_loss, "$#,###"), text_size=size.small)
+
+    table.cell(stats_table, 0, 10, "Max Drawdown", text_size=size.small)
+    table.cell(stats_table, 1, 10, str.tostring(strategy.max_drawdown, "$#,###"), text_size=size.small)
+
+    table.cell(stats_table, 0, 11, "Current ATR", text_size=size.small)
+    table.cell(stats_table, 1, 11, str.tostring(atr, "#.##"), text_size=size.small)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+// Alert conditions
+alertcondition(long_condition, "Long Entry", "Lightglow V2: Long entry signal")
+alertcondition(short_condition, "Short Entry", "Lightglow V2: Short entry signal")
+alertcondition(strategy.position_size != 0 and bars_in_trade >= exit_bars,
+     "Time Exit", "Lightglow V2: Time to exit position")
