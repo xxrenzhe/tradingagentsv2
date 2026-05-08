@@ -14,6 +14,9 @@ import pandas as pd
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+SCRIPTS_DIR = ROOT_DIR / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
 
 from search_nq_bar_2r_walkforward import load_continuous_nq_bars
 from tradingagents.backtesting.short_patterns import BacktestCosts
