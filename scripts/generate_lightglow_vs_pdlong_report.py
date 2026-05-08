@@ -31,10 +31,10 @@ class LightglowConfig:
     use_non_kz_filter: bool = True
     allow_v1_mode: bool = False
     initial_capital: float = 25_000.0
-    point_value: float = 20.0
+    point_value: float = 2.0
     tick_size: float = 0.25
     slippage_ticks: float = 2.0
-    commission_cash_per_contract_per_order: float = 5.0
+    commission_cash_per_contract_per_order: float = 0.50
 
     @property
     def round_trip_cost_dollars(self) -> float:
@@ -47,10 +47,10 @@ class PDLongConfig:
     discount_threshold: float = 0.05
     exit_bars: int = 1
     initial_capital: float = 25_000.0
-    point_value: float = 20.0
+    point_value: float = 2.0
     tick_size: float = 0.25
     slippage_ticks: float = 2.0
-    commission_cash_per_contract_per_order: float = 5.0
+    commission_cash_per_contract_per_order: float = 0.50
 
     @property
     def round_trip_cost_dollars(self) -> float:
@@ -577,6 +577,9 @@ code { background: #eef2f7; padding: 2px 5px; border-radius: 5px; }
     summary_json = esc(
         json.dumps(
             {
+                "trading_symbol": "MNQ",
+                "price_data_symbol": "NQ.FUT",
+                "price_data_note": "NQ continuous 1-minute prices are used as a proxy because local Databento OHLCV files do not include MNQ.FUT.",
                 "lightglow": summary_lg,
                 "premium_discount_long": summary_pd,
                 "lightglow_config": lightglow.__dict__,
@@ -591,15 +594,15 @@ code { background: #eef2f7; padding: 2px 5px; border-radius: 5px; }
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Lightglow V2 vs P/D Long 1m Backtest Comparison</title>
+  <title>MNQ Lightglow V2 vs P/D Long 1m Backtest Comparison</title>
   <style>{css}</style>
 </head>
 <body>
 <main>
-  <span class="badge">Databento NQ 1m · 2010-2026</span>
-  <h1>Lightglow V2 与 Premium/Discount Long 1m 独立回测对比</h1>
-  <p>数据源：<code>{esc(args.data)}</code>。连续合约构造：每个 UTC 分钟选择 NQ 合约中成交量最高的一条 OHLCV。实际覆盖：{bars["ts"].min():%Y-%m-%d %H:%M UTC} 到 {bars["ts"].max():%Y-%m-%d %H:%M UTC}，共 {len(bars):,} 根 1 分钟 K 线。</p>
-  <p class="warn">按用户要求，本报告对两个策略使用完全一致的交易成本与合约单位：固定 1 张 NQ、$20/point、2 ticks/side 滑点、$5/order 手续费，即每笔往返 1.5 点 / $30。P/D Long 原 Pine 的 100% equity 仓位在这里改为固定 1 张 NQ，以保证交易成本一致。</p>
+  <span class="badge">MNQ Backtest · NQ Price Proxy · 2010-2026</span>
+  <h1>MNQ 口径：Lightglow V2 与 Premium/Discount Long 1m 独立回测对比</h1>
+  <p>数据源：<code>{esc(args.data)}</code>。本地 2010-2026 OHLCV 元数据为 <code>NQ.FUT</code>，没有 <code>MNQ.FUT</code> 原始 1 分钟K线；本报告使用 NQ 连续 1m 价格路径作为 MNQ 价格代理，并按 MNQ 合约乘数和成本计算盈亏。连续价格构造：每个 UTC 分钟选择 NQ 合约中成交量最高的一条 OHLCV。实际覆盖：{bars["ts"].min():%Y-%m-%d %H:%M UTC} 到 {bars["ts"].max():%Y-%m-%d %H:%M UTC}，共 {len(bars):,} 根 1 分钟 K 线。</p>
+  <p class="warn">按用户要求，本报告对两个策略使用完全一致的 MNQ 交易成本与合约单位：固定 1 张 MNQ、$2/point、2 ticks/side 滑点、$0.50/order 手续费，即每笔往返 1.5 点 / $3。P/D Long 原 Pine 的 100% equity 仓位在这里改为固定 1 张 MNQ，以保证交易成本一致。</p>
 
   <section>
     <h2>策略原理</h2>
@@ -621,7 +624,7 @@ code { background: #eef2f7; padding: 2px 5px; border-radius: 5px; }
           <li>只做多：价格进入 Discount 即买入，预期 1 分钟均值回归。</li>
           <li>没有 ATR、时段、趋势过滤，交易频率更高。</li>
           <li>持仓 1 根 1 分钟 K 线后时间退出。</li>
-          <li>原 Pine 使用 100% equity 仓位；本报告为公平成本对比，改用固定 1 张 NQ。</li>
+          <li>原 Pine 使用 100% equity 仓位；本报告为公平成本对比，改用固定 1 张 MNQ。</li>
         </ul>
       </div>
     </div>
@@ -629,7 +632,7 @@ code { background: #eef2f7; padding: 2px 5px; border-radius: 5px; }
 
   <section>
     <h2>核心指标</h2>
-    <p class="warn">解读限制：这是固定 1 张 NQ 的信号对比回测，未模拟保证金占用、账户权益低于 0 后的强平、每日止损或停机规则。因此当资金曲线跌破 0 后，后续统计只表示信号在历史样本上的持续盈亏，不代表真实账户可继续交易。</p>
+    <p class="warn">解读限制：这是固定 1 张 MNQ 的信号对比回测，未模拟保证金占用、账户权益低于 0 后的强平、每日止损或停机规则。因此当资金曲线跌破 0 后，后续统计只表示信号在历史样本上的持续盈亏，不代表真实账户可继续交易。</p>
     <div class="metrics">
       {metric_card("Lightglow Final Equity", fmt_money(summary_lg["final_equity"]), f'Return {fmt_pct(summary_lg["total_return"])}')}
       {metric_card("Lightglow PF / Win", f'{summary_lg["profit_factor"]:.2f}', fmt_pct(summary_lg["win_rate"]))}
@@ -667,7 +670,7 @@ code { background: #eef2f7; padding: 2px 5px; border-radius: 5px; }
         <ul>
           <li>多空均可交易，理论上更适合双向震荡市场。</li>
           <li>ATR 与非 Kill Zone 过滤减少部分低质量时段交易。</li>
-          <li>固定合约模型更接近 NQ/MNQ 实际下单语义。</li>
+          <li>固定合约模型更接近 MNQ 实际下单语义。</li>
         </ul>
         <h3>Lightglow V2 风险</h3>
         <ul>
@@ -709,7 +712,7 @@ code { background: #eef2f7; padding: 2px 5px; border-radius: 5px; }
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate independent comparison report for Lightglow V2 and P/D Long 1m Pine strategies.")
+    parser = argparse.ArgumentParser(description="Generate independent MNQ-cost comparison report for Lightglow V2 and P/D Long 1m Pine strategies.")
     parser.add_argument("--data", default="data/raw/databento/glbx-mdp3-20100606-20260427.ohlcv-1m.csv")
     parser.add_argument("--start-date", default="2010-01-01")
     parser.add_argument("--end-date", default="2027-01-01")
@@ -717,11 +720,11 @@ def main() -> None:
     parser.add_argument("--chunk-size", type=int, default=1_000_000)
     parser.add_argument("--cache", default=".tmp/lightglow-pd-combined-1m-bars.pkl")
     parser.add_argument("--refresh-cache", action="store_true")
-    parser.add_argument("--report", default="reports/lightglow_vs_pdlong_1min_comparison.html")
-    parser.add_argument("--summary-output", default="reports/lightglow_vs_pdlong_1min_summary.json")
-    parser.add_argument("--yearly-output", default="reports/lightglow_vs_pdlong_1min_yearly.csv")
-    parser.add_argument("--monthly-output", default="reports/lightglow_vs_pdlong_1min_monthly.csv")
-    parser.add_argument("--trades-output", default="reports/lightglow_vs_pdlong_1min_trades.csv")
+    parser.add_argument("--report", default="reports/mnq_lightglow_vs_pdlong_1min_comparison.html")
+    parser.add_argument("--summary-output", default="reports/mnq_lightglow_vs_pdlong_1min_summary.json")
+    parser.add_argument("--yearly-output", default="reports/mnq_lightglow_vs_pdlong_1min_yearly.csv")
+    parser.add_argument("--monthly-output", default="reports/mnq_lightglow_vs_pdlong_1min_monthly.csv")
+    parser.add_argument("--trades-output", default="reports/mnq_lightglow_vs_pdlong_1min_trades.csv")
     args = parser.parse_args()
 
     lightglow = LightglowConfig()
@@ -743,6 +746,9 @@ def main() -> None:
     monthly_pd.insert(0, "strategy", "Premium/Discount Long 1m")
 
     summary = {
+        "trading_symbol": "MNQ",
+        "price_data_symbol": "NQ.FUT",
+        "price_data_note": "Local data/raw/databento 2010-2026 OHLCV metadata contains NQ.FUT only. This report uses NQ continuous 1-minute prices as an MNQ price proxy and applies MNQ point value/costs.",
         "data": args.data,
         "period_start": str(bars["ts"].min()),
         "period_end": str(bars["ts"].max()),
