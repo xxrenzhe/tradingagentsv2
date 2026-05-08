@@ -1,0 +1,197 @@
+//@version=5
+strategy("Lightglow V2 + Premium/Discount Long - Combined 1m",
+     shorttitle="LG+PD 1m",
+     overlay=true,
+     initial_capital=25000,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1,
+     commission_type=strategy.commission.cash_per_contract,
+     commission_value=5,
+     slippage=2,
+     calc_on_every_tick=false,
+     calc_on_order_fills=false,
+     pyramiding=0)
+
+// ============================================================================
+// Combined signal sources
+// ============================================================================
+//
+// 1. Premium/Discount Long 1m
+//    Long only when price closes in the lowest 5% of the last 100 bars.
+//    Default time exit: 1 bar.
+//
+// 2. Lightglow Premium/Discount V2 Non-Kill Zone
+//    Long in discount, short in premium, ATR filter, avoids NY kill zones.
+//    Default time exit: 2 bars.
+//
+// When both long signals occur on the same bar, the standalone P/D Long signal
+// gets priority so each bar can create at most one strategy position.
+// ============================================================================
+
+// Premium/Discount Long 1m inputs
+enable_pd_long = input.bool(true, "Enable P/D Long 1m")
+pd_lookback = input.int(100, "P/D Long Lookback", minval=10, maxval=500)
+pd_discount_threshold = input.float(0.05, "P/D Long Discount Threshold", minval=0.0, maxval=0.5, step=0.01)
+pd_exit_bars = input.int(1, "P/D Long Exit Bars", minval=1, maxval=10)
+
+// Lightglow V2 inputs
+enable_lightglow_v2 = input.bool(true, "Enable Lightglow V2")
+lg_lookback = input.int(100, "Lightglow Lookback", minval=10, maxval=500)
+lg_premium_threshold = input.float(0.95, "Lightglow Premium Threshold", minval=0.5, maxval=1.0, step=0.01)
+lg_discount_threshold = input.float(0.05, "Lightglow Discount Threshold", minval=0.0, maxval=0.5, step=0.01)
+lg_exit_bars = input.int(2, "Lightglow Exit Bars", minval=1, maxval=10)
+lg_atr_length = input.int(14, "Lightglow ATR Length", minval=5, maxval=50)
+lg_atr_threshold = input.float(8.0, "Lightglow ATR Threshold", minval=0.0, maxval=50.0, step=0.5)
+use_non_kz_filter = input.bool(true, "Lightglow Avoid Kill Zone")
+allow_v1_mode = input.bool(false, "Lightglow V1 Mode (Trade Kill Zone)")
+
+// Display inputs
+show_zones = input.bool(true, "Show Zones")
+show_signals = input.bool(true, "Show Signals")
+show_sessions = input.bool(true, "Show Session Backgrounds")
+show_stats = input.bool(true, "Show Statistics Table")
+
+// ============================================================================
+// Shared Premium/Discount calculations
+// ============================================================================
+
+pd_high = ta.highest(high, pd_lookback)
+pd_low = ta.lowest(low, pd_lookback)
+pd_range = pd_high - pd_low
+pd_discount_level = pd_low + pd_discount_threshold * pd_range
+pd_in_discount = close <= pd_discount_level
+
+lg_high = ta.highest(high, lg_lookback)
+lg_low = ta.lowest(low, lg_lookback)
+lg_range = lg_high - lg_low
+lg_premium_level = lg_low + lg_premium_threshold * lg_range
+lg_discount_level = lg_low + lg_discount_threshold * lg_range
+lg_in_premium = close > lg_premium_level
+lg_in_discount = close < lg_discount_level
+
+lg_atr = ta.atr(lg_atr_length)
+lg_atr_filter = lg_atr > lg_atr_threshold
+
+// ============================================================================
+// Lightglow time filter
+// ============================================================================
+
+hour_utc = hour(time, "UTC")
+minute_utc = minute(time, "UTC")
+ny_am = (hour_utc == 13 and minute_utc >= 30) or (hour_utc >= 14 and hour_utc < 16) or (hour_utc == 16 and minute_utc <= 30)
+ny_pm = (hour_utc == 18 and minute_utc >= 30) or (hour_utc >= 19 and hour_utc < 21)
+is_kill_zone = ny_am or ny_pm
+lg_time_filter = allow_v1_mode ? is_kill_zone : (use_non_kz_filter ? not is_kill_zone : true)
+
+is_asian = hour_utc >= 23 or hour_utc < 7
+is_london = hour_utc >= 7 and (hour_utc < 13 or (hour_utc == 13 and minute_utc < 30))
+is_lunch = (hour_utc == 16 and minute_utc >= 30) or hour_utc == 17 or (hour_utc == 18 and minute_utc < 30)
+is_after_hours = hour_utc >= 21 and hour_utc < 23
+
+// ============================================================================
+// Entry conditions and priority
+// ============================================================================
+
+flat = strategy.position_size == 0
+pd_long_condition = enable_pd_long and pd_in_discount and flat
+lg_long_condition = enable_lightglow_v2 and lg_in_discount and lg_atr_filter and lg_time_filter and flat
+lg_short_condition = enable_lightglow_v2 and lg_in_premium and lg_atr_filter and lg_time_filter and flat
+
+var int entry_bar = na
+var string active_source = ""
+var int active_exit_bars = 0
+
+if pd_long_condition
+    strategy.entry("PD Long", strategy.long)
+    entry_bar := bar_index
+    active_source := "PD Long"
+    active_exit_bars := pd_exit_bars
+else if lg_long_condition
+    strategy.entry("LG Long", strategy.long)
+    entry_bar := bar_index
+    active_source := "LG Long"
+    active_exit_bars := lg_exit_bars
+else if lg_short_condition
+    strategy.entry("LG Short", strategy.short)
+    entry_bar := bar_index
+    active_source := "LG Short"
+    active_exit_bars := lg_exit_bars
+
+bars_in_trade = na(entry_bar) ? 0 : bar_index - entry_bar
+if strategy.position_size != 0 and bars_in_trade >= active_exit_bars
+    strategy.close_all("Time Exit")
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    entry_bar := na
+    active_source := ""
+    active_exit_bars := 0
+
+// ============================================================================
+// Visualization
+// ============================================================================
+
+plot(show_zones ? pd_discount_level : na, "P/D Long Discount Level", color=color.new(color.green, 25), linewidth=2)
+plot(show_zones ? lg_premium_level : na, "Lightglow Premium Level", color=color.new(color.red, 65), linewidth=1)
+plot(show_zones ? lg_discount_level : na, "Lightglow Discount Level", color=color.new(color.teal, 65), linewidth=1)
+
+pd_discount_fill = plot(show_zones ? pd_low : na, display=display.none)
+pd_discount_line = plot(show_zones ? pd_discount_level : na, display=display.none)
+fill(pd_discount_fill, pd_discount_line, color=color.new(color.green, 92), title="P/D Long Discount Zone")
+
+lg_premium_fill = plot(show_zones ? lg_high : na, display=display.none)
+lg_premium_line = plot(show_zones ? lg_premium_level : na, display=display.none)
+fill(lg_premium_fill, lg_premium_line, color=color.new(color.red, 95), title="Lightglow Premium Zone")
+
+plotshape(show_signals and pd_long_condition, "P/D Long Signal", shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.tiny, text="PD")
+plotshape(show_signals and not pd_long_condition and lg_long_condition, "Lightglow Long Signal", shape.triangleup, location.belowbar, color.new(color.teal, 0), size=size.tiny, text="LG")
+plotshape(show_signals and not pd_long_condition and not lg_long_condition and lg_short_condition, "Lightglow Short Signal", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.tiny, text="LG")
+
+bgcolor(show_sessions and is_kill_zone ? color.new(color.red, 95) : na, title="Kill Zone")
+bgcolor(show_sessions and is_asian ? color.new(color.blue, 97) : na, title="Asian Session")
+bgcolor(show_sessions and is_london ? color.new(color.orange, 97) : na, title="London Session")
+bgcolor(show_sessions and is_lunch ? color.new(color.gray, 97) : na, title="Lunch Session")
+bgcolor(show_sessions and is_after_hours ? color.new(color.purple, 97) : na, title="After Hours")
+
+// ============================================================================
+// Statistics
+// ============================================================================
+
+if show_stats and barstate.islast
+    var table stats_table = table.new(position.top_right, 2, 12, border_width=1)
+    win_rate = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100 : 0
+    profit_factor = strategy.grossloss != 0 ? strategy.grossprofit / math.abs(strategy.grossloss) : 0
+    avg_trade = strategy.closedtrades > 0 ? strategy.netprofit / strategy.closedtrades : 0
+
+    table.cell(stats_table, 0, 0, "Metric", text_color=color.white, bgcolor=color.new(color.blue, 20), text_size=size.small)
+    table.cell(stats_table, 1, 0, "Value", text_color=color.white, bgcolor=color.new(color.blue, 20), text_size=size.small)
+    table.cell(stats_table, 0, 1, "Enabled", text_size=size.small)
+    table.cell(stats_table, 1, 1, (enable_pd_long ? "PD " : "") + (enable_lightglow_v2 ? "LG" : ""), text_size=size.small)
+    table.cell(stats_table, 0, 2, "Net Profit", text_size=size.small)
+    table.cell(stats_table, 1, 2, str.tostring(strategy.netprofit, "$#,###.##"), text_size=size.small)
+    table.cell(stats_table, 0, 3, "Profit Factor", text_size=size.small)
+    table.cell(stats_table, 1, 3, str.tostring(profit_factor, "#.##"), text_size=size.small)
+    table.cell(stats_table, 0, 4, "Win Rate", text_size=size.small)
+    table.cell(stats_table, 1, 4, str.tostring(win_rate, "#.#") + "%", text_size=size.small)
+    table.cell(stats_table, 0, 5, "Closed Trades", text_size=size.small)
+    table.cell(stats_table, 1, 5, str.tostring(strategy.closedtrades), text_size=size.small)
+    table.cell(stats_table, 0, 6, "Avg Trade", text_size=size.small)
+    table.cell(stats_table, 1, 6, str.tostring(avg_trade, "$#,###.##"), text_size=size.small)
+    table.cell(stats_table, 0, 7, "Max Drawdown", text_size=size.small)
+    table.cell(stats_table, 1, 7, str.tostring(strategy.max_drawdown, "$#,###.##"), text_size=size.small)
+    table.cell(stats_table, 0, 8, "Active Source", text_size=size.small)
+    table.cell(stats_table, 1, 8, active_source == "" ? "Flat" : active_source, text_size=size.small)
+    table.cell(stats_table, 0, 9, "LG ATR", text_size=size.small)
+    table.cell(stats_table, 1, 9, str.tostring(lg_atr, "#.##"), text_size=size.small)
+    table.cell(stats_table, 0, 10, "Kill Zone", text_size=size.small)
+    table.cell(stats_table, 1, 10, is_kill_zone ? "Yes" : "No", text_size=size.small)
+    table.cell(stats_table, 0, 11, "Bars In Trade", text_size=size.small)
+    table.cell(stats_table, 1, 11, str.tostring(bars_in_trade), text_size=size.small)
+
+// ============================================================================
+// Alerts
+// ============================================================================
+
+alertcondition(pd_long_condition, "P/D Long Entry", "Combined strategy: P/D Long entry")
+alertcondition(not pd_long_condition and lg_long_condition, "Lightglow Long Entry", "Combined strategy: Lightglow long entry")
+alertcondition(not pd_long_condition and not lg_long_condition and lg_short_condition, "Lightglow Short Entry", "Combined strategy: Lightglow short entry")
+alertcondition(strategy.position_size != 0 and bars_in_trade >= active_exit_bars, "Time Exit", "Combined strategy: time exit")

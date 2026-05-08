@@ -1,0 +1,37 @@
+{
+  "trades": 153850,
+  "net_points": -234170.0,
+  "net_dollars": -4683400.0,
+  "gross_points": -3395.0,
+  "gross_dollars": -67900.0,
+  "profit_factor": 0.38100169241861226,
+  "win_rate": 0.20280792980175497,
+  "avg_net_points": -1.5220669483262919,
+  "max_drawdown_points": 234168.75,
+  "max_drawdown_dollars": 4683375.0,
+  "sharpe_per_trade": -100.18662103696622,
+  "period_start": "2010-06-06 22:00:00+00:00",
+  "period_end": "2026-04-27 23:59:00+00:00",
+  "bars": 5383225,
+  "data": "data/raw/databento/glbx-mdp3-20100606-20260427.ohlcv-1m.csv",
+  "costs": {
+    "point_value": 20.0,
+    "tick_size": 0.25,
+    "slippage_ticks_per_side": 2.0,
+    "commission_per_contract": 10.0
+  },
+  "config": {
+    "pd_lookback": 100,
+    "pd_discount_threshold": 0.05,
+    "pd_exit_bars": 1,
+    "lg_lookback": 100,
+    "lg_premium_threshold": 0.95,
+    "lg_discount_threshold": 0.05,
+    "lg_exit_bars": 2,
+    "lg_atr_length": 14,
+    "lg_atr_threshold": 8.0,
+    "use_non_kz_filter": true,
+    "allow_v1_mode": false,
+    "initial_capital": 25000.0
+  }
+}
