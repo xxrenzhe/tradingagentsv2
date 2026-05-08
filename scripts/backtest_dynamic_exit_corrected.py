@@ -188,14 +188,24 @@ def build_dynamic_exit_trades(
 
 
 def main():
+    import argparse
+
     print("=" * 80)
     print("Dynamic Exit Backtest - Using Original Framework")
     print("=" * 80)
     print()
 
+    # Create args object for load_continuous_nq_bars
+    args = argparse.Namespace(
+        start_date="2021-04-28",
+        end_date="2026-04-28",
+        min_volume=0,
+        cache=".cache/nq_bars.pkl",
+    )
+
     # Load data using original method
     print("Loading NQ bars...")
-    bars = load_continuous_nq_bars("2021-04-28", "2026-04-28")
+    bars = load_continuous_nq_bars(args)
     print(f"Loaded {len(bars):,} bars")
     print()
 
