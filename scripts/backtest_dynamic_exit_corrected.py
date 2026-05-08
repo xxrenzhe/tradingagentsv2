@@ -56,7 +56,13 @@ def build_dynamic_exit_trades(
     entry_indexes = np.flatnonzero(signal.to_numpy() != 0)
     default_hold_bars = max(1, candidate.hold_bars)
 
-    if len(entry_indexes) == 0:
+    # Use minimum holding period for pre-selection to avoid obvious overlaps
+    # This ensures at least default_hold_bars spacing between entries
+    selected_signal_indexes = select_non_overlapping_signal_indexes(
+        entry_indexes, len(frame), default_hold_bars
+    )
+
+    if len(selected_signal_indexes) == 0:
         return pd.DataFrame()
 
     # Extract price arrays
@@ -70,8 +76,7 @@ def build_dynamic_exit_trades(
     rows = []
     next_available_index = 0
 
-    # Don't pre-select signals - check dynamically for overlaps
-    for signal_index in entry_indexes:
+    for signal_index in selected_signal_indexes:
         entry_index = int(signal_index) + 1
 
         # Check if entry is valid
@@ -84,7 +89,7 @@ def build_dynamic_exit_trades(
 
         # Dynamic exit logic
         mss_confirmed = False
-        exit_index = entry_index
+        exit_index = None
         exit_reason = "unknown"
 
         for i in range(entry_index, min(entry_index + max_hold_bars, len(frame))):
@@ -143,8 +148,9 @@ def build_dynamic_exit_trades(
             if should_exit:
                 exit_index = i
                 break
-        else:
-            # Loop completed without break (reached max holding)
+
+        # If no exit was found, use max holding
+        if exit_index is None:
             exit_index = min(entry_index + max_hold_bars - 1, len(frame) - 1)
             if exit_reason == "unknown":
                 exit_reason = "max_holding"
