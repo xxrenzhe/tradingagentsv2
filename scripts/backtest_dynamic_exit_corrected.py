@@ -233,8 +233,15 @@ def main():
     )
 
     # Get signal column
-    signal_column = f"{candidate.signal}_{candidate.direction_mode}"
-    signal = bars[signal_column]
+    base_signal = pd.to_numeric(bars[candidate.signal], errors="coerce").fillna(0).astype(int)
+
+    # Apply direction mode
+    if candidate.direction_mode == "reverse":
+        signal = -base_signal
+    elif candidate.direction_mode == "native":
+        signal = base_signal
+    else:
+        raise ValueError(f"Unknown direction mode: {candidate.direction_mode}")
 
     signal_count = (signal != 0).sum()
     print(f"Found {signal_count:,} signals")
