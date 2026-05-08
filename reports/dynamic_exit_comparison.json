@@ -1,0 +1,35 @@
+{
+  "original_strategy": {
+    "total_trades": 41720,
+    "net_profit": 2205060.0,
+    "profit_factor": 1.912315615377375,
+    "win_rate": 0.43060882070949186,
+    "avg_win": 257.2809629835792,
+    "avg_loss": -101.74668490844033,
+    "max_drawdown": 46470.0,
+    "avg_bars_held": 2.0
+  },
+  "dynamic_exit_strategy": {
+    "total_trades": 41720,
+    "net_profit": -1201647245.0,
+    "profit_factor": 0.1710390962210071,
+    "win_rate": 0.22384947267497604,
+    "avg_win": 26548.376271549416,
+    "avg_loss": -45893.19733426201,
+    "max_drawdown": 1201645225.0,
+    "avg_bars_held": 3.494079578139981,
+    "mss_confirmed_rate": 0.17950623202301055,
+    "mss_trades": 7489,
+    "no_mss_trades": 34231,
+    "mss_profit": -667677893.0,
+    "no_mss_profit": -533969352.0,
+    "avg_bars_mss": 10.323274135398584,
+    "avg_bars_no_mss": 2.0
+  },
+  "improvement": {
+    "profit_change_dollars": -1203852305.0,
+    "profit_change_percent": -54594.990839251535,
+    "profit_factor_change": -1.741276519156368,
+    "win_rate_change_pct": -20.675934803451582
+  }
+}
