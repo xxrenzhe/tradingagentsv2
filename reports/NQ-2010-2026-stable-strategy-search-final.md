@@ -8,7 +8,29 @@ The search focused on bar-computable ideas from `docs/Strategy/lightglow.md` and
 
 ## Verdict
 
-The strongest new candidate found in this session is not a generic indicator rule. It is a regime transition setup:
+The strongest historically stable trend candidate found in this search is not a generic indicator rule. It is a regime transition setup:
+
+`regime_breakout_lb60_w12_eff0.25_disp1.2_body0.55_vol0_us_late_long_break_bar_rr3_h240`
+
+Mechanics:
+
+- Define a 60-minute range.
+- Require the prior range to be inefficient and not excessively wide: width <= `12 ATR`, efficiency <= `0.25`.
+- Enter only after a strong upside displacement candle: range >= `1.2 ATR30`, body share >= `0.55`, volume z >= `0`.
+- Trade only `us_late`, long only.
+- Enter next bar open.
+- Stop below the displacement bar low.
+- Target fixed `3R`, timeout `240` minutes.
+
+Historical readiness audit:
+
+- Full sample: `942` trades, `3,500.09` net points, PF `1.414`, max DD `406.09`, expectancy `3.72` points/trade.
+- Stability: `14/17` positive years, rolling 90-day positive rate `63.5%`, first half `958.77` points, second half `2,541.33` points.
+- Cost stress: still `2,087.09` points net at `2.125` NQ points round trip, and `1,145.09` points net at `3.125` points round trip.
+
+This passes the explicit historical stability gate in `reports/NQ-regime-transition-readiness-audit.md`. It is a historically stable trend candidate, not a production approval; live use still requires paper execution validation.
+
+The strongest walk-forward-selected 2R variant remains:
 
 `regime_breakout_lb120_w12_eff0.25_disp1.2_body0.55_vol0_us_late_long_break_bar_rr2_h240`
 
@@ -26,15 +48,16 @@ Selected walk-forward future tests: `100` trades, `963.55` net points, PF `1.979
 
 Full sample sanity: `462` trades, `1,685.16` net points, PF `1.421`, max DD `266.40`, expectancy `3.65` points/trade, `12/17` positive years, rolling 90-day positive rate `60.3%`.
 
-This is the best research-grade candidate from the new range/trend work, but it is still not production-approved. Profits are meaningfully stronger after 2020, and rolling 90-day stability is not high enough for live deployment without paper validation.
+This 2R variant remains useful because it was the top selected OOS walk-forward row, but the 60-minute 3R neighbor is stronger on full-sample historical stability.
 
 ## Final Ranking
 
 | Bucket | Full-sample read | Decision |
 | --- | --- | --- |
 | Lightglow P/D reverse time | `60,500` trades, `108,035.75` points, PF `1.620`; still positive under heavy cost stress. | Best existing statistical edge, but it is a short time-exit mean-reversion/microstructure effect, not a clean trend strategy. |
-| Range -> trend start 2R | `462` trades, `1,685.16` points, PF `1.421`, DD `266.40`, 90d positive `60.3%`. | Best new bar-only structural candidate. Promote to paper-trading validation. |
-| Range -> trend start 3R | `558` trades, `2,106.27` points, PF `1.431`, DD `288.62`, 90d positive `58.7%`. | Useful variant; higher payoff but lower hit-rate behavior. |
+| Range -> trend start 3R, 60m | `942` trades, `3,500.09` points, PF `1.414`, DD `406.09`, 90d positive `63.5%`, 14/17 positive years. | Best historically stable trend candidate. Promote to paper-trading validation. |
+| Range -> trend start 2R, 120m | `462` trades, `1,685.16` points, PF `1.421`, DD `266.40`, 90d positive `60.3%`. | Best walk-forward-selected 2R variant. |
+| Range -> trend start 3R, 120m | `558` trades, `2,106.27` points, PF `1.431`, DD `288.62`, 90d positive `58.7%`. | Useful neighbor; higher payoff but fewer trades. |
 | Range boundary opposite-edge | `159` trades, `412.63` points, PF `1.433`, payoff `5.69`, 90d positive `31.9%`. | Confirms better payoff near range edges, but unstable standalone. |
 | Range boundary fixed 2R | `223` trades, `300.63` points, PF `1.314`; turns negative under high cost stress. | Not robust enough. |
 | ICT2022 event walk-forward top | Walk-forward looked strong, but full sample is `-84.82` points, PF `0.973`. | Reject as standalone; use only as a filter idea. |
@@ -62,8 +85,9 @@ Net points after raising round-trip cost from `0.625` to `2.125` points:
 | Candidate family | Base net | Net at 2.125 pt cost |
 | --- | ---: | ---: |
 | Lightglow P/D reverse time | `108,035.75` | `17,285.75` |
-| Range -> trend start 2R | `1,685.16` | `992.16` |
-| Range -> trend start 3R | `2,106.27` | `1,269.27` |
+| Range -> trend start 3R, 60m | `3,500.09` | `2,087.09` |
+| Range -> trend start 2R, 120m | `1,685.16` | `992.16` |
+| Range -> trend start 3R, 120m | `2,106.27` | `1,269.27` |
 | Range boundary opposite-edge | `412.63` | `174.13` |
 | Range boundary fixed 2R | `300.63` | `-33.88` |
 | ICT2022 event top WF | `-84.82` | `-420.82` |
@@ -74,6 +98,7 @@ This is why the range-transition candidate is more interesting than the older si
 ## Reports Produced
 
 - `reports/NQ-regime-transition-2010-focused.md`
+- `reports/NQ-regime-transition-readiness-audit.md`
 - `reports/NQ-range-boundary-2010-focused.md`
 - `reports/NQ-ict2022-event-system-2010-focused.md`
 - `reports/NQ-lightglow-premium-discount-2r-focused.md`
