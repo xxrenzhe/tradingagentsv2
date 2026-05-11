@@ -29,17 +29,31 @@ LIGHTGLOW_TRADES_PATH = ROOT_DIR / ".tmp" / "nq-lightglow-1m-hold2-fullsample-tr
 POINT_VALUE = 20.0
 MIN_FULL_YEAR_TRADES = 1000
 FULL_YEARS = list(range(2011, 2026))
-BEST_LABEL = "highest_fullsample_3r_neighbor"
+BEST_LABEL = "short45_2r5_balanced"
+BASELINE_LABEL = "highest_fullsample_3r_neighbor"
 LIGHTGLOW_CANDIDATE = "lightglow_premium_discount_reversal_1m_all_hold2m_reverse_time"
-LABEL_ORDER = ["highest_fullsample_3r_neighbor", "best_wf_3r", "best_wf_2r"]
+LABEL_ORDER = [
+    "short45_2r5_balanced",
+    "short45_2r25_netdd",
+    "short45_2r5_maxnet",
+    "highest_fullsample_3r_neighbor",
+    "best_wf_3r",
+    "best_wf_2r",
+]
 LABEL_NAMES = {
+    "short45_2r5_balanced": "45m 2.5R balanced",
+    "short45_2r25_netdd": "45m 2.25R net/DD",
+    "short45_2r5_maxnet": "45m 2.5R max net",
     "highest_fullsample_3r_neighbor": "60m 3R trend-start",
     "best_wf_3r": "120m 3R neighbor",
     "best_wf_2r": "120m 2R walk-forward",
 }
 PALETTE = {
-    "highest_fullsample_3r_neighbor": "#0f766e",
-    "best_wf_3r": "#2563eb",
+    "short45_2r5_balanced": "#0f766e",
+    "short45_2r25_netdd": "#2563eb",
+    "short45_2r5_maxnet": "#7c3aed",
+    "highest_fullsample_3r_neighbor": "#0e7490",
+    "best_wf_3r": "#64748b",
     "best_wf_2r": "#b45309",
 }
 
@@ -881,6 +895,8 @@ def render_report(
         else pd.DataFrame()
     )
     best = summary[summary["label"] == BEST_LABEL].iloc[0]
+    baseline_rows = summary[summary["label"] == BASELINE_LABEL]
+    baseline = baseline_rows.iloc[0] if not baseline_rows.empty else best
     best_trades = trades[trades["audit_label"] == BEST_LABEL].sort_values("entry_ts").copy()
     regime_frequency = frequency_gate_summary(
         trades,
@@ -924,15 +940,15 @@ def render_report(
     best_recent = best_trades.sort_values("entry_ts", ascending=False).head(30).sort_values("entry_ts")
     worst_trades = best_trades.sort_values("net_points").head(20)
     best_trades_top = best_trades.sort_values("net_points", ascending=False).head(20)
-    chart_trades = (
-        lightglow_trades[lightglow_trades["candidate"] == LIGHTGLOW_CANDIDATE].copy()
-        if not lightglow_trades.empty
-        else pd.DataFrame()
-    )
-    chart_strategy_name = "Lightglow 高频候选"
+    chart_trades = best_trades.copy()
+    chart_strategy_name = label_name(BEST_LABEL)
     if chart_trades.empty:
-        chart_trades = best_trades.copy()
-        chart_strategy_name = "低频趋势候选"
+        chart_trades = (
+            lightglow_trades[lightglow_trades["candidate"] == LIGHTGLOW_CANDIDATE].copy()
+            if not lightglow_trades.empty
+            else pd.DataFrame()
+        )
+        chart_strategy_name = "Lightglow 高频候选"
     best_trade = chart_trades.sort_values("net_points", ascending=False).iloc[0]
     worst_trade = chart_trades.sort_values("net_points").iloc[0]
     best_trade_bars = load_bars_for_trade_window(best_trade)
@@ -973,13 +989,13 @@ def render_report(
     <div class="rule-grid">
       <div>
         <h3>核心思路</h3>
-        <p>行情在震荡和趋势之间切换。本策略不追逐普通均线或单指标，而是先识别低效率的窄幅区间，再等待有实体、有成交量确认的上破位移 K 线。它只做 NQ 的 us_late 多头，利用固定 3R 止盈、结构低点止损和 240 分钟超时来把胜率和盈亏比组合成正期望。</p>
+        <p>行情在震荡和趋势之间切换。本策略不追逐普通均线或单指标，而是先识别低效率的窄幅区间，再等待有实体、有成交量确认的上破位移 K 线。最新优化把原 60 分钟区间缩短到 45 分钟，并把固定止盈从 3R 降到 2.25R-2.5R 区间，以提高命中率和净值/回撤表现。</p>
       </div>
       <div>
         <h3>入场规则</h3>
         <ol>
-          <li>使用 NQ 1 分钟 OHLCV bar，构建过去 60 分钟区间。</li>
-          <li>区间宽度不超过 12 ATR，区间效率不超过 0.25，代表震荡压缩。</li>
+          <li>使用 NQ 1 分钟 OHLCV bar，构建过去 45 分钟区间。</li>
+          <li>区间宽度不超过 12 ATR，区间效率不超过 0.15，代表更紧的震荡压缩。</li>
           <li>出现上破位移 K 线：K 线范围至少 1.2 ATR30，实体占比至少 0.55，60 分钟成交量 z-score 不低于 0。</li>
           <li>仅在 us_late 时段做多，下一根 1 分钟 K 线开盘入场。</li>
         </ol>
@@ -988,8 +1004,8 @@ def render_report(
         <h3>出场规则</h3>
         <ol>
           <li>止损放在位移 K 线低点下方，失败立即离场，不扛单。</li>
-          <li>主候选固定 3R 止盈；用户要求的 2R 固定止盈对应 120m 2R walk-forward 候选。</li>
-          <li>持仓最长 240 分钟；到期未触发止盈/止损则按超时离场。</li>
+          <li>主候选固定 2.5R 止盈；2.25R 和 2.5R/240m 作为相邻对照候选。</li>
+          <li>主候选持仓最长 180 分钟；到期未触发止盈/止损则按超时离场。</li>
           <li>同一根 bar 同时触发止盈和止损时，审计按 stop-first 保守处理。</li>
         </ol>
       </div>
@@ -997,7 +1013,7 @@ def render_report(
     <div class="pills">
       {pill("数据", "NQ 1m Databento, 2010-06-06 至 2026-04-27 UTC")}
       {pill("基础成本", "0.625 NQ points round trip")}
-      {pill("主候选", "60m range -> upside displacement -> 3R")}
+      {pill("主候选", "45m range -> upside displacement -> 2.5R")}
       {pill("验证性质", "历史稳定候选，不等于实盘批准")}
     </div>
     """
@@ -1006,6 +1022,7 @@ def render_report(
     <div class="metrics">
       {metric("交易数", fmt_int(best["trades"]), "2010-2026 全样本")}
       {metric("净点数", fmt_num(best["net_points"]), fmt_money_from_points(best["net_points"]))}
+      {metric("对60m 3R增益", fmt_signed(float(best["net_points"]) - float(baseline["net_points"])), f'DD 改善 {fmt_signed(float(baseline["max_drawdown_points"]) - float(best["max_drawdown_points"]))} 点')}
       {metric("Profit Factor", fmt_num(best["profit_factor"], 3), "门槛 >= 1.25")}
       {metric("胜率", fmt_pct(best["win_rate"]), "低胜率 + 高盈亏比")}
       {metric("盈亏比", fmt_num(best["payoff_ratio"], 2), "avg win / avg loss")}
@@ -1023,7 +1040,7 @@ def render_report(
     frequency_body = f"""
     <div class="callout fail-callout">
       <h3>当前低频趋势候选不满足新增硬门槛</h3>
-      <p>你新增的约束是：每个完整年份的交易次数不低于 {fmt_int(MIN_FULL_YEAR_TRADES)} 笔。主趋势候选 <code>{escape(best["candidate"])}</code> 在 2011-2025 完整年份中的最低年交易数只有 <b>{fmt_int(regime_frequency["min_trades"])}</b>，因此频率门槛为 {status_badge(False)}。它仍是历史稳定的低频趋势候选，但不能作为“每年 >=1000 笔”的合格策略。</p>
+      <p>你新增的约束是：每个完整年份的交易次数不低于 {fmt_int(MIN_FULL_YEAR_TRADES)} 笔。优化后的主趋势候选 <code>{escape(best["candidate"])}</code> 在 2011-2025 完整年份中的最低年交易数只有 <b>{fmt_int(regime_frequency["min_trades"])}</b>，因此频率门槛为 {status_badge(False)}。它仍是历史稳定的低频趋势候选，但不能作为“每年 >=1000 笔”的合格策略。</p>
       {annual_count_table(regime_frequency["counts"])}
     </div>
     {lightglow_frequency_body}
@@ -1034,14 +1051,14 @@ def render_report(
     """
 
     comparison_body = f"""
-    <p class="note">三组候选都通过历史稳定门槛。主报告选择 60m 3R，因为它的全样本净点数、正收益年份占比和成本压力表现最好；120m 2R 是固定 2R 离场测试中最值得保留的 walk-forward 候选。</p>
+    <p class="note">本次新增的 45m 短区间、低于 3R 的候选整体优于原 60m 3R：45m 2.5R balanced 在全样本净点数、净值/回撤和滚动90日稳定性上更均衡；45m 2.25R net/DD 的净值/回撤最高；原 60m 3R 作为基准保留。</p>
     {candidate_table(summary)}
     {gate_table(summary)}
     """
 
     equity_body = f"""
-    {line_chart("三组候选累计净点数曲线", cumulative, y_column="equity_points", x_column="entry_ts", y_label="cumulative net points")}
-    {line_chart("三组候选回撤曲线", cumulative, y_column="drawdown_points", x_column="entry_ts", y_label="drawdown points")}
+    {line_chart("候选累计净点数曲线", cumulative, y_column="equity_points", x_column="entry_ts", y_label="cumulative net points")}
+    {line_chart("候选回撤曲线", cumulative, y_column="drawdown_points", x_column="entry_ts", y_label="drawdown points")}
     """
 
     yearly_body = f"""
@@ -1085,7 +1102,7 @@ def render_report(
     """
 
     trade_body = f"""
-    <p class="note">下方 K 线图展示的是 {escape(chart_strategy_name)}的逐笔最佳和最差交易，蓝点为入场、紫点为出场。</p>
+    <p class="note">下方 K 线图展示的是 {escape(chart_strategy_name)} 的逐笔最佳和最差交易，蓝点为入场、紫点为出场。</p>
     <div class="trade-chart-grid">
       {candlestick_trade_chart("最佳交易历史 K 线：入场点与出场点", best_trade, best_trade_bars)}
       {candlestick_trade_chart("最差交易历史 K 线：入场点与出场点", worst_trade, worst_trade_bars)}
@@ -1392,7 +1409,7 @@ def render_report(
     <header class="hero">
       <p class="kicker">NQ 1m Regime Transition Strategy Report</p>
       <h1>震荡结束、趋势起步：NQ 稳定盈利候选策略报告</h1>
-      <p class="hero-summary">本报告汇总 2010-2026 NQ 1分钟 bar 回测审计。当前最强低频趋势候选是 60 分钟震荡压缩后的上破位移做多策略，但它不满足“每个完整年份至少 1000 笔交易”的新增硬门槛；满足频率门槛的是 Lightglow Premium/Discount 1m 高频反向候选。</p>
+      <p class="hero-summary">本报告汇总 2010-2026 NQ 1分钟 bar 回测审计。新一轮针对 60m 3R 的邻域优化后，当前更强的低频趋势候选是 45 分钟震荡压缩后的上破位移做多策略，固定 2.5R 止盈；它提高了全样本收益和净值/回撤，但仍不满足“每个完整年份至少 1000 笔交易”的硬门槛。</p>
       <code class="candidate-code">{candidate_code}</code>
       <div class="pills">
         {pill("生成时间", pd.Timestamp.now("UTC").strftime("%Y-%m-%d %H:%M UTC"))}
@@ -1438,7 +1455,8 @@ def main() -> None:
     rolling180 = read_csv(ROLLING180_PATH)
     report = render_report(summary, trades, yearly, monthly, rolling90, rolling180)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(report, encoding="utf-8")
+    clean_report = "\n".join(line.rstrip() for line in report.splitlines()) + "\n"
+    args.output.write_text(clean_report, encoding="utf-8")
     print(f"Wrote {args.output.relative_to(ROOT_DIR)}")
 
 

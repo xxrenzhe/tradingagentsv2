@@ -38,6 +38,54 @@ class AuditCandidate:
 def default_candidates() -> list[AuditCandidate]:
     return [
         AuditCandidate(
+            "short45_2r5_balanced",
+            RegimeCandidate(
+                lookback=45,
+                width_atr_max=12.0,
+                efficiency_max=0.15,
+                displacement_atr_min=1.2,
+                body_share_min=0.55,
+                volume_z_min=0.0,
+                session="us_late",
+                direction_filter="long",
+                stop_mode="break_bar",
+                reward_risk=2.5,
+                horizon_minutes=180,
+            ),
+        ),
+        AuditCandidate(
+            "short45_2r25_netdd",
+            RegimeCandidate(
+                lookback=45,
+                width_atr_max=12.0,
+                efficiency_max=0.25,
+                displacement_atr_min=1.2,
+                body_share_min=0.55,
+                volume_z_min=0.0,
+                session="us_late",
+                direction_filter="long",
+                stop_mode="break_bar",
+                reward_risk=2.25,
+                horizon_minutes=240,
+            ),
+        ),
+        AuditCandidate(
+            "short45_2r5_maxnet",
+            RegimeCandidate(
+                lookback=45,
+                width_atr_max=12.0,
+                efficiency_max=0.25,
+                displacement_atr_min=1.2,
+                body_share_min=0.55,
+                volume_z_min=0.0,
+                session="us_late",
+                direction_filter="long",
+                stop_mode="break_bar",
+                reward_risk=2.5,
+                horizon_minutes=240,
+            ),
+        ),
+        AuditCandidate(
             "best_wf_2r",
             RegimeCandidate(
                 lookback=120,
@@ -348,7 +396,7 @@ def main() -> int:
     parser.add_argument("--gate-positive-year-rate", type=float, default=0.70)
     parser.add_argument("--gate-positive-90d-rate", type=float, default=0.55)
     parser.add_argument("--gate-cost-points", type=float, default=2.125)
-    parser.add_argument("--lookbacks", type=int, nargs="+", default=[60, 120])
+    parser.add_argument("--lookbacks", type=int, nargs="+", default=[45, 60, 120])
     parser.add_argument("--width-atr-max", type=float, nargs="+", default=[12.0])
     parser.add_argument("--efficiency-max", type=float, nargs="+", default=[0.35])
     parser.add_argument("--displacement-atr-min", type=float, nargs="+", default=[1.0])
@@ -357,8 +405,8 @@ def main() -> int:
     parser.add_argument("--sessions", nargs="+", default=["us_late"])
     parser.add_argument("--direction-filters", nargs="+", default=["long"])
     parser.add_argument("--stop-modes", nargs="+", default=["break_bar"])
-    parser.add_argument("--reward-risks", type=float, nargs="+", default=[2.0, 3.0])
-    parser.add_argument("--horizon-minutes", type=int, nargs="+", default=[240])
+    parser.add_argument("--reward-risks", type=float, nargs="+", default=[2.0, 2.25, 2.5, 3.0])
+    parser.add_argument("--horizon-minutes", type=int, nargs="+", default=[180, 240])
     parser.add_argument("--breakout-buffer-atr", type=float, default=0.05)
     parser.add_argument("--min-buffer-points", type=float, default=0.25)
     parser.add_argument("--stop-buffer-atr", type=float, default=0.10)
