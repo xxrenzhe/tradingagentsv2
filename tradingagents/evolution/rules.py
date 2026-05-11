@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any, Literal
 
 import pandas as pd
@@ -24,6 +25,12 @@ ALLOWED_FEATURES = {
     "atr_120",
     "z_30",
     "volume_z_60",
+    "relative_volume_20",
+    "obv_slope_20",
+    "cmf_20",
+    "mfi_14",
+    "price_volume_corr_20",
+    "volume_price_trend_slope_20",
     "rsi_14",
     "boll_position",
     "doji",
@@ -32,6 +39,10 @@ ALLOWED_FEATURES = {
     "inside_bar",
     "outside_bar",
     "displacement_candle",
+    "volume_breakout_signal",
+    "low_volume_pullback",
+    "bullish_volume_divergence",
+    "bearish_volume_divergence",
     "pd_zone",
     "pd_fade_signal",
     "pd_continue_signal",
@@ -71,6 +82,7 @@ class TradingRule(BaseModel):
 
 
 def parse_rule_payload(payload: dict[str, Any]) -> TradingRule:
+    payload = normalize_rule_payload(payload)
     rule = TradingRule(**payload)
     invalid = [condition.feature for condition in rule.entry_conditions if condition.feature not in ALLOWED_FEATURES]
     if invalid:
@@ -87,6 +99,36 @@ def parse_rule_payload(payload: dict[str, Any]) -> TradingRule:
     rule.max_trades_per_validation = max(1, min(int(rule.max_trades_per_validation), 10))
     rule.confidence = max(0.0, min(float(rule.confidence), 1.0))
     return rule
+
+
+def normalize_rule_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    if not isinstance(normalized.get("memory_used"), list):
+        value = normalized.get("memory_used")
+        normalized["memory_used"] = [] if value in {None, False, "", "none", "None", "N/A", "n/a"} else [str(value)]
+    for key in ["expected_failure_modes", "invalid_if"]:
+        if not isinstance(normalized.get(key), list):
+            value = normalized.get(key)
+            normalized[key] = [] if value in {None, False, "", "none", "None", "N/A", "n/a"} else [str(value)]
+    normalized["new_or_existing"] = _normalize_choice(
+        normalized.get("new_or_existing"),
+        allowed={"new", "variant", "existing"},
+        default="new",
+    )
+    if not isinstance(normalized.get("why_not_reuse_existing"), str):
+        value = normalized.get("why_not_reuse_existing")
+        normalized["why_not_reuse_existing"] = "; ".join(str(item) for item in value) if isinstance(value, list) else str(value or "")
+    normalized["direction"] = _normalize_choice(
+        normalized.get("direction"),
+        allowed={"long", "short", "both", "no_trade"},
+        default=_direction_from_text(normalized),
+    )
+    normalized["entry_timing"] = _normalize_entry_timing(normalized.get("entry_timing"))
+    normalized["entry_conditions"] = _normalize_conditions(normalized.get("entry_conditions"))
+    for key, default in [("stop_points", 12.0), ("target_points", 24.0), ("max_hold_bars", 60), ("validation_bars", 120), ("max_trades_per_validation", 3), ("confidence", 0.0)]:
+        if normalized.get(key) in {None, ""}:
+            normalized[key] = default
+    return normalized
 
 
 def rule_to_dict(rule: TradingRule) -> dict[str, Any]:
@@ -173,6 +215,118 @@ def _numeric_compare(left: pd.Series, operator: str, right: float) -> pd.Series:
     if operator == "!=":
         return left != right
     raise ValueError(f"Unsupported operator: {operator}")
+
+
+def _normalize_conditions(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, dict):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    conditions: list[dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, str):
+            condition = _condition_from_text(item)
+            if condition is None:
+                continue
+        elif isinstance(item, dict):
+            condition = dict(item)
+        else:
+            continue
+        feature = str(condition.get("feature", "")).strip()
+        if feature not in ALLOWED_FEATURES:
+            feature = _feature_alias(feature)
+        operator = str(condition.get("operator", "==")).strip()
+        value_obj = condition.get("value")
+        if operator.lower() in {"above", "greater_than", "gt"}:
+            operator = ">"
+        elif operator.lower() in {"below", "less_than", "lt"}:
+            operator = "<"
+        elif operator.lower() in {"gte", "at_least", "greater_or_equal"}:
+            operator = ">="
+        elif operator.lower() in {"lte", "at_most", "less_or_equal"}:
+            operator = "<="
+        elif operator in {"=", "equals"}:
+            operator = "=="
+        if feature in ALLOWED_FEATURES and operator in {"<", "<=", ">", ">=", "==", "!="}:
+            conditions.append({"feature": feature, "operator": operator, "value": value_obj})
+    return conditions
+
+
+def _condition_from_text(text: str) -> dict[str, Any] | None:
+    match = re.match(r"^\s*([A-Za-z0-9_ .-]+)\s*(<=|>=|==|!=|=|<|>)\s*(.+?)\s*$", text)
+    if not match:
+        return None
+    feature, operator, value = match.groups()
+    if operator == "=":
+        operator = "=="
+    return {"feature": feature.strip(), "operator": operator, "value": _coerce_condition_value(value)}
+
+
+def _coerce_condition_value(value: str) -> float | str:
+    stripped = value.strip().strip("\"'")
+    try:
+        return float(stripped)
+    except ValueError:
+        return stripped
+
+
+def _feature_alias(feature: str) -> str:
+    compact = feature.strip().lower().replace(" ", "_").replace("-", "_")
+    for suffix in ["_last", "_mean", "_count"]:
+        if compact.endswith(suffix):
+            compact = compact[: -len(suffix)]
+    aliases = {
+        "volume_zscore": "volume_z_60",
+        "volume_z": "volume_z_60",
+        "relative_volume": "relative_volume_20",
+        "rel_volume": "relative_volume_20",
+        "obv_slope": "obv_slope_20",
+        "cmf": "cmf_20",
+        "mfi": "mfi_14",
+        "price_volume_corr": "price_volume_corr_20",
+        "vpt_slope": "volume_price_trend_slope_20",
+        "volume_breakout": "volume_breakout_signal",
+        "low_volume_pullback_signal": "low_volume_pullback",
+        "bullish_obv_divergence": "bullish_volume_divergence",
+        "bearish_obv_divergence": "bearish_volume_divergence",
+        "vwap_z": "vwap_distance_z",
+    }
+    return aliases.get(compact, compact)
+
+
+def _normalize_choice(value: Any, *, allowed: set[str], default: str) -> str:
+    if value is None:
+        return default
+    compact = str(value).strip().lower().replace(" ", "_").replace("-", "_")
+    return compact if compact in allowed else default
+
+
+def _normalize_entry_timing(value: Any) -> str:
+    if value is None:
+        return "next_open"
+    text = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+    if text in {"next_open", "next_bar_open", "enter_at_next_open", "enter_next_open"}:
+        return "next_open"
+    if text in {"close_confirmation", "close_confirm", "on_close", "close"}:
+        return "close_confirmation"
+    if text in {"retest", "on_retest", "pullback_retest"}:
+        return "retest"
+    if "next" in text and "open" in text:
+        return "next_open"
+    if "retest" in text:
+        return "retest"
+    if "close" in text:
+        return "close_confirmation"
+    return "next_open"
+
+
+def _direction_from_text(payload: dict[str, Any]) -> str:
+    text = " ".join(str(payload.get(key, "")) for key in ["pattern_name", "hypothesis", "entry_timing"]).lower()
+    if "short" in text or "sell" in text:
+        return "short"
+    if "long" in text or "buy" in text:
+        return "long"
+    return "both"
 
 
 def _bucket_value(value: float | int | str) -> float | int | str:

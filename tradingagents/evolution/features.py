@@ -56,11 +56,31 @@ def prepare_evolution_features(bars: pd.DataFrame) -> pd.DataFrame:
     data["vwap"] = (close * volume).cumsum() / cumulative_volume
     data["vwap_distance"] = close - data["vwap"]
     data["vwap_distance_z"] = _zscore(data["vwap_distance"], 30)
+    data["signed_volume"] = volume * np.sign(close.diff().fillna(0))
+    data["obv"] = data["signed_volume"].cumsum()
+    data["obv_slope_20"] = data["obv"].diff(20)
+    data["volume_ma_20"] = volume.rolling(20, min_periods=5).mean()
+    data["relative_volume_20"] = volume / data["volume_ma_20"].replace(0, np.nan)
+    money_flow_multiplier = ((close - low) - (high - close)) / (high - low).replace(0, np.nan)
+    data["cmf_20"] = (money_flow_multiplier.fillna(0) * volume).rolling(20, min_periods=10).sum() / volume.rolling(20, min_periods=10).sum().replace(0, np.nan)
+    typical_price = (high + low + close) / 3
+    raw_money_flow = typical_price * volume
+    positive_flow = raw_money_flow.where(typical_price > typical_price.shift(1), 0.0)
+    negative_flow = raw_money_flow.where(typical_price < typical_price.shift(1), 0.0)
+    money_ratio = positive_flow.rolling(14, min_periods=7).sum() / negative_flow.rolling(14, min_periods=7).sum().replace(0, np.nan)
+    data["mfi_14"] = 100 - (100 / (1 + money_ratio))
+    data["price_volume_corr_20"] = data["return_1m"].rolling(20, min_periods=10).corr(volume.pct_change())
+    data["volume_price_trend"] = (volume * close.pct_change().fillna(0)).cumsum()
+    data["volume_price_trend_slope_20"] = data["volume_price_trend"].diff(20)
+    data["bullish_volume_divergence"] = ((close < close.shift(20)) & (data["obv"] > data["obv"].shift(20))).astype(int)
+    data["bearish_volume_divergence"] = ((close > close.shift(20)) & (data["obv"] < data["obv"].shift(20))).astype(int)
 
     true_range = _true_range(high, low, close)
     data["atr_14"] = true_range.rolling(14, min_periods=5).mean()
     data["atr_30"] = true_range.rolling(30, min_periods=10).mean()
     data["atr_120"] = true_range.rolling(120, min_periods=30).mean()
+    data["volume_breakout_signal"] = ((data["relative_volume_20"] >= 1.8) & (data["range_points"] >= data["atr_30"].fillna(data["range_points"]))).astype(int)
+    data["low_volume_pullback"] = ((data["relative_volume_20"] <= 0.75) & (data["range_points"] <= data["atr_30"].fillna(data["range_points"]))).astype(int)
     data["vol_30"] = data["return_1m"].rolling(30, min_periods=10).std()
     data["vol_120"] = data["return_1m"].rolling(120, min_periods=30).std()
     data["z_30"] = _zscore(close, 30)
@@ -90,6 +110,12 @@ def summarize_segment_features(frame: pd.DataFrame) -> dict[str, object]:
         "atr_120",
         "z_30",
         "volume_z_60",
+        "relative_volume_20",
+        "obv_slope_20",
+        "cmf_20",
+        "mfi_14",
+        "price_volume_corr_20",
+        "volume_price_trend_slope_20",
         "vwap_distance_z",
         "rsi_14",
         "boll_position",
@@ -119,6 +145,10 @@ def summarize_segment_features(frame: pd.DataFrame) -> dict[str, object]:
         "inside_bar",
         "outside_bar",
         "displacement_candle",
+        "volume_breakout_signal",
+        "low_volume_pullback",
+        "bullish_volume_divergence",
+        "bearish_volume_divergence",
         "sweep_signal",
         "choch_signal",
         "bos_signal",
@@ -251,4 +281,3 @@ def _add_regime_features(data: pd.DataFrame) -> pd.DataFrame:
         default="range",
     )
     return frame
-

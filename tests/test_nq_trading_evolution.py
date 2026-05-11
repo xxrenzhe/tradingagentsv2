@@ -15,7 +15,7 @@ from tradingagents.evolution.features import prepare_evolution_features
 from tradingagents.evolution.llm import MockRuleGenerator
 from tradingagents.evolution.memory import EvolutionMemory
 from tradingagents.evolution.nq_data import load_continuous_nq_bars
-from tradingagents.evolution.rules import EntryCondition, TradingRule, rule_signature
+from tradingagents.evolution.rules import EntryCondition, TradingRule, parse_rule_payload, rule_signature
 from tradingagents.evolution.segmentation import SegmentConfig, segment_market
 
 
@@ -88,6 +88,27 @@ def test_dynamic_segmentation_uses_100_as_baseline_not_fixed_length() -> None:
     assert {"sweep_signal_count", "pd_zone_last"} & set(json.loads(segments[0].feature_json))
 
 
+def test_price_volume_features_are_available_for_llm_rules() -> None:
+    features = prepare_evolution_features(_synthetic_nq_bars(160))
+    expected_columns = {
+        "relative_volume_20",
+        "obv_slope_20",
+        "cmf_20",
+        "mfi_14",
+        "price_volume_corr_20",
+        "volume_price_trend_slope_20",
+        "volume_breakout_signal",
+        "low_volume_pullback",
+        "bullish_volume_divergence",
+        "bearish_volume_divergence",
+    }
+    assert expected_columns <= set(features.columns)
+    segment = segment_market(features, SegmentConfig(base_bars=100, min_bars=20, max_bars=130, split_threshold=0.35))[0]
+    summary = json.loads(segment.feature_json)
+    assert "relative_volume_20_mean" in summary
+    assert "volume_breakout_signal_count" in summary
+
+
 def test_rule_signature_is_stable_for_reordered_conditions() -> None:
     left = TradingRule(
         pattern_name="a",
@@ -106,6 +127,49 @@ def test_rule_signature_is_stable_for_reordered_conditions() -> None:
     )
 
     assert rule_signature(left) == rule_signature(right)
+
+
+def test_llm_payload_normalization_accepts_common_schema_drift() -> None:
+    rule = parse_rule_payload(
+        {
+            "pattern_name": "volume breakout short",
+            "hypothesis": "Short failed high-volume premium push.",
+            "new_or_existing": "NEW",
+            "memory_used": "none",
+            "why_not_reuse_existing": ["none available", "new setup"],
+            "market_regime": "range",
+            "direction": "SHORT",
+            "entry_conditions": [
+                "regime = range",
+                "cmf_20_last > 0.1",
+                "bullish_volume_divergence_count >= 1",
+                {"feature": "relative_volume", "operator": "greater_than", "value": 1.8},
+                {"feature": "vwap_z", "operator": "above", "value": 1.0},
+            ],
+            "entry_timing": "enter_at_next_open",
+            "stop_points": 8,
+            "target_points": 12,
+            "max_hold_bars": 5,
+            "validation_bars": 20,
+            "max_trades_per_validation": 2,
+            "confidence": 0.4,
+            "expected_failure_modes": "trend continuation",
+            "invalid_if": "volume collapses",
+        }
+    )
+
+    assert rule.direction == "short"
+    assert rule.entry_timing == "next_open"
+    assert rule.memory_used == []
+    assert rule.why_not_reuse_existing == "none available; new setup"
+    assert [condition.feature for condition in rule.entry_conditions] == [
+        "regime",
+        "cmf_20",
+        "bullish_volume_divergence",
+        "relative_volume_20",
+        "vwap_distance_z",
+    ]
+    assert rule.expected_failure_modes == ["trend continuation"]
 
 
 def test_backtest_uses_next_open_validation_bars_and_stop_first() -> None:
