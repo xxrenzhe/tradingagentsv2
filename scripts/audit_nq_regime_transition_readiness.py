@@ -86,6 +86,54 @@ def default_candidates() -> list[AuditCandidate]:
             ),
         ),
         AuditCandidate(
+            "defensive45_2r5_lossfilter",
+            RegimeCandidate(
+                lookback=45,
+                width_atr_max=10.0,
+                efficiency_max=0.25,
+                displacement_atr_min=1.8,
+                body_share_min=0.55,
+                volume_z_min=0.5,
+                session="us_late",
+                direction_filter="long",
+                stop_mode="break_bar",
+                reward_risk=2.5,
+                horizon_minutes=180,
+            ),
+        ),
+        AuditCandidate(
+            "defensive45_2r5_loweff",
+            RegimeCandidate(
+                lookback=45,
+                width_atr_max=10.0,
+                efficiency_max=0.10,
+                displacement_atr_min=1.6,
+                body_share_min=0.55,
+                volume_z_min=0.0,
+                session="us_late",
+                direction_filter="long",
+                stop_mode="break_bar",
+                reward_risk=2.5,
+                horizon_minutes=180,
+            ),
+        ),
+        AuditCandidate(
+            "short35_2r25_lowr_probe",
+            RegimeCandidate(
+                lookback=35,
+                width_atr_max=10.0,
+                efficiency_max=0.25,
+                displacement_atr_min=1.4,
+                body_share_min=0.55,
+                volume_z_min=0.0,
+                session="us_late",
+                direction_filter="long",
+                stop_mode="break_bar",
+                reward_risk=2.25,
+                horizon_minutes=180,
+            ),
+        ),
+        AuditCandidate(
             "best_wf_2r",
             RegimeCandidate(
                 lookback=120,
@@ -396,7 +444,7 @@ def main() -> int:
     parser.add_argument("--gate-positive-year-rate", type=float, default=0.70)
     parser.add_argument("--gate-positive-90d-rate", type=float, default=0.55)
     parser.add_argument("--gate-cost-points", type=float, default=2.125)
-    parser.add_argument("--lookbacks", type=int, nargs="+", default=[45, 60, 120])
+    parser.add_argument("--lookbacks", type=int, nargs="+", default=[35, 45, 60, 120])
     parser.add_argument("--width-atr-max", type=float, nargs="+", default=[12.0])
     parser.add_argument("--efficiency-max", type=float, nargs="+", default=[0.35])
     parser.add_argument("--displacement-atr-min", type=float, nargs="+", default=[1.0])

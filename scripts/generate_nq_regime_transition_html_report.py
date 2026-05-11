@@ -25,6 +25,9 @@ MONTHLY_PATH = ROOT_DIR / ".tmp" / "nq-regime-transition-readiness-monthly.csv"
 ROLLING90_PATH = ROOT_DIR / ".tmp" / "nq-regime-transition-readiness-rolling90.csv"
 ROLLING180_PATH = ROOT_DIR / ".tmp" / "nq-regime-transition-readiness-rolling180.csv"
 LIGHTGLOW_TRADES_PATH = ROOT_DIR / ".tmp" / "nq-lightglow-1m-hold2-fullsample-trades.csv"
+SUB45_LOWR_FULL_SAMPLE_PATH = ROOT_DIR / ".tmp" / "nq-regime-transition-sub45-lowr-full-sample.csv"
+MID35_40_LOWR_FULL_SAMPLE_PATH = ROOT_DIR / ".tmp" / "nq-regime-transition-35-40-lowr-full-sample.csv"
+LOSSFILTER_45_FULL_SAMPLE_PATH = ROOT_DIR / ".tmp" / "nq-regime-transition-45m-lossfilter-full-sample.csv"
 
 POINT_VALUE = 20.0
 MIN_FULL_YEAR_TRADES = 1000
@@ -36,6 +39,9 @@ LABEL_ORDER = [
     "short45_2r5_balanced",
     "short45_2r25_netdd",
     "short45_2r5_maxnet",
+    "defensive45_2r5_lossfilter",
+    "defensive45_2r5_loweff",
+    "short35_2r25_lowr_probe",
     "highest_fullsample_3r_neighbor",
     "best_wf_3r",
     "best_wf_2r",
@@ -44,6 +50,9 @@ LABEL_NAMES = {
     "short45_2r5_balanced": "45m 2.5R balanced",
     "short45_2r25_netdd": "45m 2.25R net/DD",
     "short45_2r5_maxnet": "45m 2.5R max net",
+    "defensive45_2r5_lossfilter": "45m 2.5R loss-filter",
+    "defensive45_2r5_loweff": "45m 2.5R low-eff",
+    "short35_2r25_lowr_probe": "35m 2.25R low-R probe",
     "highest_fullsample_3r_neighbor": "60m 3R trend-start",
     "best_wf_3r": "120m 3R neighbor",
     "best_wf_2r": "120m 2R walk-forward",
@@ -52,6 +61,9 @@ PALETTE = {
     "short45_2r5_balanced": "#0f766e",
     "short45_2r25_netdd": "#2563eb",
     "short45_2r5_maxnet": "#7c3aed",
+    "defensive45_2r5_lossfilter": "#dc2626",
+    "defensive45_2r5_loweff": "#16a34a",
+    "short35_2r25_lowr_probe": "#ea580c",
     "highest_fullsample_3r_neighbor": "#0e7490",
     "best_wf_3r": "#64748b",
     "best_wf_2r": "#b45309",
@@ -438,6 +450,92 @@ def html_table(
       </table>
     </div>
     """
+
+
+def optional_csv(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    return pd.read_csv(path)
+
+
+def strategy_name_from_candidate(candidate: str) -> str:
+    text = str(candidate)
+    if "lb35" in text:
+        lookback = "35m"
+    elif "lb40" in text:
+        lookback = "40m"
+    elif "lb45" in text:
+        lookback = "45m"
+    elif "lb60" in text:
+        lookback = "60m"
+    elif "lb120" in text:
+        lookback = "120m"
+    else:
+        lookback = "range"
+    rr = "-"
+    marker = "_rr"
+    if marker in text:
+        rr = text.split(marker, 1)[1].split("_", 1)[0] + "R"
+    return f"{lookback} {rr}"
+
+
+def search_result_table(frame: pd.DataFrame, candidate_names: list[str]) -> str:
+    if frame.empty:
+        return '<p class="empty">No search data.</p>'
+    selected = frame[frame["candidate"].astype(str).isin(candidate_names)].copy()
+    if selected.empty:
+        return '<p class="empty">No matching candidates in search data.</p>'
+    selected["setup"] = selected["candidate"].map(strategy_name_from_candidate)
+    columns = [
+        ("setup", "搜索候选", "text"),
+        ("trades", "交易数", "int"),
+        ("net_points", "净点数", "num"),
+        ("profit_factor", "PF", "num"),
+        ("win_rate", "胜率", "pct"),
+        ("payoff_ratio", "盈亏比", "num"),
+        ("expectancy_points", "期望/笔", "num"),
+        ("max_drawdown_points", "最大DD", "num"),
+        ("positive_90d_rate", "90日正收益", "pct"),
+        ("candidate", "策略ID", "candidate"),
+    ]
+    return html_table(selected, columns)
+
+
+def feature_summary(trades: pd.DataFrame, label: str) -> pd.DataFrame:
+    selected = trades[trades["audit_label"] == label].copy()
+    if selected.empty:
+        return pd.DataFrame()
+    selected["result"] = selected["net_points"].apply(lambda value: "盈利交易" if float(value) > 0 else "亏损交易")
+    grouped = selected.groupby("result").agg(
+        trades=("net_points", "size"),
+        avg_net_points=("net_points", "mean"),
+        range_width_atr=("range_width_atr", "mean"),
+        range_efficiency=("range_efficiency", "mean"),
+        displacement_atr=("displacement_atr", "mean"),
+        body_share=("body_share", "mean"),
+        volume_z_60=("volume_z_60", "mean"),
+        stop_distance_points=("stop_distance_points", "mean"),
+    )
+    order = ["盈利交易", "亏损交易"]
+    return grouped.reindex([label for label in order if label in grouped.index]).reset_index()
+
+
+def feature_summary_table(trades: pd.DataFrame, label: str) -> str:
+    frame = feature_summary(trades, label)
+    if frame.empty:
+        return '<p class="empty">No feature comparison data.</p>'
+    columns = [
+        ("result", "样本", "text"),
+        ("trades", "交易数", "int"),
+        ("avg_net_points", "平均净点", "signed"),
+        ("range_width_atr", "区间宽度ATR", "num"),
+        ("range_efficiency", "区间效率", "num"),
+        ("displacement_atr", "位移ATR", "num"),
+        ("body_share", "实体占比", "num"),
+        ("volume_z_60", "成交量Z", "num"),
+        ("stop_distance_points", "止损距离", "num"),
+    ]
+    return html_table(frame, columns, class_name="compact-table")
 
 
 def cumulative_trades(trades: pd.DataFrame) -> dict[str, pd.DataFrame]:
@@ -897,6 +995,12 @@ def render_report(
     best = summary[summary["label"] == BEST_LABEL].iloc[0]
     baseline_rows = summary[summary["label"] == BASELINE_LABEL]
     baseline = baseline_rows.iloc[0] if not baseline_rows.empty else best
+    lossfilter_rows = summary[summary["label"] == "defensive45_2r5_lossfilter"]
+    lossfilter = lossfilter_rows.iloc[0] if not lossfilter_rows.empty else best
+    loweff_rows = summary[summary["label"] == "defensive45_2r5_loweff"]
+    loweff = loweff_rows.iloc[0] if not loweff_rows.empty else best
+    lowr_probe_rows = summary[summary["label"] == "short35_2r25_lowr_probe"]
+    lowr_probe = lowr_probe_rows.iloc[0] if not lowr_probe_rows.empty else best
     best_trades = trades[trades["audit_label"] == BEST_LABEL].sort_values("entry_ts").copy()
     regime_frequency = frequency_gate_summary(
         trades,
@@ -953,6 +1057,9 @@ def render_report(
     worst_trade = chart_trades.sort_values("net_points").iloc[0]
     best_trade_bars = load_bars_for_trade_window(best_trade)
     worst_trade_bars = load_bars_for_trade_window(worst_trade)
+    sub45_lowr_full = optional_csv(SUB45_LOWR_FULL_SAMPLE_PATH)
+    mid35_40_lowr_full = optional_csv(MID35_40_LOWR_FULL_SAMPLE_PATH)
+    lossfilter_full = optional_csv(LOSSFILTER_45_FULL_SAMPLE_PATH)
 
     lightglow_frequency_body = ""
     if lightglow_frequency is not None and lightglow_summary["trades"]:
@@ -1051,9 +1158,93 @@ def render_report(
     """
 
     comparison_body = f"""
-    <p class="note">本次新增的 45m 短区间、低于 3R 的候选整体优于原 60m 3R：45m 2.5R balanced 在全样本净点数、净值/回撤和滚动90日稳定性上更均衡；45m 2.25R net/DD 的净值/回撤最高；原 60m 3R 作为基准保留。</p>
+    <p class="note">本次新增的 45m 短区间、低于 3R 的候选整体优于原 60m 3R：45m 2.5R balanced 在全样本净点数、净值/回撤和滚动90日稳定性上更均衡；45m 2.25R net/DD 的净值/回撤最高；原 60m 3R 作为基准保留。亏损过滤候选提高 PF、最大回撤和最差90日，但降低总交易数与总净点数，所以更适合作为防守版本，而不是替代主版本。</p>
     {candidate_table(summary)}
     {gate_table(summary)}
+    """
+
+    lowr_body = f"""
+    <div class="rule-grid">
+      <div>
+        <h3>35/40m 与更低R的结论</h3>
+        <p>继续缩短区间到 35/40 分钟、并把止盈下探到 1.25R-2.25R 后，没有出现能同时超过 45m 2.5R balanced 的候选。35m 2.25R 代表候选交易数更高，但净点数、PF 和回撤质量均弱于主候选。</p>
+      </div>
+      <div>
+        <h3>为什么更低R没有胜出</h3>
+        <p>降低 R 会提高目标触达概率，但也削薄单笔盈利厚度；在 NQ us_late 的突破延续样本中，优势主要来自少数延续行情给出的盈利厚度，过早止盈会降低总体期望。</p>
+      </div>
+      <div>
+        <h3>可保留的低R用途</h3>
+        <p>低R版本更适合做执行/风控对照：当市场波动收缩、滑点压力升高或持仓时间受限时，可作为保守退出方案继续纸面跟踪，但当前不能升级为主策略。</p>
+      </div>
+    </div>
+    <h3>正式审计中的低R代表候选</h3>
+    {html_table(pd.DataFrame([lowr_probe]), [
+        ("label", "候选", "label"),
+        ("trades", "交易数", "int"),
+        ("net_points", "净点数", "num"),
+        ("profit_factor", "PF", "num"),
+        ("win_rate", "胜率", "pct"),
+        ("payoff_ratio", "盈亏比", "num"),
+        ("expectancy_points", "期望/笔", "num"),
+        ("max_drawdown_points", "最大DD", "num"),
+        ("net_to_drawdown", "净值/DD", "num"),
+        ("positive_90d_rate", "90日正收益", "pct"),
+    ], class_name="compact-table")}
+    <h3>搜索文件中的代表结果</h3>
+    {search_result_table(mid35_40_lowr_full, [
+        "regime_breakout_lb35_w10_eff0.25_disp1.4_body0.55_vol0_us_late_long_break_bar_rr2.25_h180",
+        "regime_breakout_lb35_w8_eff0.15_disp1.4_body0.55_vol0_us_late_long_break_bar_rr2.5_h180",
+        "regime_breakout_lb35_w10_eff0.1_disp1.8_body0.55_vol0.5_us_late_long_break_bar_rr2.5_h180",
+    ])}
+    {search_result_table(sub45_lowr_full, [
+        "regime_breakout_lb30_w10_eff0.25_disp1.2_body0.55_vol0_us_late_long_break_bar_rr2.25_h180",
+        "regime_breakout_lb30_w10_eff0.25_disp1.2_body0.55_vol0_us_late_long_break_bar_rr2.25_h120",
+        "regime_breakout_lb30_w10_eff0.25_disp1.2_body0.55_vol0_us_late_long_break_bar_rr2_h180",
+    ])}
+    """
+
+    loss_learning_body = f"""
+    <div class="split">
+      <div>
+        <h3>亏损交易暴露的特征</h3>
+        <p>主候选的亏损交易通常不是“方向完全随机”，而是突破质量较弱：位移 K 线不够强、成交量确认较弱、区间效率偏高，说明震荡尚未充分耗尽就尝试突破。用这些 bar 可计算因素过滤后，PF 和最大回撤改善明显。</p>
+        {feature_summary_table(trades, BEST_LABEL)}
+      </div>
+      <div class="rule-panel">
+        <h3>改进规则方向</h3>
+        <ul>
+          <li>要求更强位移：displacement_atr 从 1.2 提高到 1.6-1.8。</li>
+          <li>要求成交量确认：volume_z_60 提高到 0.5 时，防守候选 PF 明显提高。</li>
+          <li>要求更低效率震荡：range_efficiency 收紧到 0.10 可降低假突破。</li>
+          <li>保留结构止损：止损仍放在位移 K 线低点下方，失败立即离场。</li>
+        </ul>
+      </div>
+    </div>
+    <h3>亏损过滤候选对比</h3>
+    {html_table(pd.DataFrame([best, lossfilter, loweff]), [
+        ("label", "候选", "label"),
+        ("trades", "交易数", "int"),
+        ("net_points", "净点数", "num"),
+        ("profit_factor", "PF", "num"),
+        ("win_rate", "胜率", "pct"),
+        ("payoff_ratio", "盈亏比", "num"),
+        ("expectancy_points", "期望/笔", "num"),
+        ("max_drawdown_points", "最大DD", "num"),
+        ("net_to_drawdown", "净值/DD", "num"),
+        ("positive_90d_rate", "90日正收益", "pct"),
+        ("worst_90d_points", "最差90日", "signed"),
+    ], class_name="compact-table")}
+    <h3>45m loss-filter 搜索中的代表结果</h3>
+    {search_result_table(lossfilter_full, [
+        "regime_breakout_lb45_w10_eff0.25_disp1.8_body0.55_vol0.5_us_late_long_break_bar_rr2.5_h180",
+        "regime_breakout_lb45_w10_eff0.1_disp1.6_body0.55_vol0_us_late_long_break_bar_rr2.5_h180",
+        "regime_breakout_lb45_w10_eff0.1_disp2_body0.55_vol0.5_us_late_long_break_bar_rr2_h180",
+    ])}
+    <div class="callout warn-callout">
+      <h3>结论</h3>
+      <p>亏损交易确实能教会策略如何防守：45m 2.5R loss-filter 把最大回撤从 <b>{fmt_num(best["max_drawdown_points"])}</b> 降到 <b>{fmt_num(lossfilter["max_drawdown_points"])}</b>，PF 从 <b>{fmt_num(best["profit_factor"], 3)}</b> 提高到 <b>{fmt_num(lossfilter["profit_factor"], 3)}</b>，90日正收益率从 <b>{fmt_pct(best["positive_90d_rate"])}</b> 提高到 <b>{fmt_pct(lossfilter["positive_90d_rate"])}</b>。代价是净点数从 <b>{fmt_num(best["net_points"])}</b> 降到 <b>{fmt_num(lossfilter["net_points"])}</b>、交易数从 <b>{fmt_int(best["trades"])}</b> 降到 <b>{fmt_int(lossfilter["trades"])}</b>。因此当前最合理的处理是：主策略保持 45m 2.5R balanced，防守过滤版本作为降风险版本继续跟踪。</p>
+    </div>
     """
 
     equity_body = f"""
@@ -1090,7 +1281,7 @@ def render_report(
       {horizontal_bars("最佳候选离场原因占比", exit_labels, exit_values, suffix="%")}
       <div class="rule-panel">
         <h3>离场结构解读</h3>
-        <p>主候选约 {fmt_pct(best["target_exit_share"])} 触发 3R 目标，约 {fmt_pct(best["stop_exit_share"])} 触发结构止损，约 {fmt_pct(best["timeout_exit_share"])} 超时离场。系统的正期望主要来自 3R 目标带来的单笔盈利厚度，而不是高胜率。</p>
+        <p>主候选约 {fmt_pct(best["target_exit_share"])} 触发 2.5R 目标，约 {fmt_pct(best["stop_exit_share"])} 触发结构止损，约 {fmt_pct(best["timeout_exit_share"])} 超时离场。系统的正期望主要来自固定 R 目标带来的单笔盈利厚度，而不是高胜率。</p>
         <p>最大连续亏损为 {fmt_int(best["max_losing_streak"])} 笔，因此实盘验证需要关注仓位、日内亏损限制和是否出现连续小亏后放弃规则的问题。</p>
       </div>
     </div>
@@ -1154,9 +1345,15 @@ def render_report(
       <code>{escape(ROLLING90_PATH.relative_to(ROOT_DIR))}</code>
       <code>{escape(ROLLING180_PATH.relative_to(ROOT_DIR))}</code>
       <code>{escape(LIGHTGLOW_TRADES_PATH.relative_to(ROOT_DIR))}</code>
+      <code>{escape(SUB45_LOWR_FULL_SAMPLE_PATH.relative_to(ROOT_DIR))}</code>
+      <code>{escape(MID35_40_LOWR_FULL_SAMPLE_PATH.relative_to(ROOT_DIR))}</code>
+      <code>{escape(LOSSFILTER_45_FULL_SAMPLE_PATH.relative_to(ROOT_DIR))}</code>
       <p><b>配套 Markdown</b></p>
       <code>reports/NQ-2010-2026-stable-strategy-search-final.md</code>
       <code>reports/NQ-regime-transition-readiness-audit.md</code>
+      <code>reports/NQ-regime-transition-sub45-lowr-search.md</code>
+      <code>reports/NQ-regime-transition-35-40-lowr-search.md</code>
+      <code>reports/NQ-regime-transition-45m-lossfilter-search.md</code>
     </div>
     """
 
@@ -1409,7 +1606,7 @@ def render_report(
     <header class="hero">
       <p class="kicker">NQ 1m Regime Transition Strategy Report</p>
       <h1>震荡结束、趋势起步：NQ 稳定盈利候选策略报告</h1>
-      <p class="hero-summary">本报告汇总 2010-2026 NQ 1分钟 bar 回测审计。新一轮针对 60m 3R 的邻域优化后，当前更强的低频趋势候选是 45 分钟震荡压缩后的上破位移做多策略，固定 2.5R 止盈；它提高了全样本收益和净值/回撤，但仍不满足“每个完整年份至少 1000 笔交易”的硬门槛。</p>
+      <p class="hero-summary">本报告汇总 2010-2026 NQ 1分钟 bar 回测审计。继续缩短区间到 35/40m、降低固定 R 后，没有找到能全面超过 45m 2.5R balanced 的主策略；亏损交易反推的强位移/成交量/低效率过滤能明显降低回撤，但会牺牲总收益和交易数。当前更合理的组合是主策略保持 45m 2.5R，防守版本作为降风险方案继续纸面跟踪。</p>
       <code class="candidate-code">{candidate_code}</code>
       <div class="pills">
         {pill("生成时间", pd.Timestamp.now("UTC").strftime("%Y-%m-%d %H:%M UTC"))}
@@ -1422,6 +1619,8 @@ def render_report(
     {section("年交易次数硬门槛", frequency_body, "2010 和 2026 是不完整年份；硬门槛只检查 2011-2025 完整自然年。")}
     {section("策略定义", setup_body, "所有入场、过滤和出场条件都可由 OHLCV bar 数据计算。")}
     {section("候选比较与稳定门槛", comparison_body)}
+    {section("更短区间与更低R搜索", lowr_body, "本节回答：继续降低区间范围、降低盈亏比是否能找到更好的主策略。")}
+    {section("从亏损交易学习", loss_learning_body, "本节只使用 bar 可计算特征来解释亏损，并测试可执行的防守过滤。")}
     {section("累计收益与回撤", equity_body)}
     {section("逐年表现", yearly_body)}
     {section("月度热力图", monthly_body)}
