@@ -11,12 +11,18 @@ import pandas as pd
 from tradingagents.backtesting.short_patterns import BacktestCosts
 from tradingagents.evolution import EvolutionConfig, run_evolution
 from tradingagents.evolution.backtest import validate_rule_on_segment
-from tradingagents.evolution.features import prepare_evolution_features
+from tradingagents.evolution.features import prepare_evolution_features, summarize_segment_features
 from tradingagents.evolution.llm import MockRuleGenerator
 from tradingagents.evolution.memory import EvolutionMemory
 from tradingagents.evolution.nq_data import load_continuous_nq_bars
 from tradingagents.evolution.rules import EntryCondition, TradingRule, parse_rule_payload, rule_signature
 from tradingagents.evolution.segmentation import SegmentConfig, segment_market
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from scripts.backtest_nq_evolved_rules import run_backtest
 
 
 FIXTURE = Path("tests/fixtures/nq_evolution_llm.jsonl")
@@ -56,6 +62,26 @@ def _synthetic_nq_bars(rows: int = 140, start: str = "2020-01-02 13:30:00+00:00"
                 "Volume": 100 + index % 11,
             }
         )
+    return pd.DataFrame(bars)
+
+
+def _synthetic_one_way_nq_bars(rows: int = 80, start: str = "2020-01-02 00:00:00+00:00") -> pd.DataFrame:
+    ts = pd.date_range(start, periods=rows, freq="min")
+    bars = []
+    price = 9000.0
+    for timestamp in ts:
+        bars.append(
+            {
+                "ts": timestamp,
+                "symbol": "NQH0",
+                "Open": price,
+                "High": price + 2.0,
+                "Low": price - 0.5,
+                "Close": price + 1.0,
+                "Volume": 100,
+            }
+        )
+        price += 1.25
     return pd.DataFrame(bars)
 
 
@@ -109,6 +135,43 @@ def test_price_volume_features_are_available_for_llm_rules() -> None:
     assert "volume_breakout_signal_count" in summary
 
 
+def test_tradingview_chart_structure_features_are_available_for_llm_rules() -> None:
+    features = prepare_evolution_features(_synthetic_nq_bars(220))
+    expected_columns = {
+        "macd_hist",
+        "adx_14",
+        "plus_di_14",
+        "minus_di_14",
+        "cci_20",
+        "stoch_rsi_k",
+        "donchian_20_position",
+        "keltner_position",
+        "supertrend_direction",
+        "vfi_130",
+        "vfi_signal_5",
+        "vfi_hist",
+        "vfi_cross_up",
+        "vfi_cross_down",
+        "vfi_zero_cross_up",
+        "vfi_zero_cross_down",
+        "vfi_bullish_divergence",
+        "vfi_bearish_divergence",
+        "eqh_signal",
+        "eql_signal",
+        "liquidity_pool_signal",
+        "range_100_position",
+        "range_100_width_atr",
+        "demand_zone_retest",
+        "supply_zone_retest",
+        "order_block_retest_signal",
+    }
+    assert expected_columns <= set(features.columns)
+    summary = summarize_segment_features(features.iloc[150:220])
+    assert "vfi_hist_mean" in summary
+    assert "eqh_signal_count" in summary
+    assert "range_100_position_last" in summary
+
+
 def test_rule_signature_is_stable_for_reordered_conditions() -> None:
     left = TradingRule(
         pattern_name="a",
@@ -145,6 +208,8 @@ def test_llm_payload_normalization_accepts_common_schema_drift() -> None:
                 "bullish_volume_divergence_count >= 1",
                 {"feature": "relative_volume", "operator": "greater_than", "value": 1.8},
                 {"feature": "vwap_z", "operator": "above", "value": 1.0},
+                {"feature": "rsi_14", "operator": ">=", "value": "40"},
+                {"feature": "vfi", "operator": ">", "value": "0"},
             ],
             "entry_timing": "enter_at_next_open",
             "stop_points": 8,
@@ -168,8 +233,72 @@ def test_llm_payload_normalization_accepts_common_schema_drift() -> None:
         "bullish_volume_divergence",
         "relative_volume_20",
         "vwap_distance_z",
+        "rsi_14",
+        "vfi_130",
     ]
+    assert rule.entry_conditions[-2].value == 40.0
+    assert rule.entry_conditions[-1].value == 0.0
     assert rule.expected_failure_modes == ["trend continuation"]
+
+
+def test_event_count_conditions_normalize_to_bar_level_presence() -> None:
+    rule = parse_rule_payload(
+        {
+            "pattern_name": "count summary event",
+            "hypothesis": "LLM may emit segment count thresholds that need executable bar-level semantics.",
+            "direction": "short",
+            "entry_conditions": [
+                "low_volume_pullback_count >= 5",
+                "bearish_volume_divergence >= 3",
+                "engulfing_count >= 2",
+            ],
+        }
+    )
+
+    assert [condition.model_dump() for condition in rule.entry_conditions] == [
+        {"feature": "low_volume_pullback", "operator": ">=", "value": 1},
+        {"feature": "bearish_volume_divergence", "operator": ">=", "value": 1},
+        {"feature": "engulfing", "operator": "!=", "value": 0},
+    ]
+
+
+def test_condition_mask_supports_feature_to_feature_comparison() -> None:
+    rule = parse_rule_payload(
+        {
+            "pattern_name": "di comparison",
+            "hypothesis": "LLM can compare one indicator column against another.",
+            "direction": "long",
+            "entry_conditions": [{"feature": "plus_di_14", "operator": ">", "value": "minus_di_14"}],
+        }
+    )
+    from tradingagents.evolution.rules import condition_mask
+
+    frame = pd.DataFrame({"plus_di_14": [10.0, 5.0, 8.0], "minus_di_14": [7.0, 6.0, 8.0]})
+    assert condition_mask(frame, rule).tolist() == [True, False, False]
+
+
+def test_empty_entry_conditions_can_recover_from_invalid_if_guards() -> None:
+    rule = parse_rule_payload(
+        {
+            "pattern_name": "invalid-if recovery",
+            "hypothesis": "Some LLM responses put the mechanical setup in invalid_if only.",
+            "direction": "short",
+            "entry_conditions": [],
+            "invalid_if": [
+                "regime != range",
+                "adx_14_last > 18",
+                "boll_position_last < 0.98",
+                "z_30_last < 1.5",
+            ],
+        }
+    )
+
+    assert [condition.model_dump() for condition in rule.entry_conditions] == [
+        {"feature": "regime", "operator": "==", "value": "range"},
+        {"feature": "adx_14", "operator": "<=", "value": 18.0},
+        {"feature": "boll_position", "operator": ">=", "value": 0.98},
+        {"feature": "z_30", "operator": ">=", "value": 1.5},
+    ]
 
 
 def test_backtest_uses_next_open_validation_bars_and_stop_first() -> None:
@@ -222,6 +351,74 @@ def test_backtest_uses_next_open_validation_bars_and_stop_first() -> None:
     assert result.trade_rows[0]["entry_price"] == 100.0
     assert result.trade_rows[0]["exit_reason"] == "stop_loss_ambiguous"
     assert result.trade_rows[0]["net_points"] == -4.0
+
+
+def test_evolved_rule_oos_backtest_is_not_capped_by_validation_trade_limit(tmp_path: Path) -> None:
+    db_path = tmp_path / "memory.sqlite"
+    csv_path = tmp_path / "source.csv"
+    summary_path = tmp_path / "summary.csv"
+    trades_path = tmp_path / "trades.csv"
+    report_path = tmp_path / "report.html"
+    write_db = tmp_path / "memory-oos.sqlite"
+    source = _synthetic_one_way_nq_bars().rename(
+        columns={"ts": "ts_event", "Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"}
+    )
+    source.to_csv(csv_path, index=False)
+    rule = TradingRule(
+        pattern_name="always long target",
+        hypothesis="Synthetic rule should trade repeatedly across the OOS window.",
+        direction="long",
+        entry_conditions=[EntryCondition(feature="minute_of_day", operator=">=", value=0)],
+        stop_points=3.0,
+        target_points=1.0,
+        max_hold_bars=1,
+        validation_bars=10,
+        max_trades_per_validation=1,
+    )
+    signature = rule_signature(rule)
+    memory = EvolutionMemory(db_path)
+    try:
+        memory.record_rule(
+            rule_id="rule_synthetic",
+            signature=signature,
+            rule=rule,
+            analysis_id="analysis",
+            segment_id="segment",
+        )
+    finally:
+        memory.close()
+
+    result = run_backtest(
+        memory_db=db_path,
+        start_date="2020-01-02",
+        end_date="2020-01-03",
+        cache=tmp_path / "bars-cache.pkl",
+        source_csv=csv_path,
+        source_zip=None,
+        summary_output=summary_path,
+        trades_output=trades_path,
+        report=report_path,
+        min_trades=10,
+        gate_win_rate=0.53,
+        gate_profit_factor=1.0,
+        record_memory=True,
+        write_db=write_db,
+        max_trades_per_rule=None,
+        costs=BacktestCosts(slippage_ticks_per_side=0, commission_per_contract=0),
+    )
+
+    summary = pd.read_csv(summary_path)
+    trades = pd.read_csv(trades_path)
+    assert result["passing_rules"] == 1
+    assert int(summary.loc[0, "trades"]) > rule.max_trades_per_validation
+    assert bool(summary.loc[0, "passes_gate"])
+    assert len(trades) == int(summary.loc[0, "trades"])
+    assert report_path.exists()
+    with sqlite3.connect(write_db) as connection:
+        validation_count = connection.execute("SELECT COUNT(*) FROM validations").fetchone()[0]
+        note_count = connection.execute("SELECT COUNT(*) FROM experience_notes").fetchone()[0]
+    assert validation_count == 1
+    assert note_count >= 1
 
 
 def test_memory_records_full_chain_and_limits_prompt_state(tmp_path: Path) -> None:

@@ -33,6 +33,29 @@ ALLOWED_FEATURES = {
     "volume_price_trend_slope_20",
     "rsi_14",
     "boll_position",
+    "macd_line",
+    "macd_signal",
+    "macd_hist",
+    "adx_14",
+    "plus_di_14",
+    "minus_di_14",
+    "di_spread_14",
+    "cci_20",
+    "stoch_rsi_k",
+    "stoch_rsi_d",
+    "donchian_20_position",
+    "keltner_position",
+    "supertrend_direction",
+    "supertrend_flip",
+    "vfi_130",
+    "vfi_signal_5",
+    "vfi_hist",
+    "vfi_cross_up",
+    "vfi_cross_down",
+    "vfi_zero_cross_up",
+    "vfi_zero_cross_down",
+    "vfi_bullish_divergence",
+    "vfi_bearish_divergence",
     "doji",
     "pin_bar",
     "engulfing",
@@ -50,9 +73,56 @@ ALLOWED_FEATURES = {
     "choch_signal",
     "bos_signal",
     "fvg_signal",
+    "eqh_signal",
+    "eql_signal",
+    "liquidity_pool_signal",
+    "range_100_position",
+    "range_100_width_atr",
+    "demand_zone_retest",
+    "supply_zone_retest",
+    "order_block_retest_signal",
+    "distance_to_demand_zone_atr",
+    "distance_to_supply_zone_atr",
     "regime",
     "minute_of_day",
 }
+
+BINARY_EVENT_FEATURES = {
+    "doji",
+    "pin_bar",
+    "inside_bar",
+    "outside_bar",
+    "displacement_candle",
+    "volume_breakout_signal",
+    "low_volume_pullback",
+    "bullish_volume_divergence",
+    "bearish_volume_divergence",
+    "vfi_cross_up",
+    "vfi_cross_down",
+    "vfi_zero_cross_up",
+    "vfi_zero_cross_down",
+    "vfi_bullish_divergence",
+    "vfi_bearish_divergence",
+    "supertrend_flip",
+    "eqh_signal",
+    "eql_signal",
+    "demand_zone_retest",
+    "supply_zone_retest",
+}
+
+DIRECTIONAL_EVENT_FEATURES = {
+    "engulfing",
+    "pd_fade_signal",
+    "pd_continue_signal",
+    "sweep_signal",
+    "choch_signal",
+    "bos_signal",
+    "fvg_signal",
+    "liquidity_pool_signal",
+    "order_block_retest_signal",
+}
+
+EVENT_FEATURES = BINARY_EVENT_FEATURES | DIRECTIONAL_EVENT_FEATURES
 
 
 class EntryCondition(BaseModel):
@@ -125,6 +195,8 @@ def normalize_rule_payload(payload: dict[str, Any]) -> dict[str, Any]:
     )
     normalized["entry_timing"] = _normalize_entry_timing(normalized.get("entry_timing"))
     normalized["entry_conditions"] = _normalize_conditions(normalized.get("entry_conditions"))
+    if not normalized["entry_conditions"]:
+        normalized["entry_conditions"] = _conditions_from_invalid_if(normalized.get("invalid_if"))
     for key, default in [("stop_points", 12.0), ("target_points", 24.0), ("max_hold_bars", 60), ("validation_bars", 120), ("max_trades_per_validation", 3), ("confidence", 0.0)]:
         if normalized.get(key) in {None, ""}:
             normalized[key] = default
@@ -169,12 +241,15 @@ def condition_mask(frame: pd.DataFrame, rule: TradingRule) -> pd.Series:
             return pd.Series(False, index=frame.index)
         values = frame[condition.feature]
         if isinstance(condition.value, str):
-            left = values.astype(str)
-            right = str(condition.value)
-            if condition.operator == "==":
-                current = left == right
+            right_feature = _feature_alias(condition.value)
+            if right_feature in frame.columns and condition.operator in {"<", "<=", ">", ">=", "==", "!="}:
+                left = pd.to_numeric(values, errors="coerce")
+                right = pd.to_numeric(frame[right_feature], errors="coerce")
+                current = _numeric_compare(left, condition.operator, right)
+            elif condition.operator == "==":
+                current = values.astype(str) == str(condition.value)
             elif condition.operator == "!=":
-                current = left != right
+                current = values.astype(str) != str(condition.value)
             else:
                 raise ValueError(f"Operator {condition.operator} is invalid for string feature {condition.feature}")
         else:
@@ -201,7 +276,7 @@ def direction_for_row(row: pd.Series, rule: TradingRule) -> int:
     return 1
 
 
-def _numeric_compare(left: pd.Series, operator: str, right: float) -> pd.Series:
+def _numeric_compare(left: pd.Series, operator: str, right: float | pd.Series) -> pd.Series:
     if operator == "<":
         return left < right
     if operator == "<=":
@@ -232,7 +307,10 @@ def _normalize_conditions(value: Any) -> list[dict[str, Any]]:
             condition = dict(item)
         else:
             continue
-        feature = str(condition.get("feature", "")).strip()
+        raw_feature = str(condition.get("feature", "")).strip()
+        compact_raw_feature = raw_feature.lower().replace(" ", "_").replace("-", "_")
+        was_count_summary = compact_raw_feature.endswith("_count")
+        feature = raw_feature
         if feature not in ALLOWED_FEATURES:
             feature = _feature_alias(feature)
         operator = str(condition.get("operator", "==")).strip()
@@ -247,9 +325,67 @@ def _normalize_conditions(value: Any) -> list[dict[str, Any]]:
             operator = "<="
         elif operator in {"=", "equals"}:
             operator = "=="
+        value_obj = _normalize_numeric_feature_value(feature, value_obj)
+        feature, operator, value_obj = _normalize_event_condition(feature, operator, value_obj, was_count_summary)
         if feature in ALLOWED_FEATURES and operator in {"<", "<=", ">", ">=", "==", "!="}:
             conditions.append({"feature": feature, "operator": operator, "value": value_obj})
     return conditions
+
+
+def _conditions_from_invalid_if(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    inverted: list[str | dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        condition = _condition_from_text(item)
+        if condition is None:
+            continue
+        inverted_operator = _invert_operator(str(condition.get("operator", "")))
+        if not inverted_operator:
+            continue
+        inverted.append(
+            {
+                "feature": condition.get("feature"),
+                "operator": inverted_operator,
+                "value": condition.get("value"),
+            }
+        )
+    return _normalize_conditions(inverted)
+
+
+def _invert_operator(operator: str) -> str:
+    return {
+        "<": ">=",
+        "<=": ">",
+        ">": "<=",
+        ">=": "<",
+        "==": "!=",
+        "!=": "==",
+    }.get(operator, "")
+
+
+def _normalize_numeric_feature_value(feature: str, value: Any) -> Any:
+    if feature in {"regime", "pd_zone"}:
+        return value
+    numeric = _numeric_condition_value(value)
+    return numeric if numeric is not None else value
+
+
+def _normalize_event_condition(feature: str, operator: str, value: Any, was_count_summary: bool) -> tuple[str, str, Any]:
+    if feature not in EVENT_FEATURES:
+        return feature, operator, value
+    numeric_value = _numeric_condition_value(value)
+    if numeric_value is None:
+        return feature, operator, value
+    impossible_positive_threshold = operator in {">", ">=", "=="} and numeric_value > 1
+    count_presence_threshold = was_count_summary and operator in {">", ">=", "=="} and numeric_value > 0
+    if not impossible_positive_threshold and not count_presence_threshold:
+        return feature, operator, value
+    if feature in DIRECTIONAL_EVENT_FEATURES:
+        return feature, "!=", 0
+    return feature, ">=", 1
 
 
 def _condition_from_text(text: str) -> dict[str, Any] | None:
@@ -268,6 +404,13 @@ def _coerce_condition_value(value: str) -> float | str:
         return float(stripped)
     except ValueError:
         return stripped
+
+
+def _numeric_condition_value(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _feature_alias(feature: str) -> str:
@@ -290,6 +433,26 @@ def _feature_alias(feature: str) -> str:
         "bullish_obv_divergence": "bullish_volume_divergence",
         "bearish_obv_divergence": "bearish_volume_divergence",
         "vwap_z": "vwap_distance_z",
+        "macd": "macd_line",
+        "macdh": "macd_hist",
+        "adx": "adx_14",
+        "plus_di": "plus_di_14",
+        "minus_di": "minus_di_14",
+        "cci": "cci_20",
+        "stochrsi_k": "stoch_rsi_k",
+        "stoch_rsi": "stoch_rsi_k",
+        "donchian_position": "donchian_20_position",
+        "vfi": "vfi_130",
+        "vfi_signal": "vfi_signal_5",
+        "vfi_flow": "vfi_hist",
+        "vfi_lb": "vfi_130",
+        "eqh": "eqh_signal",
+        "eql": "eql_signal",
+        "order_block": "order_block_retest_signal",
+        "ob_retest": "order_block_retest_signal",
+        "demand_retest": "demand_zone_retest",
+        "supply_retest": "supply_zone_retest",
+        "range_position": "range_100_position",
     }
     return aliases.get(compact, compact)
 

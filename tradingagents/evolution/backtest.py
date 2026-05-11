@@ -54,12 +54,75 @@ def validate_rule_on_segment(
     if len(frame) < rule.max_hold_bars + 2:
         return _empty_result(validation_id, rule_id, signature, analysis_segment_id, validation_segment.segment_id, "insufficient_bars")
 
+    rows = _run_rule_trades(
+        rule=rule,
+        signature=signature,
+        validation_id=validation_id,
+        frame=frame,
+        costs=costs,
+        max_trades=rule.max_trades_per_validation,
+    )
+    if not rows:
+        return _empty_result(validation_id, rule_id, signature, analysis_segment_id, validation_segment.segment_id, "no_trades")
+    return _summarize_rows(validation_id, rule_id, signature, analysis_segment_id, validation_segment.segment_id, rows)
+
+
+def backtest_rule_on_features(
+    *,
+    rule: TradingRule,
+    rule_id: str,
+    signature: str,
+    features: pd.DataFrame,
+    analysis_segment_id: str = "learned_memory",
+    validation_segment_id: str = "full_oos",
+    validation_id: str | None = None,
+    start_index: int = 0,
+    end_index: int | None = None,
+    max_trades: int | None = None,
+    costs: BacktestCosts | None = None,
+) -> ValidationResult:
+    """Backtest a learned rule over a full feature window.
+
+    Unlike ``validate_rule_on_segment``, this function is intended for
+    out-of-sample audits and does not apply ``max_trades_per_validation``
+    unless the caller explicitly passes ``max_trades``.
+    """
+    costs = costs or BacktestCosts()
+    end = len(features) if end_index is None else min(int(end_index), len(features))
+    start = max(0, int(start_index))
+    frame = features.iloc[start:end].reset_index(drop=True).copy()
+    validation_id = validation_id or f"oos_{signature}_{validation_segment_id}"
+    if len(frame) < rule.max_hold_bars + 2:
+        return _empty_result(validation_id, rule_id, signature, analysis_segment_id, validation_segment_id, "insufficient_bars")
+
+    rows = _run_rule_trades(
+        rule=rule,
+        signature=signature,
+        validation_id=validation_id,
+        frame=frame,
+        costs=costs,
+        max_trades=max_trades,
+    )
+    if not rows:
+        return _empty_result(validation_id, rule_id, signature, analysis_segment_id, validation_segment_id, "no_trades")
+    return _summarize_rows(validation_id, rule_id, signature, analysis_segment_id, validation_segment_id, rows)
+
+
+def _run_rule_trades(
+    *,
+    rule: TradingRule,
+    signature: str,
+    validation_id: str,
+    frame: pd.DataFrame,
+    costs: BacktestCosts,
+    max_trades: int | None,
+) -> list[dict]:
     mask = condition_mask(frame, rule)
     signal_indexes = [int(index) for index in frame.index[mask]]
     rows: list[dict] = []
     next_available = 0
     for signal_index in signal_indexes:
-        if len(rows) >= rule.max_trades_per_validation:
+        if max_trades is not None and len(rows) >= max_trades:
             break
         entry_index = signal_index + 1
         if entry_index < next_available or entry_index >= len(frame):
@@ -102,7 +165,7 @@ def validate_rule_on_segment(
         net_points = gross_points - costs.round_trip_cost_points
         rows.append(
             {
-                "trade_id": f"trade_{validation_id}_{len(rows):03d}",
+                "trade_id": f"trade_{validation_id}_{len(rows):06d}",
                 "validation_id": validation_id,
                 "rule_signature": signature,
                 "entry_ts": str(frame.at[entry_index, "ts"]),
@@ -113,13 +176,12 @@ def validate_rule_on_segment(
                 "gross_points": float(gross_points),
                 "net_points": float(net_points),
                 "exit_reason": exit_reason,
+                "entry_index": int(entry_index),
+                "exit_index": int(realized_exit_index),
             }
         )
         next_available = realized_exit_index + 1
-
-    if not rows:
-        return _empty_result(validation_id, rule_id, signature, analysis_segment_id, validation_segment.segment_id, "no_trades")
-    return _summarize_rows(validation_id, rule_id, signature, analysis_segment_id, validation_segment.segment_id, rows)
+    return rows
 
 
 def _summarize_rows(

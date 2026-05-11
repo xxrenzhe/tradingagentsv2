@@ -90,8 +90,10 @@ def prepare_evolution_features(bars: pd.DataFrame) -> pd.DataFrame:
     std = close.rolling(20, min_periods=10).std()
     data["boll_position"] = (close - middle) / (2 * std).replace(0, np.nan)
 
+    data = _add_tradingview_style_indicators(data)
     data = _add_candlestick_features(data)
     data = _add_lightglow_ict_features(data)
+    data = _add_chart_structure_features(data)
     data = _add_regime_features(data)
     return data.reset_index(drop=True)
 
@@ -119,6 +121,26 @@ def summarize_segment_features(frame: pd.DataFrame) -> dict[str, object]:
         "vwap_distance_z",
         "rsi_14",
         "boll_position",
+        "macd_line",
+        "macd_signal",
+        "macd_hist",
+        "adx_14",
+        "plus_di_14",
+        "minus_di_14",
+        "di_spread_14",
+        "cci_20",
+        "stoch_rsi_k",
+        "stoch_rsi_d",
+        "donchian_20_position",
+        "keltner_position",
+        "supertrend_direction",
+        "vfi_130",
+        "vfi_signal_5",
+        "vfi_hist",
+        "range_100_position",
+        "range_100_width_atr",
+        "distance_to_demand_zone_atr",
+        "distance_to_supply_zone_atr",
     ]
     summary: dict[str, object] = {
         "start_ts": str(frame["ts"].iloc[0]),
@@ -149,10 +171,23 @@ def summarize_segment_features(frame: pd.DataFrame) -> dict[str, object]:
         "low_volume_pullback",
         "bullish_volume_divergence",
         "bearish_volume_divergence",
+        "vfi_cross_up",
+        "vfi_cross_down",
+        "vfi_zero_cross_up",
+        "vfi_zero_cross_down",
+        "vfi_bullish_divergence",
+        "vfi_bearish_divergence",
         "sweep_signal",
         "choch_signal",
         "bos_signal",
         "fvg_signal",
+        "eqh_signal",
+        "eql_signal",
+        "liquidity_pool_signal",
+        "demand_zone_retest",
+        "supply_zone_retest",
+        "order_block_retest_signal",
+        "supertrend_flip",
     ]:
         if column in frame:
             summary[f"{column}_count"] = int((pd.to_numeric(frame[column], errors="coerce").fillna(0) != 0).sum())
@@ -179,6 +214,86 @@ def _rsi(close: pd.Series, period: int) -> pd.Series:
     loss = (-delta.clip(upper=0)).rolling(period, min_periods=period // 2).mean()
     rs = gain / loss.replace(0, np.nan)
     return 100 - (100 / (1 + rs))
+
+
+def _add_tradingview_style_indicators(data: pd.DataFrame) -> pd.DataFrame:
+    frame = data.copy()
+    high = frame["High"]
+    low = frame["Low"]
+    close = frame["Close"]
+    volume = frame["Volume"].fillna(0)
+    typical_price = (high + low + close) / 3
+
+    ema_12 = close.ewm(span=12, adjust=False).mean()
+    ema_26 = close.ewm(span=26, adjust=False).mean()
+    frame["macd_line"] = ema_12 - ema_26
+    frame["macd_signal"] = frame["macd_line"].ewm(span=9, adjust=False).mean()
+    frame["macd_hist"] = frame["macd_line"] - frame["macd_signal"]
+
+    plus_dm = (high.diff()).where((high.diff() > -low.diff()) & (high.diff() > 0), 0.0)
+    minus_dm = (-low.diff()).where((-low.diff() > high.diff()) & (-low.diff() > 0), 0.0)
+    tr_14 = frame["atr_14"].replace(0, np.nan)
+    frame["plus_di_14"] = 100 * plus_dm.rolling(14, min_periods=7).mean() / tr_14
+    frame["minus_di_14"] = 100 * minus_dm.rolling(14, min_periods=7).mean() / tr_14
+    frame["di_spread_14"] = frame["plus_di_14"] - frame["minus_di_14"]
+    dx = 100 * (frame["plus_di_14"] - frame["minus_di_14"]).abs() / (frame["plus_di_14"] + frame["minus_di_14"]).replace(0, np.nan)
+    frame["adx_14"] = dx.rolling(14, min_periods=7).mean()
+
+    typical_mean = typical_price.rolling(20, min_periods=10).mean()
+    typical_mad = (typical_price - typical_mean).abs().rolling(20, min_periods=10).mean()
+    frame["cci_20"] = (typical_price - typical_mean) / (0.015 * typical_mad.replace(0, np.nan))
+
+    rsi = frame["rsi_14"]
+    rsi_low = rsi.rolling(14, min_periods=7).min()
+    rsi_high = rsi.rolling(14, min_periods=7).max()
+    stoch_rsi = 100 * (rsi - rsi_low) / (rsi_high - rsi_low).replace(0, np.nan)
+    frame["stoch_rsi_k"] = stoch_rsi.rolling(3, min_periods=1).mean()
+    frame["stoch_rsi_d"] = frame["stoch_rsi_k"].rolling(3, min_periods=1).mean()
+
+    donchian_high = high.rolling(20, min_periods=10).max()
+    donchian_low = low.rolling(20, min_periods=10).min()
+    frame["donchian_20_position"] = (close - donchian_low) / (donchian_high - donchian_low).replace(0, np.nan)
+    keltner_mid = close.ewm(span=20, adjust=False).mean()
+    keltner_width = 1.5 * frame["atr_14"].replace(0, np.nan)
+    frame["keltner_position"] = (close - keltner_mid) / keltner_width
+
+    supertrend_mid = (high + low) / 2
+    supertrend_width = 3.0 * frame["atr_14"].replace(0, np.nan)
+    upper_band = supertrend_mid + supertrend_width
+    lower_band = supertrend_mid - supertrend_width
+    direction = pd.Series(0, index=frame.index, dtype="float64")
+    direction = direction.mask(close > upper_band.shift(1), 1)
+    direction = direction.mask(close < lower_band.shift(1), -1)
+    direction = direction.replace(0, np.nan).ffill().fillna(0)
+    frame["supertrend_direction"] = direction
+    frame["supertrend_flip"] = direction.ne(direction.shift()).fillna(False).astype(int)
+
+    frame = _add_vfi_features(frame, typical_price, volume)
+    return frame
+
+
+def _add_vfi_features(frame: pd.DataFrame, typical_price: pd.Series, volume: pd.Series) -> pd.DataFrame:
+    result = frame.copy()
+    length = 130
+    coef = 0.2
+    volume_coef = 2.5
+    price_change = typical_price.diff()
+    inter = np.log(typical_price.replace(0, np.nan)).diff().rolling(30, min_periods=10).std()
+    cutoff = coef * inter * result["Close"]
+    average_volume = volume.rolling(length, min_periods=20).mean().shift(1)
+    capped_volume = pd.concat([volume, average_volume * volume_coef], axis=1).min(axis=1)
+    money_flow_volume = capped_volume.where(price_change > cutoff, 0.0)
+    money_flow_volume = money_flow_volume.where(price_change >= -cutoff, -capped_volume)
+    result["vfi_130"] = money_flow_volume.rolling(length, min_periods=20).sum() / average_volume.replace(0, np.nan)
+    result["vfi_signal_5"] = result["vfi_130"].ewm(span=5, adjust=False).mean()
+    result["vfi_hist"] = result["vfi_130"] - result["vfi_signal_5"]
+    result["vfi_cross_up"] = ((result["vfi_130"] > result["vfi_signal_5"]) & (result["vfi_130"].shift(1) <= result["vfi_signal_5"].shift(1))).astype(int)
+    result["vfi_cross_down"] = ((result["vfi_130"] < result["vfi_signal_5"]) & (result["vfi_130"].shift(1) >= result["vfi_signal_5"].shift(1))).astype(int)
+    result["vfi_zero_cross_up"] = ((result["vfi_130"] > 0) & (result["vfi_130"].shift(1) <= 0)).astype(int)
+    result["vfi_zero_cross_down"] = ((result["vfi_130"] < 0) & (result["vfi_130"].shift(1) >= 0)).astype(int)
+    result["vfi_bullish_divergence"] = ((result["Close"] < result["Close"].shift(30)) & (result["vfi_130"] > result["vfi_130"].shift(30))).astype(int)
+    result["vfi_bearish_divergence"] = ((result["Close"] > result["Close"].shift(30)) & (result["vfi_130"] < result["vfi_130"].shift(30))).astype(int)
+    return result
 
 
 def _add_candlestick_features(data: pd.DataFrame) -> pd.DataFrame:
@@ -265,6 +380,45 @@ def _add_lightglow_ict_features(data: pd.DataFrame) -> pd.DataFrame:
         & (body_share.shift(1) >= 0.55)
     )
     frame["fvg_signal"] = np.select([bullish_fvg, bearish_fvg], [BULLISH, BEARISH], default=0).astype(np.int8)
+    return frame
+
+
+def _add_chart_structure_features(data: pd.DataFrame) -> pd.DataFrame:
+    frame = data.copy()
+    high = frame["High"]
+    low = frame["Low"]
+    close = frame["Close"]
+    atr = frame["atr_30"].replace(0, np.nan)
+
+    tolerance = (0.15 * atr).clip(lower=0.5)
+    prior_high_50 = high.rolling(50, min_periods=20).max().shift(1)
+    prior_low_50 = low.rolling(50, min_periods=20).min().shift(1)
+    frame["eqh_signal"] = ((high.sub(prior_high_50).abs() <= tolerance) & (close < prior_high_50)).fillna(False).astype(int)
+    frame["eql_signal"] = ((low.sub(prior_low_50).abs() <= tolerance) & (close > prior_low_50)).fillna(False).astype(int)
+    frame["liquidity_pool_signal"] = np.select([frame["eql_signal"].astype(bool), frame["eqh_signal"].astype(bool)], [BULLISH, BEARISH], default=0).astype(np.int8)
+
+    range_high = high.rolling(100, min_periods=30).max().shift(1)
+    range_low = low.rolling(100, min_periods=30).min().shift(1)
+    range_width = range_high - range_low
+    frame["range_100_position"] = (close - range_low) / range_width.replace(0, np.nan)
+    frame["range_100_width_atr"] = range_width / frame["atr_120"].replace(0, np.nan)
+
+    bullish_displacement = (frame["displacement_candle"] == 1) & (close > frame["Open"])
+    bearish_displacement = (frame["displacement_candle"] == 1) & (close < frame["Open"])
+    demand_low = low.where(bullish_displacement).ffill()
+    demand_high = frame[["Open", "Close"]].min(axis=1).where(bullish_displacement).ffill()
+    supply_low = frame[["Open", "Close"]].max(axis=1).where(bearish_displacement).ffill()
+    supply_high = high.where(bearish_displacement).ffill()
+
+    frame["distance_to_demand_zone_atr"] = (close - demand_high) / atr
+    frame["distance_to_supply_zone_atr"] = (supply_low - close) / atr
+    frame["demand_zone_retest"] = ((low <= demand_high) & (close >= demand_low) & demand_low.notna()).fillna(False).astype(int)
+    frame["supply_zone_retest"] = ((high >= supply_low) & (close <= supply_high) & supply_low.notna()).fillna(False).astype(int)
+    frame["order_block_retest_signal"] = np.select(
+        [frame["demand_zone_retest"].astype(bool), frame["supply_zone_retest"].astype(bool)],
+        [BULLISH, BEARISH],
+        default=0,
+    ).astype(np.int8)
     return frame
 
 
