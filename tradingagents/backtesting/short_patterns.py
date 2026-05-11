@@ -5,6 +5,7 @@ from itertools import product
 from math import sqrt
 from typing import Iterable
 
+import numpy as np
 import pandas as pd
 
 
@@ -53,7 +54,7 @@ def prepare_minute_features(bars: pd.DataFrame, microstructure: pd.DataFrame | N
         data[column] = pd.to_numeric(data[column], errors="coerce")
 
     data["return_1m"] = data["Close"].pct_change()
-    data["vwap"] = (data["Close"] * data["Volume"]).cumsum() / data["Volume"].replace(0, pd.NA).cumsum()
+    data["vwap"] = (data["Close"] * data["Volume"]).cumsum() / data["Volume"].replace(0, np.nan).cumsum()
     data["minute_of_day"] = data["ts"].dt.hour * 60 + data["ts"].dt.minute
 
     if microstructure is not None and not microstructure.empty:
@@ -67,7 +68,7 @@ def prepare_minute_features(bars: pd.DataFrame, microstructure: pd.DataFrame | N
             micro["mid_price"] = (micro["bid_px_00"] + micro["ask_px_00"]) / 2
             micro["spread"] = micro["ask_px_00"] - micro["bid_px_00"]
             total_size = micro["bid_sz_00"] + micro["ask_sz_00"]
-            micro["imbalance"] = (micro["bid_sz_00"] - micro["ask_sz_00"]) / total_size.replace(0, pd.NA)
+            micro["imbalance"] = (micro["bid_sz_00"] - micro["ask_sz_00"]) / total_size.replace(0, np.nan)
             micro["depth"] = total_size
             aggregated = (
                 micro.set_index("ts_event")
@@ -148,7 +149,7 @@ def _base_signal(features: pd.DataFrame, spec: StrategySpec) -> pd.Series:
 
     if spec.family == "mean_reversion":
         rolling_mean = close.rolling(spec.lookback).mean()
-        rolling_std = close.rolling(spec.lookback).std().replace(0, pd.NA)
+        rolling_std = close.rolling(spec.lookback).std().replace(0, np.nan)
         z_score = (close - rolling_mean) / rolling_std
         return ((z_score < -spec.threshold).astype(int) - (z_score > spec.threshold).astype(int)).astype(float)
 
@@ -167,7 +168,7 @@ def _base_signal(features: pd.DataFrame, spec: StrategySpec) -> pd.Series:
     if spec.family == "support_reclaim":
         prior_low = features["Low"].rolling(spec.lookback).min().shift(1)
         prior_high = features["High"].rolling(spec.lookback).max().shift(1)
-        range_size = (prior_high - prior_low).replace(0, pd.NA)
+        range_size = (prior_high - prior_low).replace(0, np.nan)
         long_signal = (features["Low"] < prior_low) & (close > prior_low + range_size * spec.threshold)
         short_signal = (features["High"] > prior_high) & (close < prior_high - range_size * spec.threshold)
         return (long_signal.astype(int) - short_signal.astype(int)).astype(float)
@@ -175,7 +176,7 @@ def _base_signal(features: pd.DataFrame, spec: StrategySpec) -> pd.Series:
     if spec.family == "breakout_retest":
         prior_high = features["High"].rolling(spec.lookback).max().shift(2)
         prior_low = features["Low"].rolling(spec.lookback).min().shift(2)
-        range_size = (prior_high - prior_low).replace(0, pd.NA)
+        range_size = (prior_high - prior_low).replace(0, np.nan)
         long_breakout = features["Close"].shift(1) > prior_high
         long_retest = (features["Low"] <= prior_high) & (close > prior_high + range_size * spec.threshold)
         short_breakdown = features["Close"].shift(1) < prior_low

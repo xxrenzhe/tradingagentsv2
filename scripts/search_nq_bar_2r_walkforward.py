@@ -107,12 +107,12 @@ def prepare_features(bars: pd.DataFrame) -> pd.DataFrame:
     features["vol_30"] = features["return_1m"].rolling(30).std()
     features["vol_120"] = features["return_1m"].rolling(120).std()
     rolling_mean = features["Close"].rolling(30).mean()
-    rolling_std = features["Close"].rolling(30).std().replace(0, pd.NA)
+    rolling_std = features["Close"].rolling(30).std().replace(0, np.nan)
     features["z_30"] = (features["Close"] - rolling_mean) / rolling_std
     features["range_mean_30"] = features["range_points"].rolling(30).mean()
     features["volume_z_60"] = (
         features["Volume"] - features["Volume"].rolling(60).mean()
-    ) / features["Volume"].rolling(60).std().replace(0, pd.NA)
+    ) / features["Volume"].rolling(60).std().replace(0, np.nan)
     return features.dropna(subset=["Close"]).reset_index(drop=True)
 
 
