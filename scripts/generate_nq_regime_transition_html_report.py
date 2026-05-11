@@ -3,14 +3,19 @@ from __future__ import annotations
 import argparse
 import html
 import math
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 import pandas as pd
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from search_nq_bar_2r_walkforward import load_continuous_nq_bars  # noqa: E402
+
 REPORT_PATH = ROOT_DIR / "reports" / "NQ-regime-transition-strategy-report.html"
 
 SUMMARY_PATH = ROOT_DIR / ".tmp" / "nq-regime-transition-readiness-summary.csv"
@@ -19,9 +24,13 @@ YEARLY_PATH = ROOT_DIR / ".tmp" / "nq-regime-transition-readiness-yearly.csv"
 MONTHLY_PATH = ROOT_DIR / ".tmp" / "nq-regime-transition-readiness-monthly.csv"
 ROLLING90_PATH = ROOT_DIR / ".tmp" / "nq-regime-transition-readiness-rolling90.csv"
 ROLLING180_PATH = ROOT_DIR / ".tmp" / "nq-regime-transition-readiness-rolling180.csv"
+LIGHTGLOW_TRADES_PATH = ROOT_DIR / ".tmp" / "nq-lightglow-1m-hold2-fullsample-trades.csv"
 
 POINT_VALUE = 20.0
+MIN_FULL_YEAR_TRADES = 1000
+FULL_YEARS = list(range(2011, 2026))
 BEST_LABEL = "highest_fullsample_3r_neighbor"
+LIGHTGLOW_CANDIDATE = "lightglow_premium_discount_reversal_1m_all_hold2m_reverse_time"
 LABEL_ORDER = ["highest_fullsample_3r_neighbor", "best_wf_3r", "best_wf_2r"]
 LABEL_NAMES = {
     "highest_fullsample_3r_neighbor": "60m 3R trend-start",
@@ -43,6 +52,15 @@ class ChartBox:
     right: int = 34
     top: int = 44
     bottom: int = 62
+
+
+@dataclass(frozen=True)
+class BarLoadArgs:
+    start_date: str
+    end_date: str
+    cache: str
+    chunk_size: int = 500_000
+    min_volume: float = 1.0
 
 
 def read_csv(path: Path) -> pd.DataFrame:
@@ -104,6 +122,12 @@ def bool_badge(value: object) -> str:
     label = "PASS" if passed else "FAIL"
     cls = "pass" if passed else "fail"
     return f'<span class="badge {cls}">{label}</span>'
+
+
+def status_badge(passed: bool, label: str | None = None) -> str:
+    text = label or ("PASS" if passed else "FAIL")
+    cls = "pass" if passed else "fail"
+    return f'<span class="badge {cls}">{escape(text)}</span>'
 
 
 def label_name(label: str) -> str:
@@ -567,6 +591,208 @@ def rolling_stats_table(rolling90: pd.DataFrame, rolling180: pd.DataFrame) -> st
     return html_table(frame, columns)
 
 
+def prepare_trade_timestamps(trades: pd.DataFrame, label_column: str = "audit_label") -> pd.DataFrame:
+    data = trades.copy()
+    for column in ["entry_ts", "exit_ts"]:
+        data[column] = pd.to_datetime(data[column], utc=True, errors="coerce")
+    data["year"] = data["entry_ts"].dt.year
+    if label_column not in data.columns:
+        data[label_column] = ""
+    return data
+
+
+def annual_trade_counts(
+    trades: pd.DataFrame,
+    *,
+    label_column: str,
+    label_value: str,
+    years: list[int] = FULL_YEARS,
+) -> pd.DataFrame:
+    data = prepare_trade_timestamps(trades, label_column)
+    selected = data[data[label_column].astype(str) == label_value]
+    counts = selected.groupby("year").size().reindex(years, fill_value=0)
+    return pd.DataFrame({"year": counts.index.astype(int), "trades": counts.to_numpy(dtype=int)})
+
+
+def frequency_gate_summary(
+    trades: pd.DataFrame,
+    *,
+    label_column: str,
+    label_value: str,
+    years: list[int] = FULL_YEARS,
+    minimum: int = MIN_FULL_YEAR_TRADES,
+) -> dict[str, object]:
+    counts = annual_trade_counts(trades, label_column=label_column, label_value=label_value, years=years)
+    min_trades = int(counts["trades"].min()) if not counts.empty else 0
+    passed = bool(min_trades >= minimum)
+    return {
+        "counts": counts,
+        "min_trades": min_trades,
+        "passed": passed,
+        "positive_years": int((counts["trades"] >= minimum).sum()),
+        "years": int(len(counts)),
+    }
+
+
+def annual_count_table(counts: pd.DataFrame) -> str:
+    data = counts.copy()
+    data["gate"] = data["trades"] >= MIN_FULL_YEAR_TRADES
+    columns = [
+        ("year", "年份", "int"),
+        ("trades", "交易次数", "int"),
+        ("gate", ">=1000", "bool"),
+    ]
+    return html_table(data, columns, class_name="compact-table")
+
+
+def load_optional_lightglow_trades() -> pd.DataFrame:
+    if not LIGHTGLOW_TRADES_PATH.exists():
+        return pd.DataFrame()
+    data = pd.read_csv(LIGHTGLOW_TRADES_PATH)
+    return prepare_trade_timestamps(data, "candidate")
+
+
+def summarize_trade_frame(trades: pd.DataFrame) -> dict[str, float | int]:
+    if trades.empty:
+        return {
+            "trades": 0,
+            "net_points": 0.0,
+            "profit_factor": 0.0,
+            "win_rate": 0.0,
+            "max_drawdown_points": 0.0,
+        }
+    net = pd.to_numeric(trades["net_points"], errors="coerce").fillna(0.0)
+    wins = float(net[net > 0].sum())
+    losses = float(abs(net[net < 0].sum()))
+    equity = net.cumsum()
+    drawdown = equity - equity.cummax()
+    return {
+        "trades": int(len(net)),
+        "net_points": float(net.sum()),
+        "profit_factor": float(wins / losses) if losses else (999.0 if wins > 0 else 0.0),
+        "win_rate": float((net > 0).mean()),
+        "max_drawdown_points": float(abs(drawdown.min())),
+    }
+
+
+def load_bars_for_trade_window(trade: pd.Series, *, minutes_before: int = 45, minutes_after: int = 45) -> pd.DataFrame:
+    entry_ts = pd.Timestamp(trade["entry_ts"]).tz_convert("UTC")
+    exit_ts = pd.Timestamp(trade["exit_ts"]).tz_convert("UTC")
+    start = entry_ts - pd.Timedelta(minutes=minutes_before)
+    end = exit_ts + pd.Timedelta(minutes=minutes_after)
+    args = BarLoadArgs(
+        start_date=start.strftime("%Y-%m-%d"),
+        end_date=(end + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
+        cache=str(ROOT_DIR / ".tmp" / "nq-report-chart-bars-cache.pkl"),
+    )
+    bars = load_continuous_nq_bars(args)
+    bars = bars.copy()
+    bars["ts"] = pd.to_datetime(bars["ts"], utc=True, errors="coerce")
+    for column in ["Open", "High", "Low", "Close", "Volume"]:
+        bars[column] = pd.to_numeric(bars[column], errors="coerce")
+    selected = bars[(bars["ts"] >= start) & (bars["ts"] <= end)].copy()
+    symbol = str(trade.get("symbol", ""))
+    if symbol and "symbol" in selected.columns and (selected["symbol"].astype(str) == symbol).any():
+        selected = selected[selected["symbol"].astype(str) == symbol].copy()
+    return selected.dropna(subset=["ts", "Open", "High", "Low", "Close"]).reset_index(drop=True)
+
+
+def candlestick_trade_chart(title: str, trade: pd.Series, bars: pd.DataFrame) -> str:
+    if bars.empty:
+        return f'<p class="empty">No K-line data available for {escape(title)}.</p>'
+
+    box = ChartBox(width=1100, height=470, left=82, right=42, top=46, bottom=74)
+    plot_w = box.width - box.left - box.right
+    plot_h = box.height - box.top - box.bottom
+    highs = bars["High"].astype(float)
+    lows = bars["Low"].astype(float)
+    min_y = float(lows.min())
+    max_y = float(highs.max())
+    entry_price = float(trade["entry_price"])
+    exit_price = float(trade["exit_price"])
+    min_y = min(min_y, entry_price, exit_price)
+    max_y = max(max_y, entry_price, exit_price)
+    if min_y == max_y:
+        min_y -= 1.0
+        max_y += 1.0
+    padding = max((max_y - min_y) * 0.08, 1.0)
+    min_y -= padding
+    max_y += padding
+    slot_w = plot_w / max(len(bars), 1)
+    body_w = max(min(slot_w * 0.62, 8.0), 2.2)
+
+    def sy(value: float) -> float:
+        return box.top + (max_y - value) / (max_y - min_y) * plot_h
+
+    def sx(index: int) -> float:
+        return box.left + slot_w * index + slot_w / 2
+
+    grid = []
+    for tick in nice_ticks(min_y, max_y, 5):
+        y = sy(tick)
+        grid.append(
+            f'<line x1="{box.left}" y1="{y:.1f}" x2="{box.width - box.right}" y2="{y:.1f}" stroke="#d8dee8" stroke-dasharray="3 7"/>'
+            f'<text x="{box.left - 12}" y="{y + 4:.1f}" text-anchor="end" font-size="12" fill="#64748b">{tick:,.0f}</text>'
+        )
+
+    candles = []
+    for index, row in bars.iterrows():
+        x = sx(index)
+        open_price = float(row["Open"])
+        high_price = float(row["High"])
+        low_price = float(row["Low"])
+        close_price = float(row["Close"])
+        color = "#0f766e" if close_price >= open_price else "#b91c1c"
+        top = sy(max(open_price, close_price))
+        bottom = sy(min(open_price, close_price))
+        body_h = max(bottom - top, 1.0)
+        candles.append(
+            f'<line x1="{x:.1f}" y1="{sy(high_price):.1f}" x2="{x:.1f}" y2="{sy(low_price):.1f}" stroke="{color}" stroke-width="1.2"/>'
+            f'<rect x="{x - body_w / 2:.1f}" y="{top:.1f}" width="{body_w:.1f}" height="{body_h:.1f}" rx="1" fill="{color}" opacity="0.82">'
+            f'<title>{pd.Timestamp(row["ts"]):%Y-%m-%d %H:%M UTC} O:{open_price:.2f} H:{high_price:.2f} L:{low_price:.2f} C:{close_price:.2f}</title></rect>'
+        )
+
+    ts_values = pd.to_datetime(bars["ts"], utc=True)
+    entry_ts = pd.Timestamp(trade["entry_ts"]).tz_convert("UTC")
+    exit_ts = pd.Timestamp(trade["exit_ts"]).tz_convert("UTC")
+    entry_index = int((ts_values - entry_ts).abs().argmin())
+    exit_index = int((ts_values - exit_ts).abs().argmin())
+    entry_x = sx(entry_index)
+    exit_x = sx(exit_index)
+    entry_y = sy(entry_price)
+    exit_y = sy(exit_price)
+    direction = int(trade.get("direction", 1))
+    net_points = float(trade["net_points"])
+    marker_entry = "#2563eb"
+    marker_exit = "#7c3aed"
+    direction_text = "LONG" if direction > 0 else "SHORT"
+    result_class = value_class(net_points)
+    x_start = pd.Timestamp(ts_values.iloc[0]).strftime("%H:%M")
+    x_end = pd.Timestamp(ts_values.iloc[-1]).strftime("%H:%M")
+
+    return f"""
+    <figure class="chart trade-chart">
+      <figcaption>{escape(title)} <span class="{result_class}">{fmt_signed(net_points)} pts</span></figcaption>
+      <svg viewBox="0 0 {box.width} {box.height}" role="img" aria-label="{escape(title)}">
+        <rect x="0" y="0" width="{box.width}" height="{box.height}" rx="8" fill="#ffffff"/>
+        {''.join(grid)}
+        <line x1="{box.left}" y1="{box.height - box.bottom}" x2="{box.width - box.right}" y2="{box.height - box.bottom}" stroke="#94a3b8"/>
+        <line x1="{box.left}" y1="{box.top}" x2="{box.left}" y2="{box.height - box.bottom}" stroke="#94a3b8"/>
+        {''.join(candles)}
+        <line x1="{entry_x:.1f}" y1="{box.top}" x2="{entry_x:.1f}" y2="{box.height - box.bottom}" stroke="{marker_entry}" stroke-dasharray="5 5"/>
+        <line x1="{exit_x:.1f}" y1="{box.top}" x2="{exit_x:.1f}" y2="{box.height - box.bottom}" stroke="{marker_exit}" stroke-dasharray="5 5"/>
+        <circle cx="{entry_x:.1f}" cy="{entry_y:.1f}" r="6" fill="{marker_entry}" stroke="#ffffff" stroke-width="2"/>
+        <circle cx="{exit_x:.1f}" cy="{exit_y:.1f}" r="6" fill="{marker_exit}" stroke="#ffffff" stroke-width="2"/>
+        <text x="{entry_x + 9:.1f}" y="{max(entry_y - 12, box.top + 14):.1f}" fill="{marker_entry}" font-size="13" font-weight="700">ENTRY {direction_text} {entry_price:,.2f}</text>
+        <text x="{exit_x + 9:.1f}" y="{min(exit_y + 22, box.height - box.bottom - 8):.1f}" fill="{marker_exit}" font-size="13" font-weight="700">EXIT {exit_price:,.2f}</text>
+        <text x="{box.left}" y="{box.height - 28}" fill="#64748b" font-size="12">{escape(x_start)} UTC</text>
+        <text x="{box.width - box.right}" y="{box.height - 28}" text-anchor="end" fill="#64748b" font-size="12">{escape(x_end)} UTC</text>
+        <text x="{box.left}" y="25" fill="#334155" font-size="13">{escape(pd.Timestamp(trade["entry_ts"]).strftime("%Y-%m-%d"))} · {escape(str(trade.get("symbol", "")))}</text>
+      </svg>
+    </figure>
+    """
+
+
 def enrich_trades(trades: pd.DataFrame) -> pd.DataFrame:
     data = trades.copy()
     for column in ["entry_ts", "exit_ts"]:
@@ -648,8 +874,28 @@ def render_report(
 ) -> str:
     summary = summary.sort_values(by="label", key=label_rank).reset_index(drop=True)
     trades = enrich_trades(trades)
+    lightglow_trades = load_optional_lightglow_trades()
+    lightglow_summary = summarize_trade_frame(
+        lightglow_trades[lightglow_trades["candidate"] == LIGHTGLOW_CANDIDATE]
+        if not lightglow_trades.empty
+        else pd.DataFrame()
+    )
     best = summary[summary["label"] == BEST_LABEL].iloc[0]
     best_trades = trades[trades["audit_label"] == BEST_LABEL].sort_values("entry_ts").copy()
+    regime_frequency = frequency_gate_summary(
+        trades,
+        label_column="audit_label",
+        label_value=BEST_LABEL,
+    )
+    lightglow_frequency = (
+        frequency_gate_summary(
+            lightglow_trades,
+            label_column="candidate",
+            label_value=LIGHTGLOW_CANDIDATE,
+        )
+        if not lightglow_trades.empty
+        else None
+    )
     cumulative = cumulative_trades(trades)
     r90_plot = {
         label: rolling90[rolling90["label"] == label].rename(columns={"end": "entry_ts"}).copy()
@@ -678,6 +924,50 @@ def render_report(
     best_recent = best_trades.sort_values("entry_ts", ascending=False).head(30).sort_values("entry_ts")
     worst_trades = best_trades.sort_values("net_points").head(20)
     best_trades_top = best_trades.sort_values("net_points", ascending=False).head(20)
+    chart_trades = (
+        lightglow_trades[lightglow_trades["candidate"] == LIGHTGLOW_CANDIDATE].copy()
+        if not lightglow_trades.empty
+        else pd.DataFrame()
+    )
+    chart_strategy_name = "Lightglow 高频候选"
+    if chart_trades.empty:
+        chart_trades = best_trades.copy()
+        chart_strategy_name = "低频趋势候选"
+    best_trade = chart_trades.sort_values("net_points", ascending=False).iloc[0]
+    worst_trade = chart_trades.sort_values("net_points").iloc[0]
+    best_trade_bars = load_bars_for_trade_window(best_trade)
+    worst_trade_bars = load_bars_for_trade_window(worst_trade)
+
+    lightglow_frequency_body = ""
+    if lightglow_frequency is not None and lightglow_summary["trades"]:
+        lg_counts = lightglow_frequency["counts"]
+        selected_lg = lightglow_trades[lightglow_trades["candidate"] == LIGHTGLOW_CANDIDATE].copy()
+        selected_lg["entry_ts"] = pd.to_datetime(selected_lg["entry_ts"], utc=True, errors="coerce")
+        selected_lg["year"] = selected_lg["entry_ts"].dt.year
+        lg_year_net = (
+            selected_lg.groupby("year")["net_points"]
+            .sum()
+            .reindex(FULL_YEARS, fill_value=0.0)
+        )
+        lg_positive_years = int((lg_year_net > 0).sum())
+        lg_worst_year = float(lg_year_net.min())
+        lg_stability_pass = lg_positive_years == len(FULL_YEARS)
+        lightglow_frequency_body = f"""
+        <div class="callout pass-callout">
+          <h3>频率合格的高频候选</h3>
+          <p><code>{escape(LIGHTGLOW_CANDIDATE)}</code></p>
+          <p>该候选是 Lightglow Premium/Discount 1m 反向、2 分钟 time exit。完整年份 2011-2025 的最低年交易数为 <b>{fmt_int(lightglow_frequency["min_trades"])}</b>，满足每年不少于 {fmt_int(MIN_FULL_YEAR_TRADES)} 笔；逐笔导出净点数 <b>{fmt_num(lightglow_summary["net_points"])}</b>，PF <b>{fmt_num(lightglow_summary["profit_factor"], 3)}</b>，交易数 <b>{fmt_int(lightglow_summary["trades"])}</b>。</p>
+          <p>但它不满足“稳定盈利”要求：2011-2025 只有 <b>{fmt_int(lg_positive_years)}/{fmt_int(len(FULL_YEARS))}</b> 个完整年份为正收益，最差完整年 <b>{fmt_signed(lg_worst_year)}</b> 点，逐年稳定盈利门槛为 {status_badge(lg_stability_pass)}。因此它只能证明“交易次数门槛可满足”，不能单独作为稳定盈利策略。</p>
+          {annual_count_table(lg_counts)}
+        </div>
+        """
+    elif lightglow_frequency is None:
+        lightglow_frequency_body = f"""
+        <div class="callout warn-callout">
+          <h3>高频候选逐笔数据缺失</h3>
+          <p>未找到 <code>{escape(LIGHTGLOW_TRADES_PATH.relative_to(ROOT_DIR))}</code>，无法在本报告中验证 Lightglow 高频候选的年度交易次数。请先运行 <code>scripts/export_lightglow_optimized_strategy_trades.py --start-date 2010-06-06 --end-date 2026-04-28 --output .tmp/nq-lightglow-1m-hold2-fullsample-trades.csv</code>。</p>
+        </div>
+        """
 
     setup_body = f"""
     <div class="rule-grid">
@@ -726,6 +1016,20 @@ def render_report(
       {metric("90日正收益率", fmt_pct(best["positive_90d_rate"]), "滚动窗口")}
       {metric("2.125成本后", fmt_num(best["net_at_cost_2.125"]), "仍为正")}
       {metric("审计门槛", "PASS", "8/8 stability gates")}
+      {metric("年交易次数门槛", "FAIL" if not regime_frequency["passed"] else "PASS", f'2011-2025 最低 {fmt_int(regime_frequency["min_trades"])} 笔/年')}
+    </div>
+    """
+
+    frequency_body = f"""
+    <div class="callout fail-callout">
+      <h3>当前低频趋势候选不满足新增硬门槛</h3>
+      <p>你新增的约束是：每个完整年份的交易次数不低于 {fmt_int(MIN_FULL_YEAR_TRADES)} 笔。主趋势候选 <code>{escape(best["candidate"])}</code> 在 2011-2025 完整年份中的最低年交易数只有 <b>{fmt_int(regime_frequency["min_trades"])}</b>，因此频率门槛为 {status_badge(False)}。它仍是历史稳定的低频趋势候选，但不能作为“每年 >=1000 笔”的合格策略。</p>
+      {annual_count_table(regime_frequency["counts"])}
+    </div>
+    {lightglow_frequency_body}
+    <div class="callout warn-callout">
+      <h3>当前结论</h3>
+      <p>截至本次报告生成，已验证的候选里尚未找到一个同时满足“历史稳定盈利”和“2011-2025 每个完整年份交易次数不少于 {fmt_int(MIN_FULL_YEAR_TRADES)} 笔”的策略。后续应把“年交易次数”作为搜索硬约束重新优化，而不是把低频趋势策略或后期盈利集中的高频策略直接升级为合格。</p>
     </div>
     """
 
@@ -781,6 +1085,11 @@ def render_report(
     """
 
     trade_body = f"""
+    <p class="note">下方 K 线图展示的是 {escape(chart_strategy_name)}的逐笔最佳和最差交易，蓝点为入场、紫点为出场。</p>
+    <div class="trade-chart-grid">
+      {candlestick_trade_chart("最佳交易历史 K 线：入场点与出场点", best_trade, best_trade_bars)}
+      {candlestick_trade_chart("最差交易历史 K 线：入场点与出场点", worst_trade, worst_trade_bars)}
+    </div>
     <details open>
       <summary>最佳候选最近 30 笔交易</summary>
       {trade_table(best_recent, limit=30)}
@@ -827,6 +1136,7 @@ def render_report(
       <code>{escape(MONTHLY_PATH.relative_to(ROOT_DIR))}</code>
       <code>{escape(ROLLING90_PATH.relative_to(ROOT_DIR))}</code>
       <code>{escape(ROLLING180_PATH.relative_to(ROOT_DIR))}</code>
+      <code>{escape(LIGHTGLOW_TRADES_PATH.relative_to(ROOT_DIR))}</code>
       <p><b>配套 Markdown</b></p>
       <code>reports/NQ-2010-2026-stable-strategy-search-final.md</code>
       <code>reports/NQ-regime-transition-readiness-audit.md</code>
@@ -970,6 +1280,17 @@ def render_report(
     }}
     .badge.pass {{ color: #0f766e; background: var(--green-soft); border: 1px solid #99d7ca; }}
     .badge.fail {{ color: #b91c1c; background: var(--red-soft); border: 1px solid #f0a0a0; }}
+    .callout {{
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      margin: 14px 0;
+      background: #fbfdff;
+    }}
+    .callout h3 {{ margin-bottom: 8px; }}
+    .pass-callout {{ border-left: 4px solid var(--teal); }}
+    .fail-callout {{ border-left: 4px solid var(--red); }}
+    .warn-callout {{ border-left: 4px solid var(--amber); }}
     .chart {{
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -984,6 +1305,11 @@ def render_report(
       color: #1e293b;
     }}
     .chart svg {{ display: block; width: 100%; height: auto; }}
+    .trade-chart-grid {{
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+    }}
     .legend {{
       display: flex;
       flex-wrap: wrap;
@@ -1066,15 +1392,17 @@ def render_report(
     <header class="hero">
       <p class="kicker">NQ 1m Regime Transition Strategy Report</p>
       <h1>震荡结束、趋势起步：NQ 稳定盈利候选策略报告</h1>
-      <p class="hero-summary">本报告汇总 2010-2026 NQ 1分钟 bar 回测审计。当前最强历史稳定候选是 60 分钟震荡压缩后的上破位移做多策略，固定 3R 止盈，结构低点止损，240 分钟超时离场。它通过净利润、PF、回撤、年份稳定性、滚动90日稳定性和成本压力门槛。</p>
+      <p class="hero-summary">本报告汇总 2010-2026 NQ 1分钟 bar 回测审计。当前最强低频趋势候选是 60 分钟震荡压缩后的上破位移做多策略，但它不满足“每个完整年份至少 1000 笔交易”的新增硬门槛；满足频率门槛的是 Lightglow Premium/Discount 1m 高频反向候选。</p>
       <code class="candidate-code">{candidate_code}</code>
       <div class="pills">
         {pill("生成时间", pd.Timestamp.now("UTC").strftime("%Y-%m-%d %H:%M UTC"))}
         {pill("点值", "$20 / NQ point")}
-        {pill("主结论", "historical_stable_pass = True")}
+        {pill("低频趋势稳定", "historical_stable_pass = True")}
+        {pill("低频趋势年交易数", "FAIL < 1000/year")}
       </div>
     </header>
     {section("执行摘要", metrics_body)}
+    {section("年交易次数硬门槛", frequency_body, "2010 和 2026 是不完整年份；硬门槛只检查 2011-2025 完整自然年。")}
     {section("策略定义", setup_body, "所有入场、过滤和出场条件都可由 OHLCV bar 数据计算。")}
     {section("候选比较与稳定门槛", comparison_body)}
     {section("累计收益与回撤", equity_body)}
