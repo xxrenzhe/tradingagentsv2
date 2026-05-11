@@ -29,7 +29,7 @@ BEST_SELECTED_ALIAS = "best_strategy"
 
 
 def main() -> int:
-    load_project_env()
+    load_project_env(override=False)
     parser = argparse.ArgumentParser(description="Guarded automation supervisor for the selected best MBP strategy on IBKR paper.")
     parser.add_argument("--trades", default=".tmp/mbp-best-strategy-trades.csv")
     parser.add_argument("--symbol", default="MNQ")

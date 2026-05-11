@@ -21,7 +21,7 @@ from tradingagents.execution import (
 
 
 def main() -> int:
-    load_project_env()
+    load_project_env(override=False)
     parser = argparse.ArgumentParser(description="Run the adaptive MBP portfolio paper trader once.")
     parser.add_argument("--trades", default=".tmp/mbp-adaptive-portfolio-trades.csv")
     parser.add_argument("--symbol", default="MNQ")
