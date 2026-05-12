@@ -87,11 +87,63 @@ def build_market_features(data: pd.DataFrame) -> list[MarketFeature]:
     obv_slope = pd.to_numeric(data.get("obv_slope_20", np.nan), errors="coerce")
     mfi = pd.to_numeric(data.get("mfi_14", np.nan), errors="coerce")
     vfi = pd.to_numeric(data.get("vfi_130", np.nan), errors="coerce")
+    macd_hist = pd.to_numeric(data.get("macd_hist", np.nan), errors="coerce")
     boll_pos = pd.to_numeric(data.get("boll_position", np.nan), errors="coerce")
     range_pos = pd.to_numeric(data.get("range_100_position", np.nan), errors="coerce")
     session_vwap_atr = pd.to_numeric(data.get("session_vwap_distance_atr", np.nan), errors="coerce")
+    down_impulse_45 = close.diff(45) / atr <= -3.0
+    up_impulse_45 = close.diff(45) / atr >= 3.0
+    up_impulse_30 = close.diff(30) / atr >= 2.0
+    down_impulse_30 = close.diff(30) / atr <= -2.0
+    recent_down_impulse = down_impulse_45.rolling(90, min_periods=1).max().shift(1).fillna(False).astype(bool)
+    recent_up_impulse = up_impulse_45.rolling(90, min_periods=1).max().shift(1).fillna(False).astype(bool)
+    rebound_after_down = up_impulse_30 & recent_down_impulse
+    sell_response_after_up = down_impulse_30 & recent_up_impulse
+    recent_rebound_after_down = rebound_after_down.rolling(45, min_periods=1).max().shift(1).fillna(False).astype(bool)
+    recent_sell_response_after_up = sell_response_after_up.rolling(45, min_periods=1).max().shift(1).fillna(False).astype(bool)
+    recent_pullback_depth = (high.rolling(20, min_periods=5).max().shift(1) - low) / atr
+    recent_short_pullback_depth = (high - low.rolling(20, min_periods=5).min().shift(1)) / atr
+    micro_break_up = close > high.rolling(8, min_periods=4).max().shift(1)
+    micro_break_down = close < low.rolling(8, min_periods=4).min().shift(1)
+    macd_rising = macd_hist > macd_hist.shift(3)
+    macd_falling = macd_hist < macd_hist.shift(3)
 
     features = [
+        MarketFeature(
+            "smc_breakdown_downtrend_wave",
+            "smc_sequence",
+            "short",
+            "BOS-style downside break from a local range with displacement, downside DI/MACD alignment, and price below session VWAP.",
+            (data["displacement_candle"].eq(1))
+            & (close < open_price)
+            & (close < prior_low_60)
+            & (di_spread < 0)
+            & (macd_hist < 0)
+            & (session_vwap_atr < 0),
+        ),
+        MarketFeature(
+            "capitulation_v_reversal_long",
+            "smc_sequence",
+            "long",
+            "Fast downside impulse exhausts into a fresh local low, then closes off the low with MACD/volume-price repair.",
+            recent_down_impulse
+            & (low <= prior_low_60 + 0.10 * atr)
+            & (wick_lower >= 0.35)
+            & (close > (high + low) / 2)
+            & (macd_rising | (cmf > 0) | (mfi > 45)),
+        ),
+        MarketFeature(
+            "selloff_reversal_pullback_continuation_long",
+            "smc_sequence",
+            "long",
+            "Three-wave sequence: prior selloff, sharp rebound, controlled higher-low pullback, then upside continuation break.",
+            recent_down_impulse
+            & recent_rebound_after_down
+            & (recent_pullback_depth >= 0.75)
+            & (low > low.rolling(90, min_periods=30).min().shift(1))
+            & micro_break_up
+            & (macd_rising | (cmf > 0) | (vfi > vfi.shift(10))),
+        ),
         MarketFeature(
             "trend_start_long_displacement",
             "trend_start",
@@ -229,6 +281,18 @@ def build_market_features(data: pd.DataFrame) -> list[MarketFeature]:
             (data["session_vwap_reclaim_down"].eq(1))
             & (momentum_30_atr > 0)
             & ((volume_z > 0) | (cmf < 0) | (mfi < 50)),
+        ),
+        MarketFeature(
+            "rally_fade_pullback_continuation_short",
+            "smc_sequence",
+            "short",
+            "Mirror sequence: prior rally, sharp sell response, controlled lower-high pullback, then downside continuation break.",
+            recent_up_impulse
+            & recent_sell_response_after_up
+            & (recent_short_pullback_depth >= 0.75)
+            & (high < high.rolling(90, min_periods=30).max().shift(1))
+            & micro_break_down
+            & (macd_falling | (cmf < 0) | (vfi < vfi.shift(10))),
         ),
     ]
     session_features: list[MarketFeature] = []
