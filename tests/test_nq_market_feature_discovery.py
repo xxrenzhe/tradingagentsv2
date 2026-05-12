@@ -257,6 +257,56 @@ def test_screenshot_trade_point_feature_gaps_are_covered() -> None:
     assert features["low_base_reclaim_long"].signal.any()
 
 
+def test_updated_screenshot_downtrend_retest_and_sweep_watch_features_are_covered() -> None:
+    frame = _three_wave_reversal_frame()
+    periods = len(frame)
+    frame["supply_zone_retest"] = 0
+    frame["demand_zone_retest"] = 0
+    frame["sweep_signal"] = np.zeros(periods, dtype=int)
+    frame["low_volume_pullback"] = 0
+    frame["session_vwap_distance_atr"] = -0.8
+    frame["force_index_z_50"] = -0.5
+    frame["mfi_14"] = 35.0
+    frame["cmf_20"] = -0.2
+    frame["macd_hist"] = -0.6
+    frame["vfi_130"] = -1.0
+
+    frame.loc[70:120, "Close"] = np.linspace(105.0, 89.0, 51)
+    frame.loc[70:120, "Open"] = np.r_[105.0, frame.loc[70:119, "Close"].to_numpy()]
+    frame.loc[70:120, "High"] = np.maximum(frame.loc[70:120, "Open"], frame.loc[70:120, "Close"]) + 0.4
+    frame.loc[70:120, "Low"] = np.minimum(frame.loc[70:120, "Open"], frame.loc[70:120, "Close"]) - 0.4
+
+    continuation_index = 132
+    frame.loc[continuation_index - 45 : continuation_index - 1, "High"] = 103.0
+    frame.loc[continuation_index - 8 : continuation_index - 1, "Low"] = 93.0
+    frame.loc[continuation_index, ["Open", "High", "Low", "Close"]] = [94.5, 96.0, 90.5, 91.0]
+    frame.loc[continuation_index, "supply_zone_retest"] = 1
+    frame.loc[continuation_index, "low_volume_pullback"] = 1
+    frame.loc[continuation_index - 3 : continuation_index - 1, "macd_hist"] = -0.1
+    frame.loc[continuation_index, "macd_hist"] = -0.7
+    frame.loc[continuation_index, "force_index_z_50"] = -0.8
+
+    sweep_watch_index = 154
+    frame.loc[sweep_watch_index - 90 : sweep_watch_index - 1, "Low"] = 90.0
+    frame.loc[sweep_watch_index, ["Open", "High", "Low", "Close"]] = [89.5, 91.4, 87.0, 90.8]
+    frame.loc[sweep_watch_index, "sweep_signal"] = 1
+    frame.loc[sweep_watch_index, "demand_zone_retest"] = 1
+    frame.loc[sweep_watch_index - 3 : sweep_watch_index - 1, "macd_hist"] = -0.8
+    frame.loc[sweep_watch_index, "macd_hist"] = -0.2
+    frame.loc[sweep_watch_index, "force_index_z_50"] = 0.4
+    frame.loc[sweep_watch_index, "cmf_20"] = 0.0
+    frame.loc[sweep_watch_index, "mfi_14"] = 42.0
+    range_points = frame["High"] - frame["Low"]
+    frame["body_share"] = (frame["Close"] - frame["Open"]).abs() / range_points
+    frame["lower_wick_points"] = np.minimum(frame["Open"], frame["Close"]) - frame["Low"]
+    frame["upper_wick_points"] = frame["High"] - np.maximum(frame["Open"], frame["Close"])
+
+    features = {feature.feature_id: feature for feature in script.build_market_features(frame)}
+
+    assert features["supply_retest_downtrend_continuation_short"].signal.any()
+    assert features["selloff_liquidity_sweep_rebound_watch_long"].signal.any()
+
+
 def test_ict_order_flow_shift_features_are_registered_and_triggerable() -> None:
     frame = _three_wave_reversal_frame()
     periods = len(frame)

@@ -145,6 +145,11 @@ def build_market_features(data: pd.DataFrame) -> list[MarketFeature]:
     recent_sell_response_after_up = sell_response_after_up.rolling(45, min_periods=1).max().shift(1).fillna(False).astype(bool)
     recent_pullback_depth = (high.rolling(20, min_periods=5).max().shift(1) - low) / atr
     recent_short_pullback_depth = (high - low.rolling(20, min_periods=5).min().shift(1)) / atr
+    prior_downtrend_pressure = close.diff(45) / atr <= -4.0
+    recent_downtrend_pressure = prior_downtrend_pressure.rolling(90, min_periods=1).max().shift(1).fillna(False).astype(bool)
+    lower_high_reject = high < high.rolling(45, min_periods=15).max().shift(1) - 0.25 * atr
+    selloff_extreme_probe = low <= low.rolling(90, min_periods=30).min().shift(1) + 0.15 * atr
+    reversal_watch_reclaim = close > low + 0.45 * range_points
     micro_break_up = close > high.rolling(8, min_periods=4).max().shift(1)
     micro_break_down = close < low.rolling(8, min_periods=4).min().shift(1)
     macd_rising = macd_hist > macd_hist.shift(3)
@@ -679,6 +684,29 @@ def build_market_features(data: pd.DataFrame) -> list[MarketFeature]:
             & (data["ema_20"] < data["ema_50"])
             & (session_vwap_atr <= 0.25)
             & (momentum_30_atr < 0),
+        ),
+        MarketFeature(
+            "supply_retest_downtrend_continuation_short",
+            "supply_retest_continuation",
+            "short",
+            "In an established downtrend, a lower-high retest into supply/VWAP rejection fails and breaks the local micro low.",
+            recent_downtrend_pressure
+            & (signal("supply_zone_retest") | data["low_volume_pullback"].eq(1) | (session_vwap_atr <= 0.25))
+            & lower_high_reject
+            & micro_break_down
+            & (close < open_price)
+            & (macd_falling | (cmf < 0) | (force_z < 0) | (vfi < vfi.shift(10))),
+        ),
+        MarketFeature(
+            "selloff_liquidity_sweep_rebound_watch_long",
+            "reversal_watch",
+            "long",
+            "After a steep downtrend sweeps lower liquidity, price starts a reclaim/rebound watch but still needs bullish structure confirmation before trend reversal.",
+            recent_downtrend_pressure
+            & (selloff_extreme_probe | near_prior_low | signal("demand_zone_retest") | (sweep > 0))
+            & (wick_lower >= 0.20)
+            & reversal_watch_reclaim
+            & (macd_rising | (force_z > 0) | (cmf > -0.05) | (mfi > 35)),
         ),
         MarketFeature(
             "vwap_reclaim_after_selloff",
