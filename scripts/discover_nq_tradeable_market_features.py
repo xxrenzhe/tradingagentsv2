@@ -126,6 +126,10 @@ def build_market_features(data: pd.DataFrame) -> list[MarketFeature]:
     force_z = numeric("force_index_z_50")
     eom_z = numeric("eom_z_50")
     range_pos = numeric("range_100_position")
+    range_width_atr = numeric("range_100_width_atr")
+    sweep = numeric("sweep_signal", default=0.0)
+    choch = numeric("choch_signal", default=0.0)
+    bos = numeric("bos_signal", default=0.0)
     session_vwap_atr = numeric("session_vwap_distance_atr")
     down_impulse_45 = close.diff(45) / atr <= -3.0
     up_impulse_45 = close.diff(45) / atr >= 3.0
@@ -143,6 +147,12 @@ def build_market_features(data: pd.DataFrame) -> list[MarketFeature]:
     micro_break_down = close < low.rolling(8, min_periods=4).min().shift(1)
     macd_rising = macd_hist > macd_hist.shift(3)
     macd_falling = macd_hist < macd_hist.shift(3)
+    compressed_range = (
+        (range_width_atr <= 4.0)
+        | (range_width_atr <= range_width_atr.rolling(240, min_periods=60).quantile(0.35))
+    )
+    local_base_low = low.rolling(30, min_periods=10).min().shift(1)
+    local_base_high = high.rolling(30, min_periods=10).max().shift(1)
 
     features = [
         MarketFeature(
@@ -203,6 +213,30 @@ def build_market_features(data: pd.DataFrame) -> list[MarketFeature]:
             & (adx >= 18)
             & (di_spread < 0)
             & (donch < 0.4),
+        ),
+        MarketFeature(
+            "range_compression_breakout_long",
+            "range_breakout",
+            "long",
+            "A sideways/compressed range resolves upward with a micro break, positive momentum repair, and VWAP support.",
+            compressed_range
+            & micro_break_up
+            & (close > open_price)
+            & ((bos > 0) | data["displacement_candle"].eq(1) | signal("session_vwap_reclaim_up"))
+            & (session_vwap_atr >= -0.10)
+            & (macd_rising | (trix > trix_signal) | (force_z > 0)),
+        ),
+        MarketFeature(
+            "range_compression_breakdown_short",
+            "range_breakout",
+            "short",
+            "A sideways/compressed range resolves downward with a micro break, downside momentum repair, and VWAP resistance.",
+            compressed_range
+            & micro_break_down
+            & (close < open_price)
+            & ((bos < 0) | data["displacement_candle"].eq(1) | signal("session_vwap_reclaim_down"))
+            & (session_vwap_atr <= 0.10)
+            & (macd_falling | (trix < trix_signal) | (force_z < 0)),
         ),
         MarketFeature(
             "ichimoku_cloud_breakout_long",
@@ -423,6 +457,26 @@ def build_market_features(data: pd.DataFrame) -> list[MarketFeature]:
             & (close < (high + low) / 2),
         ),
         MarketFeature(
+            "supply_sweep_rejection_short",
+            "liquidity_reversal",
+            "short",
+            "Price sweeps a prior high or supply zone, fails back below the level, and momentum/volume confirms rejection.",
+            (near_prior_high | signal("supply_zone_retest") | (sweep < 0))
+            & (wick_upper >= 0.30)
+            & ((close < open_price) | (close < (high + low) / 2))
+            & (macd_falling | (cmf < 0) | (vfi < vfi.shift(10)) | (force_z < 0)),
+        ),
+        MarketFeature(
+            "demand_sweep_reclaim_long",
+            "liquidity_reversal",
+            "long",
+            "Price sweeps a prior low or demand zone, reclaims the level, and momentum/volume confirms absorption.",
+            (near_prior_low | signal("demand_zone_retest") | (sweep > 0))
+            & (wick_lower >= 0.30)
+            & ((close > open_price) | (close > (high + low) / 2))
+            & (macd_rising | (cmf > 0) | (vfi > vfi.shift(10)) | (force_z > 0)),
+        ),
+        MarketFeature(
             "sell_pressure_absorbed_rebound",
             "absorption",
             "long",
@@ -515,6 +569,28 @@ def build_market_features(data: pd.DataFrame) -> list[MarketFeature]:
             (data["session_vwap_reclaim_down"].eq(1))
             & (momentum_30_atr > 0)
             & ((volume_z > 0) | (cmf < 0) | (mfi < 50)),
+        ),
+        MarketFeature(
+            "low_base_reclaim_long",
+            "base_reclaim",
+            "long",
+            "After a selloff, price stops making meaningful new lows, reclaims a local base, and momentum starts to repair.",
+            recent_down_impulse
+            & (range_pos <= 0.40)
+            & (low >= local_base_low - 0.20 * atr)
+            & (micro_break_up | (choch > 0) | signal("session_vwap_reclaim_up"))
+            & (macd_rising | (cmo > cmo.shift(3)) | (force_z > 0) | (cmf > 0)),
+        ),
+        MarketFeature(
+            "high_base_reject_short",
+            "base_reclaim",
+            "short",
+            "After a rally, price stops making meaningful new highs, loses a local base, and momentum starts to deteriorate.",
+            recent_up_impulse
+            & (range_pos >= 0.60)
+            & (high <= local_base_high + 0.20 * atr)
+            & (micro_break_down | (choch < 0) | signal("session_vwap_reclaim_down"))
+            & (macd_falling | (cmo < cmo.shift(3)) | (force_z < 0) | (cmf < 0)),
         ),
         MarketFeature(
             "rally_fade_pullback_continuation_short",
@@ -799,7 +875,7 @@ def fallback_feature_analysis(
 
 
 def strategy_for_family(family: str) -> str:
-    if family in {"trend_start", "trend_pullback", "tradingview_trend", "tradingview_pullback"}:
+    if family in {"trend_start", "trend_pullback", "tradingview_trend", "tradingview_pullback", "range_breakout"}:
         return "breakout/continuation with structure stop and trailing/time exit"
     if family in {
         "exhaustion_reversal",
@@ -807,6 +883,8 @@ def strategy_for_family(family: str) -> str:
         "double_bottom",
         "double_top",
         "reclaim",
+        "base_reclaim",
+        "liquidity_reversal",
         "tradingview_momentum",
         "tradingview_oscillator",
     }:
@@ -818,12 +896,16 @@ def strategy_for_family(family: str) -> str:
 
 def confirmation_for_family(family: str, direction: str) -> str:
     side = "above" if direction == "long" else "below"
-    if family in {"trend_start", "tradingview_trend"}:
+    if family in {"trend_start", "tradingview_trend", "range_breakout"}:
         return f"Enter only after the next bar holds {side} the displacement midpoint or breaks continuation in the hinted direction."
     if family in {"trend_pullback", "tradingview_pullback"}:
         return f"Require the pullback to hold VWAP or VWMA/TEMA alignment, then enter after a micro break {side} the pullback range."
     if family in {"volume_price_mismatch", "tradingview_volume_price"}:
         return "Wait for price to reclaim/lose VWAP or break the prior micro swing in the hinted direction."
+    if family == "liquidity_reversal":
+        return "Require the sweep to fail back inside the prior range, then enter after midpoint/VWAP confirmation."
+    if family == "base_reclaim":
+        return "Require a local base break/reclaim after failed continuation, with the base low/high defining invalidation."
     if family in {"tradingview_momentum", "tradingview_oscillator"}:
         return "Require oscillator repair/fade to be followed by price reclaim/reject of the event midpoint or VWAP."
     if family in {"double_bottom", "double_top"}:
@@ -832,8 +914,12 @@ def confirmation_for_family(family: str, direction: str) -> str:
 
 
 def invalidation_for_family(family: str, direction: str) -> str:
-    if family in {"trend_start", "trend_pullback", "tradingview_trend", "tradingview_pullback"}:
+    if family in {"trend_start", "trend_pullback", "tradingview_trend", "tradingview_pullback", "range_breakout"}:
         return "Invalidate if price closes back through the breakout/displacement origin or volume expansion reverses against the trade."
+    if family == "liquidity_reversal":
+        return "Invalidate beyond the sweep extreme; do not keep the trade if price accepts outside the swept level."
+    if family == "base_reclaim":
+        return "Invalidate if price breaks back through the local base after the reclaim/reject confirmation."
     if family in {"tradingview_momentum", "tradingview_oscillator"}:
         return "Invalidate if the oscillator signal reverses and price cannot hold the event midpoint or VWAP within the test horizon."
     if direction == "long":

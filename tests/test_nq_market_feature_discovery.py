@@ -171,6 +171,83 @@ def test_tradingview_indicator_feature_ids_are_registered_and_triggerable() -> N
     assert features["vwma_tema_pullback_continuation_long"].signal.any()
 
 
+def test_screenshot_trade_point_feature_gaps_are_covered() -> None:
+    frame = _three_wave_reversal_frame()
+    periods = len(frame)
+    frame["range_100_width_atr"] = 2.0
+    frame["sweep_signal"] = np.zeros(periods, dtype=int)
+    frame["choch_signal"] = np.zeros(periods, dtype=int)
+    frame["bos_signal"] = np.zeros(periods, dtype=int)
+    frame["trix_15"] = 0.1
+    frame["trix_signal_9"] = 0.0
+    frame["force_index_z_50"] = 0.2
+    frame["cmo_14"] = 10.0
+    frame["supply_zone_retest"] = 0
+    frame["demand_zone_retest"] = 0
+    frame.loc[20:50, "Close"] = 100.0
+    frame.loc[20:50, "Open"] = 99.8
+    frame.loc[20:50, "High"] = 100.5
+    frame.loc[20:50, "Low"] = 99.5
+
+    breakdown_index = 54
+    frame.loc[breakdown_index, ["Open", "High", "Low", "Close"]] = [99.0, 99.2, 94.0, 94.5]
+    frame.loc[breakdown_index, "displacement_candle"] = 1
+    frame.loc[breakdown_index, "bos_signal"] = -1
+    frame.loc[breakdown_index, "session_vwap_distance_atr"] = -0.4
+    frame.loc[breakdown_index, "macd_hist"] = -0.7
+    frame.loc[breakdown_index, "trix_15"] = -0.2
+    frame.loc[breakdown_index, "trix_signal_9"] = 0.0
+    frame.loc[breakdown_index, "force_index_z_50"] = -0.7
+
+    breakout_index = 120
+    frame.loc[breakout_index - 8 : breakout_index - 1, "High"] = 96.0
+    frame.loc[breakout_index, ["Open", "High", "Low", "Close"]] = [95.8, 100.2, 95.5, 99.6]
+    frame.loc[breakout_index, "displacement_candle"] = 1
+    frame.loc[breakout_index, "bos_signal"] = 1
+    frame.loc[breakout_index, "session_vwap_distance_atr"] = 0.4
+    frame.loc[breakout_index, "macd_hist"] = 0.6
+    frame.loc[breakout_index - 3 : breakout_index - 1, "macd_hist"] = -0.2
+    frame.loc[breakout_index, "force_index_z_50"] = 0.8
+
+    sweep_high_index = 132
+    frame.loc[sweep_high_index - 60 : sweep_high_index - 1, "High"] = 100.0
+    frame.loc[breakout_index, ["Open", "High", "Low", "Close"]] = [100.2, 101.5, 99.8, 101.0]
+    frame.loc[sweep_high_index, ["Open", "High", "Low", "Close"]] = [99.8, 103.5, 98.5, 99.2]
+    frame.loc[sweep_high_index, "sweep_signal"] = -1
+    frame.loc[sweep_high_index, "supply_zone_retest"] = 1
+    frame.loc[sweep_high_index, "macd_hist"] = -0.3
+    frame.loc[sweep_high_index - 3 : sweep_high_index - 1, "macd_hist"] = 0.2
+    frame.loc[sweep_high_index, "cmf_20"] = -0.1
+
+    sweep_low_index = 145
+    frame.loc[sweep_low_index - 60 : sweep_low_index - 1, "Low"] = 94.0
+    frame.loc[sweep_low_index, ["Open", "High", "Low", "Close"]] = [94.2, 96.4, 91.0, 96.0]
+    frame.loc[sweep_low_index, "sweep_signal"] = 1
+    frame.loc[sweep_low_index, "demand_zone_retest"] = 1
+    frame.loc[sweep_low_index, "macd_hist"] = 0.3
+    frame.loc[sweep_low_index - 3 : sweep_low_index - 1, "macd_hist"] = -0.2
+    frame.loc[sweep_low_index, "cmf_20"] = 0.1
+
+    base_reclaim_index = 160
+    frame.loc[80:110, "Close"] = np.linspace(100.0, 88.0, 31)
+    frame.loc[base_reclaim_index - 30 : base_reclaim_index - 1, "Low"] = 90.0
+    frame.loc[base_reclaim_index - 8 : base_reclaim_index - 1, "High"] = 92.0
+    frame.loc[base_reclaim_index, ["Open", "High", "Low", "Close"]] = [91.0, 94.8, 90.2, 94.2]
+    frame.loc[base_reclaim_index, "choch_signal"] = 1
+    frame.loc[base_reclaim_index, "range_100_position"] = 0.25
+    frame.loc[base_reclaim_index, "macd_hist"] = 0.4
+    frame.loc[base_reclaim_index - 3 : base_reclaim_index - 1, "macd_hist"] = -0.2
+    frame.loc[base_reclaim_index, "force_index_z_50"] = 0.7
+
+    features = {feature.feature_id: feature for feature in script.build_market_features(frame)}
+
+    assert features["range_compression_breakdown_short"].signal.any()
+    assert features["range_compression_breakout_long"].signal.any()
+    assert features["supply_sweep_rejection_short"].signal.any()
+    assert features["demand_sweep_reclaim_long"].signal.any()
+    assert features["low_base_reclaim_long"].signal.any()
+
+
 def _three_wave_reversal_frame() -> pd.DataFrame:
     periods = 180
     ts = pd.date_range("2026-01-01 13:30", periods=periods, freq="min", tz="UTC")
