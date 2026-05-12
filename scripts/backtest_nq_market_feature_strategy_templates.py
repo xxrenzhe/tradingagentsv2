@@ -87,6 +87,8 @@ def template_pool(
                                 for atr_mult in stop_atr_mult:
                                     if entry_mode not in {
                                         "pullback_reclaim",
+                                        "reclaim_break",
+                                        "strong_reclaim_break",
                                         "reclaim_followthrough",
                                         "reclaim_hold",
                                         "quality_reclaim",
@@ -660,6 +662,61 @@ def resolve_entry_indexes(
                     & (close[previous] < event_mid[valid_positions])
                     & (close[valid_probe] < low[previous])
                     & (close[valid_probe] < open_prices[valid_probe])
+                )
+        elif entry_mode == "reclaim_break":
+            previous = valid_probe - 1
+            if direction > 0:
+                pulled_back = low[previous] <= event_close[valid_positions] - pullback_atr * event_atr[valid_positions]
+                valid_condition = (
+                    pulled_back
+                    & (close[previous] > event_mid[valid_positions])
+                    & (close[valid_probe] > high[previous])
+                )
+            else:
+                pulled_back = high[previous] >= event_close[valid_positions] + pullback_atr * event_atr[valid_positions]
+                valid_condition = (
+                    pulled_back
+                    & (close[previous] < event_mid[valid_positions])
+                    & (close[valid_probe] < low[previous])
+                )
+        elif entry_mode == "strong_reclaim_break":
+            previous = valid_probe - 1
+            previous_range = high[previous] - low[previous]
+            probe_range = high[valid_probe] - low[valid_probe]
+            previous_close_position = np.divide(
+                close[previous] - low[previous],
+                previous_range,
+                out=np.full(len(valid_probe), 0.5, dtype=float),
+                where=previous_range > 0,
+            )
+            probe_close_position = np.divide(
+                close[valid_probe] - low[valid_probe],
+                probe_range,
+                out=np.full(len(valid_probe), 0.5, dtype=float),
+                where=probe_range > 0,
+            )
+            breakout_buffer = np.maximum(0.25, 0.05 * event_atr[valid_positions])
+            if direction > 0:
+                pulled_back = low[previous] <= event_close[valid_positions] - pullback_atr * event_atr[valid_positions]
+                valid_condition = (
+                    pulled_back
+                    & (close[previous] > event_mid[valid_positions])
+                    & (previous_close_position >= 0.55)
+                    & (close[valid_probe] > high[previous] + breakout_buffer)
+                    & (close[valid_probe] > open_prices[valid_probe])
+                    & (probe_close_position >= 0.65)
+                    & (low[valid_probe] >= event_mid[valid_positions])
+                )
+            else:
+                pulled_back = high[previous] >= event_close[valid_positions] + pullback_atr * event_atr[valid_positions]
+                valid_condition = (
+                    pulled_back
+                    & (close[previous] < event_mid[valid_positions])
+                    & (previous_close_position <= 0.45)
+                    & (close[valid_probe] < low[previous] - breakout_buffer)
+                    & (close[valid_probe] < open_prices[valid_probe])
+                    & (probe_close_position <= 0.35)
+                    & (high[valid_probe] <= event_mid[valid_positions])
                 )
         elif entry_mode == "quality_reclaim":
             previous = valid_probe - 1

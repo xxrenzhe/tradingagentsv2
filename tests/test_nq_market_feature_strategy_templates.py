@@ -788,6 +788,108 @@ def test_quality_reclaim_requires_strong_close_through_prior_bar() -> None:
     assert np.isnan(entries[1])
 
 
+def test_reclaim_break_enters_after_reclaim_bar_breaks() -> None:
+    event_indexes = np.asarray([2, 6])
+    open_prices = np.full(12, 100.0)
+    high = np.full(12, 101.0)
+    low = np.full(12, 99.0)
+    close = np.full(12, 100.0)
+    atr = np.full(12, 2.0)
+    low[3] = 98.5
+    close[3] = 100.7
+    high[3] = 101.0
+    close[4] = 101.3
+    high[4] = 101.5
+    low[7] = 98.5
+    close[7] = 100.7
+    high[7] = 101.0
+    close[8] = 101.0
+
+    entries = script.resolve_entry_indexes(
+        event_indexes=event_indexes,
+        open_prices=open_prices,
+        high=high,
+        low=low,
+        close=close,
+        atr=atr,
+        direction=1,
+        entry_mode="reclaim_break",
+        confirm_bars=3,
+        pullback_atr=0.25,
+    )
+
+    assert entries[0] == 5
+    assert np.isnan(entries[1])
+
+
+def test_strong_reclaim_break_requires_buffered_high_close_and_midpoint_hold() -> None:
+    event_indexes = np.asarray([2, 6])
+    open_prices = np.full(12, 100.0)
+    high = np.full(12, 101.0)
+    low = np.full(12, 99.0)
+    close = np.full(12, 100.0)
+    atr = np.full(12, 2.0)
+    low[3] = 98.5
+    high[3] = 101.0
+    close[3] = 100.8
+    open_prices[4] = 100.8
+    low[4] = 100.7
+    high[4] = 101.7
+    close[4] = 101.55
+    low[7] = 98.5
+    high[7] = 101.0
+    close[7] = 100.8
+    open_prices[8] = 100.8
+    low[8] = 100.4
+    high[8] = 101.7
+    close[8] = 101.2
+
+    entries = script.resolve_entry_indexes(
+        event_indexes=event_indexes,
+        open_prices=open_prices,
+        high=high,
+        low=low,
+        close=close,
+        atr=atr,
+        direction=1,
+        entry_mode="strong_reclaim_break",
+        confirm_bars=3,
+        pullback_atr=0.25,
+    )
+
+    assert entries[0] == 5
+    assert np.isnan(entries[1])
+
+
+def test_reclaim_break_supports_short_direction() -> None:
+    event_indexes = np.asarray([2])
+    open_prices = np.full(8, 100.0)
+    high = np.full(8, 101.0)
+    low = np.full(8, 99.0)
+    close = np.full(8, 100.0)
+    atr = np.full(8, 2.0)
+    high[3] = 102.5
+    low[3] = 99.0
+    close[3] = 99.4
+    low[4] = 98.6
+    close[4] = 98.8
+
+    entries = script.resolve_entry_indexes(
+        event_indexes=event_indexes,
+        open_prices=open_prices,
+        high=high,
+        low=low,
+        close=close,
+        atr=atr,
+        direction=-1,
+        entry_mode="reclaim_break",
+        confirm_bars=3,
+        pullback_atr=0.25,
+    )
+
+    assert entries[0] == 5
+
+
 def test_hybrid_event_atr_caps_structural_stop_distance() -> None:
     template = script.StrategyTemplate(
         name="hybrid",
