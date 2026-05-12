@@ -605,13 +605,7 @@ def aggregate_results(folds: pd.DataFrame) -> pd.DataFrame:
     grouped["positive_test_fold_rate"] = grouped["positive_test_folds"] / grouped["selected_folds"].clip(lower=1)
     grouped["pass_fold_rate"] = grouped["pass_folds"] / grouped["selected_folds"].clip(lower=1)
     grouped["net_to_drawdown"] = grouped["test_net_points"] / grouped["test_max_drawdown_points"].clip(lower=1.0)
-    grouped["stable_candidate"] = (
-        (grouped["selected_folds"] >= 3)
-        & (grouped["positive_test_fold_rate"] >= 0.67)
-        & (grouped["test_net_points"] > 0)
-        & (grouped["avg_test_expectancy_points"] > 0)
-        & (grouped["net_to_drawdown"] >= 1.0)
-    )
+    grouped["stable_candidate"] = apply_stability_gate(grouped)
     grouped["ranking_score"] = (
         grouped["test_net_points"].clip(lower=0) * 0.001
         + grouped["net_to_drawdown"].clip(lower=0)
@@ -619,6 +613,50 @@ def aggregate_results(folds: pd.DataFrame) -> pd.DataFrame:
         + grouped["avg_test_expectancy_points"].clip(lower=0)
     )
     return grouped.sort_values(
+        ["stable_candidate", "positive_test_fold_rate", "pass_fold_rate", "ranking_score", "test_net_points"],
+        ascending=[False, False, False, False, False],
+    ).reset_index(drop=True)
+
+
+def apply_stability_gate(
+    grouped: pd.DataFrame,
+    *,
+    min_selected_folds: int = 3,
+    min_test_trades: int = 0,
+    min_positive_test_fold_rate: float = 0.67,
+    min_test_win_rate: float = 0.0,
+    min_test_profit_factor: float = 0.0,
+    min_test_payoff_ratio: float = 0.0,
+    min_net_to_drawdown: float = 1.0,
+) -> pd.Series:
+    return (
+        (pd.to_numeric(grouped["selected_folds"], errors="coerce") >= min_selected_folds)
+        & (pd.to_numeric(grouped["test_trades"], errors="coerce") >= min_test_trades)
+        & (pd.to_numeric(grouped["positive_test_fold_rate"], errors="coerce") >= min_positive_test_fold_rate)
+        & (pd.to_numeric(grouped["test_net_points"], errors="coerce") > 0)
+        & (pd.to_numeric(grouped["avg_test_expectancy_points"], errors="coerce") > 0)
+        & (pd.to_numeric(grouped["avg_test_win_rate"], errors="coerce") > min_test_win_rate)
+        & (pd.to_numeric(grouped["avg_test_profit_factor"], errors="coerce") > min_test_profit_factor)
+        & (pd.to_numeric(grouped["avg_test_payoff_ratio"], errors="coerce") > min_test_payoff_ratio)
+        & (pd.to_numeric(grouped["net_to_drawdown"], errors="coerce") >= min_net_to_drawdown)
+    )
+
+
+def apply_cli_stability_gate(aggregate: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
+    if aggregate.empty:
+        return aggregate
+    result = aggregate.copy()
+    result["stable_candidate"] = apply_stability_gate(
+        result,
+        min_selected_folds=args.min_selected_folds,
+        min_test_trades=args.min_aggregate_test_trades,
+        min_positive_test_fold_rate=args.min_positive_test_fold_rate,
+        min_test_win_rate=args.gate_win_rate,
+        min_test_profit_factor=args.gate_profit_factor,
+        min_test_payoff_ratio=args.gate_payoff_ratio,
+        min_net_to_drawdown=args.gate_net_to_drawdown,
+    )
+    return result.sort_values(
         ["stable_candidate", "positive_test_fold_rate", "pass_fold_rate", "ranking_score", "test_net_points"],
         ascending=[False, False, False, False, False],
     ).reset_index(drop=True)
@@ -706,6 +744,7 @@ def write_report(
         f"- Sessions: `{', '.join(args.sessions)}`.",
         f"- Stops: `{', '.join(args.stop_modes)}`; R targets: `{', '.join(str(value) for value in args.reward_risks)}`.",
         f"- Walk-forward train/purge/test/step days: `{args.train_days}` / `{args.purge_days}` / `{args.test_days}` / `{args.step_days}`.",
+        f"- Stable gate: selected_folds >= `{args.min_selected_folds}`, aggregate trades >= `{args.min_aggregate_test_trades}`, positive fold rate >= `{args.min_positive_test_fold_rate:.2%}`, win rate > `{args.gate_win_rate:.2%}`, PF > `{args.gate_profit_factor:.2f}`, payoff > `{args.gate_payoff_ratio:.2f}`, net/DD >= `{args.gate_net_to_drawdown:.2f}`.",
         "",
         "## Verdict",
         "",
@@ -809,6 +848,13 @@ def main() -> int:
     parser.add_argument("--step-days", type=int, default=90)
     parser.add_argument("--max-fold-candidates", type=int, default=25)
     parser.add_argument("--full-sample-limit", type=int, default=40)
+    parser.add_argument("--min-selected-folds", type=int, default=3)
+    parser.add_argument("--min-aggregate-test-trades", type=int, default=60)
+    parser.add_argument("--min-positive-test-fold-rate", type=float, default=0.67)
+    parser.add_argument("--gate-win-rate", type=float, default=0.0)
+    parser.add_argument("--gate-profit-factor", type=float, default=0.0)
+    parser.add_argument("--gate-payoff-ratio", type=float, default=0.0)
+    parser.add_argument("--gate-net-to-drawdown", type=float, default=1.0)
     parser.add_argument("--min-train-trades", type=int, default=50)
     parser.add_argument("--min-test-trades", type=int, default=10)
     parser.add_argument("--min-train-profit-factor", type=float, default=1.05)
@@ -846,7 +892,7 @@ def main() -> int:
                     costs=costs,
                 )
     folds, oos_trades, candidate_trades = evaluate_candidates(outcome_cache, candidates, args)
-    aggregate = aggregate_results(folds)
+    aggregate = apply_cli_stability_gate(aggregate_results(folds), args)
     full_sample = full_sample_summary(candidate_trades, aggregate, args.full_sample_limit)
 
     for output_path, data in [

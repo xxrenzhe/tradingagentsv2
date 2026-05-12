@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 
@@ -36,6 +37,23 @@ def enrich_state_features(features: pd.DataFrame) -> pd.DataFrame:
     low = pd.to_numeric(frame["Low"], errors="coerce")
     close = pd.to_numeric(frame["Close"], errors="coerce")
     volume = pd.to_numeric(frame["Volume"], errors="coerce").fillna(0.0)
+    if "return_1m" not in frame.columns:
+        frame["return_1m"] = close.pct_change()
+    true_range = _true_range(high, low, close)
+    if "atr_14" not in frame.columns:
+        frame["atr_14"] = true_range.rolling(14, min_periods=5).mean()
+    if "atr_30" not in frame.columns:
+        frame["atr_30"] = true_range.rolling(30, min_periods=10).mean()
+    if "range_mean_30" not in frame.columns:
+        frame["range_mean_30"] = (high - low).rolling(30, min_periods=10).mean()
+    if "vol_120" not in frame.columns:
+        frame["vol_120"] = pd.to_numeric(frame["return_1m"], errors="coerce").rolling(120, min_periods=30).std()
+    if "volume_z_60" not in frame.columns:
+        frame["volume_z_60"] = _zscore(volume, 60)
+    if "momentum_60" not in frame.columns:
+        frame["momentum_60"] = close.diff(60)
+    if "z_30" not in frame.columns:
+        frame["z_30"] = _zscore(close, 30)
     if "vwap" not in frame.columns:
         if "trade_date" in frame.columns:
             grouped_volume = volume.groupby(frame["trade_date"], sort=False)
@@ -45,6 +63,12 @@ def enrich_state_features(features: pd.DataFrame) -> pd.DataFrame:
             cumulative_volume = volume.cumsum().replace(0, pd.NA)
             frame["vwap"] = (close * volume).cumsum() / cumulative_volume
     frame["vwap_side"] = (close >= pd.to_numeric(frame["vwap"], errors="coerce")).map({True: "above", False: "below"})
+    frame["ema_10"] = close.ewm(span=10, adjust=False).mean()
+    frame["ema_20"] = close.ewm(span=20, adjust=False).mean()
+    frame["ema_50"] = close.ewm(span=50, adjust=False).mean()
+    frame["trend_stack_side"] = "flat"
+    frame.loc[(frame["ema_10"] > frame["ema_20"]) & (frame["ema_20"] > frame["ema_50"]), "trend_stack_side"] = "long"
+    frame.loc[(frame["ema_10"] < frame["ema_20"]) & (frame["ema_20"] < frame["ema_50"]), "trend_stack_side"] = "short"
     frame["trend_120"] = close - close.rolling(120).mean()
     frame["trend_side_120"] = (frame["trend_120"] >= 0).map({True: "up", False: "down"})
     frame["minute_bucket_30"] = (frame["minute_of_day"] // 30).astype("Int64")
@@ -65,7 +89,150 @@ def enrich_state_features(features: pd.DataFrame) -> pd.DataFrame:
     frame.loc[(frame["vwap_distance_points"] > 0) & (frame["vwap_distance_abs_rank"] > 0.67), "vwap_stretch_side"] = "above"
     frame.loc[(frame["vwap_distance_points"] < 0) & (frame["vwap_distance_abs_rank"] > 0.67), "vwap_stretch_side"] = "below"
     frame["return_1m_side"] = (pd.to_numeric(frame["return_1m"], errors="coerce") >= 0).map({True: "positive", False: "negative"})
+    frame = _enrich_price_volume_state(frame, high=high, low=low, close=close, volume=volume)
+    frame = _enrich_tradingview_state(frame, high=high, low=low, close=close)
     return frame
+
+
+def _true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
+    previous_close = close.shift(1)
+    return pd.concat(
+        [high - low, (high - previous_close).abs(), (low - previous_close).abs()],
+        axis=1,
+    ).max(axis=1)
+
+
+def _zscore(values: pd.Series, lookback: int) -> pd.Series:
+    mean = values.rolling(lookback, min_periods=max(3, lookback // 3)).mean()
+    std = values.rolling(lookback, min_periods=max(3, lookback // 3)).std().replace(0, np.nan)
+    return (values - mean) / std
+
+
+def _rsi(close: pd.Series, period: int) -> pd.Series:
+    delta = close.diff()
+    gain = delta.clip(lower=0).rolling(period, min_periods=period // 2).mean()
+    loss = (-delta.clip(upper=0)).rolling(period, min_periods=period // 2).mean()
+    rs = gain / loss.replace(0, np.nan)
+    return 100 - (100 / (1 + rs))
+
+
+def _enrich_price_volume_state(
+    frame: pd.DataFrame,
+    *,
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    volume: pd.Series,
+) -> pd.DataFrame:
+    result = frame.copy()
+    session_key = result["trade_date"] if "trade_date" in result.columns else pd.Series("all", index=result.index)
+    cumulative_session_volume = volume.groupby(session_key, sort=False).cumsum().replace(0, np.nan)
+    result["session_vwap"] = (close * volume).groupby(session_key, sort=False).cumsum() / cumulative_session_volume
+    result["session_vwap_distance_atr"] = (close - result["session_vwap"]) / pd.to_numeric(result["atr_30"], errors="coerce").replace(0, np.nan)
+    result["session_vwap_side"] = (close >= result["session_vwap"]).map({True: "above", False: "below"})
+    result["session_vwap_stretch_side"] = "neutral"
+    result.loc[result["session_vwap_distance_atr"] >= 0.5, "session_vwap_stretch_side"] = "above"
+    result.loc[result["session_vwap_distance_atr"] <= -0.5, "session_vwap_stretch_side"] = "below"
+    result["relative_volume_20"] = volume / volume.rolling(20, min_periods=5).mean().replace(0, np.nan)
+    result["relative_volume_side"] = "normal"
+    result.loc[result["relative_volume_20"] >= 1.2, "relative_volume_side"] = "expanding"
+    result.loc[result["relative_volume_20"] <= 0.75, "relative_volume_side"] = "drying"
+    signed_volume = volume * np.sign(close.diff().fillna(0.0))
+    obv = signed_volume.cumsum()
+    result["obv_slope_20"] = obv.diff(20)
+    result["obv_slope_side"] = (result["obv_slope_20"] >= 0).map({True: "up", False: "down"})
+    money_flow_multiplier = ((close - low) - (high - close)) / (high - low).replace(0, np.nan)
+    result["cmf_20"] = (money_flow_multiplier.fillna(0.0) * volume).rolling(20, min_periods=10).sum() / volume.rolling(
+        20, min_periods=10
+    ).sum().replace(0, np.nan)
+    result["cmf_side"] = (result["cmf_20"] >= 0).map({True: "positive", False: "negative"})
+    typical_price = (high + low + close) / 3.0
+    raw_money_flow = typical_price * volume
+    positive_flow = raw_money_flow.where(typical_price > typical_price.shift(1), 0.0)
+    negative_flow = raw_money_flow.where(typical_price < typical_price.shift(1), 0.0)
+    money_ratio = positive_flow.rolling(14, min_periods=7).sum() / negative_flow.rolling(14, min_periods=7).sum().replace(0, np.nan)
+    result["mfi_14"] = 100 - (100 / (1 + money_ratio))
+    result["mfi_side"] = "neutral"
+    result.loc[result["mfi_14"] > 50, "mfi_side"] = "bullish"
+    result.loc[result["mfi_14"] < 50, "mfi_side"] = "bearish"
+    result["price_volume_corr_20"] = pd.to_numeric(result["return_1m"], errors="coerce").rolling(20, min_periods=10).corr(volume.pct_change())
+    result["price_volume_corr_side"] = "neutral"
+    result.loc[result["price_volume_corr_20"] > 0, "price_volume_corr_side"] = "positive"
+    result.loc[result["price_volume_corr_20"] < 0, "price_volume_corr_side"] = "negative"
+    volume_price_trend = (volume * close.pct_change().fillna(0.0)).cumsum()
+    result["volume_price_trend_slope_20"] = volume_price_trend.diff(20)
+    result["volume_price_trend_side"] = (result["volume_price_trend_slope_20"] >= 0).map({True: "up", False: "down"})
+    result["bullish_volume_divergence"] = ((close < close.shift(20)) & (obv > obv.shift(20))).astype(int)
+    result["bearish_volume_divergence"] = ((close > close.shift(20)) & (obv < obv.shift(20))).astype(int)
+    result["volume_breakout_signal"] = (
+        (result["relative_volume_20"] >= 1.8)
+        & ((high - low) >= pd.to_numeric(result["atr_30"], errors="coerce").fillna(high - low))
+    ).astype(int)
+    result["low_volume_pullback"] = (
+        (result["relative_volume_20"] <= 0.75)
+        & ((high - low) <= pd.to_numeric(result["atr_30"], errors="coerce").fillna(high - low))
+    ).astype(int)
+    return result
+
+
+def _enrich_tradingview_state(
+    frame: pd.DataFrame,
+    *,
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+) -> pd.DataFrame:
+    result = frame.copy()
+    ema_12 = close.ewm(span=12, adjust=False).mean()
+    ema_26 = close.ewm(span=26, adjust=False).mean()
+    result["macd_line"] = ema_12 - ema_26
+    result["macd_signal"] = result["macd_line"].ewm(span=9, adjust=False).mean()
+    result["macd_hist"] = result["macd_line"] - result["macd_signal"]
+    result["macd_side"] = (result["macd_hist"] >= 0).map({True: "positive", False: "negative"})
+    plus_dm = high.diff().where((high.diff() > -low.diff()) & (high.diff() > 0), 0.0)
+    minus_dm = (-low.diff()).where((-low.diff() > high.diff()) & (-low.diff() > 0), 0.0)
+    atr_14 = pd.to_numeric(result["atr_14"], errors="coerce").replace(0, np.nan)
+    result["plus_di_14"] = 100 * plus_dm.rolling(14, min_periods=7).mean() / atr_14
+    result["minus_di_14"] = 100 * minus_dm.rolling(14, min_periods=7).mean() / atr_14
+    result["di_spread_14"] = result["plus_di_14"] - result["minus_di_14"]
+    result["di_side"] = (result["di_spread_14"] >= 0).map({True: "long", False: "short"})
+    dx = 100 * result["di_spread_14"].abs() / (result["plus_di_14"] + result["minus_di_14"]).replace(0, np.nan)
+    result["adx_14"] = dx.rolling(14, min_periods=7).mean()
+    result["adx_state"] = "inactive"
+    result.loc[result["adx_14"] >= 20, "adx_state"] = "active"
+    typical_price = (high + low + close) / 3.0
+    typical_mean = typical_price.rolling(20, min_periods=10).mean()
+    typical_mad = (typical_price - typical_mean).abs().rolling(20, min_periods=10).mean()
+    result["cci_20"] = (typical_price - typical_mean) / (0.015 * typical_mad.replace(0, np.nan))
+    result["cci_side"] = "neutral"
+    result.loc[result["cci_20"] > 0, "cci_side"] = "positive"
+    result.loc[result["cci_20"] < 0, "cci_side"] = "negative"
+    result["rsi_14"] = _rsi(close, 14)
+    rsi_low = result["rsi_14"].rolling(14, min_periods=7).min()
+    rsi_high = result["rsi_14"].rolling(14, min_periods=7).max()
+    stoch_rsi = 100 * (result["rsi_14"] - rsi_low) / (rsi_high - rsi_low).replace(0, np.nan)
+    result["stoch_rsi_k"] = stoch_rsi.rolling(3, min_periods=1).mean()
+    result["stoch_rsi_d"] = result["stoch_rsi_k"].rolling(3, min_periods=1).mean()
+    result["stoch_rsi_side"] = "neutral"
+    result.loc[(result["stoch_rsi_k"] > result["stoch_rsi_d"]) & (result["stoch_rsi_k"] < 80), "stoch_rsi_side"] = "recovering"
+    result.loc[(result["stoch_rsi_k"] < result["stoch_rsi_d"]) & (result["stoch_rsi_k"] > 20), "stoch_rsi_side"] = "fading"
+    donchian_high = high.rolling(20, min_periods=10).max()
+    donchian_low = low.rolling(20, min_periods=10).min()
+    result["donchian_20_position"] = (close - donchian_low) / (donchian_high - donchian_low).replace(0, np.nan)
+    result["donchian_zone"] = "middle"
+    result.loc[result["donchian_20_position"] > 0.5, "donchian_zone"] = "upper"
+    result.loc[result["donchian_20_position"] < 0.5, "donchian_zone"] = "lower"
+    middle = close.rolling(20, min_periods=10).mean()
+    std = close.rolling(20, min_periods=10).std()
+    result["boll_position"] = (close - middle) / (2 * std).replace(0, np.nan)
+    result["boll_width_atr"] = (4 * std) / pd.to_numeric(result["atr_30"], errors="coerce").replace(0, np.nan)
+    result["boll_squeeze"] = (
+        result["boll_width_atr"] <= result["boll_width_atr"].rolling(120, min_periods=30).quantile(0.25)
+    ).fillna(False).astype(int)
+    result["boll_zone"] = "middle"
+    result.loc[result["boll_position"] > 0.75, "boll_zone"] = "upper"
+    result.loc[result["boll_position"] < -0.75, "boll_zone"] = "lower"
+    return result
 
 
 def load_trades(path: str) -> pd.DataFrame:
@@ -96,7 +263,35 @@ def attach_state(trades: pd.DataFrame, features: pd.DataFrame) -> pd.DataFrame:
         "vwap_distance_abs_rank",
         "vwap_stretch_side",
         "minute_bucket_30",
+        "session_vwap_distance_atr",
+        "session_vwap_side",
+        "session_vwap_stretch_side",
+        "relative_volume_20",
+        "relative_volume_side",
+        "obv_slope_side",
+        "cmf_20",
+        "cmf_side",
+        "mfi_14",
+        "mfi_side",
+        "price_volume_corr_side",
+        "volume_price_trend_side",
+        "bullish_volume_divergence",
+        "bearish_volume_divergence",
+        "volume_breakout_signal",
+        "low_volume_pullback",
+        "macd_side",
+        "adx_state",
+        "di_side",
+        "cci_side",
+        "stoch_rsi_side",
+        "donchian_zone",
+        "boll_squeeze",
+        "boll_zone",
+        "trend_stack_side",
     ]
+    for column in state_columns:
+        if column not in features.columns:
+            features[column] = pd.NA
     state = features[state_columns].rename(columns={"ts": "entry_ts"})
     return trades.merge(state, on="entry_ts", how="left")
 
@@ -135,6 +330,42 @@ def candidate_filters(frame: pd.DataFrame) -> list[StateFilter]:
         single("vwap_distance_high", "vwap_distance_abs_rank", "gt", 0.67),
         single("vwap_stretched_above", "vwap_stretch_side", "eq", "above"),
         single("vwap_stretched_below", "vwap_stretch_side", "eq", "below"),
+        single("session_vwap_above", "session_vwap_side", "eq", "above"),
+        single("session_vwap_below", "session_vwap_side", "eq", "below"),
+        single("session_vwap_stretched_above", "session_vwap_stretch_side", "eq", "above"),
+        single("session_vwap_stretched_below", "session_vwap_stretch_side", "eq", "below"),
+        single("relative_volume_expanding", "relative_volume_side", "eq", "expanding"),
+        single("relative_volume_drying", "relative_volume_side", "eq", "drying"),
+        single("obv_slope_up", "obv_slope_side", "eq", "up"),
+        single("obv_slope_down", "obv_slope_side", "eq", "down"),
+        single("cmf_positive", "cmf_side", "eq", "positive"),
+        single("cmf_negative", "cmf_side", "eq", "negative"),
+        single("mfi_bullish", "mfi_side", "eq", "bullish"),
+        single("mfi_bearish", "mfi_side", "eq", "bearish"),
+        single("price_volume_corr_positive", "price_volume_corr_side", "eq", "positive"),
+        single("price_volume_corr_negative", "price_volume_corr_side", "eq", "negative"),
+        single("volume_price_trend_up", "volume_price_trend_side", "eq", "up"),
+        single("volume_price_trend_down", "volume_price_trend_side", "eq", "down"),
+        single("bullish_volume_divergence", "bullish_volume_divergence", "gt", 0.0),
+        single("bearish_volume_divergence", "bearish_volume_divergence", "gt", 0.0),
+        single("volume_breakout_signal", "volume_breakout_signal", "gt", 0.0),
+        single("low_volume_pullback", "low_volume_pullback", "gt", 0.0),
+        single("macd_positive", "macd_side", "eq", "positive"),
+        single("macd_negative", "macd_side", "eq", "negative"),
+        single("adx_active", "adx_state", "eq", "active"),
+        single("di_long", "di_side", "eq", "long"),
+        single("di_short", "di_side", "eq", "short"),
+        single("cci_positive", "cci_side", "eq", "positive"),
+        single("cci_negative", "cci_side", "eq", "negative"),
+        single("stoch_rsi_recovering", "stoch_rsi_side", "eq", "recovering"),
+        single("stoch_rsi_fading", "stoch_rsi_side", "eq", "fading"),
+        single("donchian_upper_half", "donchian_zone", "eq", "upper"),
+        single("donchian_lower_half", "donchian_zone", "eq", "lower"),
+        single("boll_squeeze", "boll_squeeze", "gt", 0.0),
+        single("boll_upper_zone", "boll_zone", "eq", "upper"),
+        single("boll_lower_zone", "boll_zone", "eq", "lower"),
+        single("trend_stack_long", "trend_stack_side", "eq", "long"),
+        single("trend_stack_short", "trend_stack_side", "eq", "short"),
         combo(
             "vwap_above_and_trend_120_up",
             FilterCondition("vwap_side", "eq", "above"),
@@ -245,6 +476,71 @@ def candidate_filters(frame: pd.DataFrame) -> list[StateFilter]:
             FilterCondition("volume_z_60", "gt", 1.0),
             FilterCondition("entry_close_zone", "eq", "low"),
         ),
+        combo(
+            "session_vwap_above_and_relative_volume_expanding",
+            FilterCondition("session_vwap_side", "eq", "above"),
+            FilterCondition("relative_volume_side", "eq", "expanding"),
+        ),
+        combo(
+            "session_vwap_below_and_relative_volume_expanding",
+            FilterCondition("session_vwap_side", "eq", "below"),
+            FilterCondition("relative_volume_side", "eq", "expanding"),
+        ),
+        combo(
+            "mfi_bullish_and_cmf_positive",
+            FilterCondition("mfi_side", "eq", "bullish"),
+            FilterCondition("cmf_side", "eq", "positive"),
+        ),
+        combo(
+            "mfi_bearish_and_cmf_negative",
+            FilterCondition("mfi_side", "eq", "bearish"),
+            FilterCondition("cmf_side", "eq", "negative"),
+        ),
+        combo(
+            "macd_positive_and_adx_active",
+            FilterCondition("macd_side", "eq", "positive"),
+            FilterCondition("adx_state", "eq", "active"),
+        ),
+        combo(
+            "macd_negative_and_adx_active",
+            FilterCondition("macd_side", "eq", "negative"),
+            FilterCondition("adx_state", "eq", "active"),
+        ),
+        combo(
+            "cci_positive_and_di_long",
+            FilterCondition("cci_side", "eq", "positive"),
+            FilterCondition("di_side", "eq", "long"),
+        ),
+        combo(
+            "cci_negative_and_di_short",
+            FilterCondition("cci_side", "eq", "negative"),
+            FilterCondition("di_side", "eq", "short"),
+        ),
+        combo(
+            "boll_squeeze_and_relative_volume_expanding",
+            FilterCondition("boll_squeeze", "gt", 0.0),
+            FilterCondition("relative_volume_side", "eq", "expanding"),
+        ),
+        combo(
+            "donchian_upper_half_and_adx_active",
+            FilterCondition("donchian_zone", "eq", "upper"),
+            FilterCondition("adx_state", "eq", "active"),
+        ),
+        combo(
+            "donchian_lower_half_and_adx_active",
+            FilterCondition("donchian_zone", "eq", "lower"),
+            FilterCondition("adx_state", "eq", "active"),
+        ),
+        combo(
+            "trend_stack_long_and_session_vwap_above",
+            FilterCondition("trend_stack_side", "eq", "long"),
+            FilterCondition("session_vwap_side", "eq", "above"),
+        ),
+        combo(
+            "trend_stack_short_and_session_vwap_below",
+            FilterCondition("trend_stack_side", "eq", "short"),
+            FilterCondition("session_vwap_side", "eq", "below"),
+        ),
     ]
     for bucket in sorted(frame["minute_bucket_30"].dropna().unique()):
         filters.append(single(f"minute_bucket_30_{int(bucket)}", "minute_bucket_30", "eq", int(bucket)))
@@ -265,6 +561,8 @@ def mine_filters(
     for candidate, group in trades.groupby("candidate", sort=False):
         baseline = summarize(group)
         for state_filter in filters:
+            if not has_filter_columns(group, state_filter):
+                continue
             selected = group[apply_filter(group, state_filter)]
             if selected.empty:
                 continue
@@ -309,6 +607,10 @@ def mine_filters(
     ).reset_index(drop=True)
 
 
+def has_filter_columns(frame: pd.DataFrame, state_filter: StateFilter) -> bool:
+    return all(condition.column in frame.columns for condition in state_filter.conditions)
+
+
 def apply_filter(frame: pd.DataFrame, state_filter: StateFilter) -> pd.Series:
     mask = pd.Series(True, index=frame.index)
     for condition in state_filter.conditions:
@@ -327,6 +629,8 @@ def apply_condition(frame: pd.DataFrame, condition: FilterCondition) -> pd.Serie
         return numeric < float(condition.value)
     if condition.op == "le":
         return numeric <= float(condition.value)
+    if condition.op == "ge":
+        return numeric >= float(condition.value)
     raise ValueError(f"unknown filter op: {condition.op}")
 
 

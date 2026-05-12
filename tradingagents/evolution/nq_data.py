@@ -37,7 +37,7 @@ def load_continuous_nq_bars(
     cache_key = _cache_key(source, start_date, end_date, min_volume)
     if cache and cache.exists():
         payload = pd.read_pickle(cache)
-        if payload.get("key") == cache_key:
+        if isinstance(payload, dict) and payload.get("key") == cache_key and "bars" in payload:
             return payload["bars"]
 
     start_ts = pd.Timestamp(start_date, tz="UTC")
@@ -113,4 +113,3 @@ def _filter_nq_chunk(
     chunk = chunk.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
     chunk = chunk[chunk["Volume"] >= min_volume]
     return chunk[["ts", "symbol", "Open", "High", "Low", "Close", "Volume"]]
-
