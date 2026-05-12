@@ -36,6 +36,16 @@ assert SCREENSHOT_PRESSURE_SPEC.loader is not None
 sys.modules["pressure_test_nq_screenshot_smc_candidates"] = screenshot_pressure_script
 SCREENSHOT_PRESSURE_SPEC.loader.exec_module(screenshot_pressure_script)
 
+LONG_TERM_AUDIT_SCRIPT_PATH = SCRIPTS_DIR / "audit_nq_long_term_strategy_candidates.py"
+LONG_TERM_AUDIT_SPEC = importlib.util.spec_from_file_location(
+    "audit_nq_long_term_strategy_candidates",
+    LONG_TERM_AUDIT_SCRIPT_PATH,
+)
+long_term_audit_script = importlib.util.module_from_spec(LONG_TERM_AUDIT_SPEC)
+assert LONG_TERM_AUDIT_SPEC.loader is not None
+sys.modules["audit_nq_long_term_strategy_candidates"] = long_term_audit_script
+LONG_TERM_AUDIT_SPEC.loader.exec_module(long_term_audit_script)
+
 
 def test_confirm_break_entry_ignores_events_too_close_to_end() -> None:
     event_indexes = np.asarray([2, 8])
@@ -1327,6 +1337,81 @@ def test_screenshot_pressure_summaries_and_cost_stress_are_reproducible() -> Non
     assert {"template", "start", "end", "net_points"}.issubset(rolling.columns)
 
 
+def test_long_term_audit_includes_regime_ofs_and_screenshot_pools() -> None:
+    years = list(range(2016, 2026))
+    regime_summary = pd.DataFrame(
+        {
+            "label": ["regime_a"],
+            "candidate": ["regime_breakout"],
+            "years": [10],
+            "trades": [500],
+            "net_points": [2500.0],
+            "net_dollars": [50000.0],
+            "profit_factor": [1.5],
+            "win_rate": [0.42],
+            "payoff_ratio": [2.1],
+            "expectancy_points": [5.0],
+            "max_drawdown_points": [250.0],
+            "net_to_drawdown": [10.0],
+            "positive_year_rate": [0.8],
+            "worst_year_points": [-50.0],
+            "positive_90d_rate": [0.6],
+            "worst_90d_points": [-75.0],
+            "positive_180d_rate": [0.7],
+            "worst_180d_points": [-100.0],
+            "net_at_cost_2.125": [1700.0],
+            "net_at_cost_3.125": [1200.0],
+        }
+    )
+    regime_yearly = pd.DataFrame({"label": ["regime_a"] * 10, "year": years, "trades": [50] * 10, "net_points": [250.0] * 10})
+    regime_rolling = pd.DataFrame(
+        {
+            "label": ["regime_a"] * 3,
+            "start": ["2020-01-01", "2020-04-01", "2020-07-01"],
+            "end": ["2020-03-31", "2020-06-30", "2020-09-30"],
+            "trades": [20, 20, 20],
+            "net_points": [100.0, -20.0, 120.0],
+        }
+    )
+    ofs_summary = _template_summary("ofs_a", year_count=7, trades=350, net_points=1000.0, profit_factor=1.2)
+    ofs_yearly = _template_yearly("ofs_a")
+    ofs_rolling = _template_rolling("ofs_a")
+    screenshot_summary = _template_summary(
+        "screenshot_a",
+        year_count=7,
+        trades=370,
+        net_points=650.0,
+        profit_factor=1.14,
+        family="smc_liquidity_macd_reversal",
+    )
+    screenshot_yearly = _template_yearly("screenshot_a")
+    screenshot_rolling = _template_rolling("screenshot_a")
+
+    audit, yearly, rolling = long_term_audit_script.build_candidate_audit(
+        regime_summary=regime_summary,
+        regime_yearly=regime_yearly,
+        regime_rolling90=regime_rolling,
+        regime_rolling180=regime_rolling,
+        ofs_summary=ofs_summary,
+        ofs_yearly=ofs_yearly,
+        ofs_rolling=ofs_rolling,
+        screenshot_summary=screenshot_summary,
+        screenshot_yearly=screenshot_yearly,
+        screenshot_rolling=screenshot_rolling,
+        config=long_term_audit_script.AuditConfig(min_sample_years=10),
+        base_cost_points=0.625,
+    )
+
+    assert set(audit["strategy_source"]) == {"regime_transition", "ict_order_flow_shift", "screenshot_smc_momentum"}
+    assert set(yearly["strategy_source"]) == {"regime_transition", "ict_order_flow_shift", "screenshot_smc_momentum"}
+    assert set(rolling["strategy_source"]) == {"regime_transition", "ict_order_flow_shift", "screenshot_smc_momentum"}
+    regime = audit[audit["strategy_source"] == "regime_transition"].iloc[0]
+    screenshot = audit[audit["strategy_source"] == "screenshot_smc_momentum"].iloc[0]
+    assert bool(regime["long_term_research_pass"])
+    assert not bool(screenshot["long_term_research_pass"])
+    assert "sample_years" in screenshot["research_blockers"]
+
+
 def _trade_frame() -> pd.DataFrame:
     close = np.asarray([100.0, 100.5, 101.0, 101.0, 102.0, 103.2, 103.5, 103.5, 103.5])
     open_price = np.r_[100.0, close[:-1]]
@@ -1342,6 +1427,59 @@ def _trade_frame() -> pd.DataFrame:
             "Low": low,
             "Close": close,
             "atr_30": np.full(len(close), 2.0),
+        }
+    )
+
+
+def _template_summary(
+    template: str,
+    *,
+    year_count: int,
+    trades: int,
+    net_points: float,
+    profit_factor: float,
+    family: str = "ict_order_flow_shift",
+) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "template": [template],
+            "name": [template],
+            "family": [family],
+            "year_count": [year_count],
+            "trades": [trades],
+            "net_points": [net_points],
+            "profit_factor": [profit_factor],
+            "win_rate": [0.5],
+            "payoff_ratio": [1.1],
+            "expectancy_points": [net_points / trades],
+            "max_drawdown_points": [300.0],
+            "positive_year_rate": [0.8],
+            "min_year_net_points": [-50.0],
+            "positive_rolling_rate": [0.75],
+            "min_rolling_net_points": [-100.0],
+        }
+    )
+
+
+def _template_yearly(template: str) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "template": [template] * 7,
+            "year": list(range(2020, 2027)),
+            "trades": [50] * 7,
+            "net_points": [100.0, 120.0, 80.0, -50.0, 160.0, 200.0, -20.0],
+        }
+    )
+
+
+def _template_rolling(template: str) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "template": [template] * 4,
+            "start": ["2020-01-01", "2020-07-01", "2021-01-01", "2021-07-01"],
+            "end": ["2020-06-30", "2020-12-31", "2021-06-30", "2021-12-31"],
+            "trades": [20, 20, 20, 20],
+            "net_points": [120.0, -100.0, 140.0, 160.0],
         }
     )
 
