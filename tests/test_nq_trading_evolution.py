@@ -23,6 +23,14 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from scripts.backtest_nq_evolved_rules import run_backtest
+from scripts.search_nq_tradingview_structure_strategies import (
+    TVStructureCandidate,
+    aggregate_walk_forward,
+    build_candidate_trades,
+    build_candidates,
+    select_candidate_subset,
+    walk_forward_candidates,
+)
 
 
 FIXTURE = Path("tests/fixtures/nq_evolution_llm.jsonl")
@@ -145,8 +153,16 @@ def test_tradingview_chart_structure_features_are_available_for_llm_rules() -> N
         "cci_20",
         "stoch_rsi_k",
         "donchian_20_position",
+        "boll_width_atr",
+        "boll_squeeze",
+        "boll_breakout_up",
+        "boll_breakout_down",
         "keltner_position",
         "supertrend_direction",
+        "session_vwap",
+        "session_vwap_distance_atr",
+        "session_vwap_reclaim_up",
+        "session_vwap_reclaim_down",
         "vfi_130",
         "vfi_signal_5",
         "vfi_hist",
@@ -170,6 +186,8 @@ def test_tradingview_chart_structure_features_are_available_for_llm_rules() -> N
     assert "vfi_hist_mean" in summary
     assert "eqh_signal_count" in summary
     assert "range_100_position_last" in summary
+    assert "session_vwap_distance_atr_mean" in summary
+    assert "boll_squeeze_count" in summary
 
 
 def test_rule_signature_is_stable_for_reordered_conditions() -> None:
@@ -419,6 +437,122 @@ def test_evolved_rule_oos_backtest_is_not_capped_by_validation_trade_limit(tmp_p
         note_count = connection.execute("SELECT COUNT(*) FROM experience_notes").fetchone()[0]
     assert validation_count == 1
     assert note_count >= 1
+
+
+def test_tv_structure_walk_forward_selects_from_past_only_and_requires_payoff() -> None:
+    candidate = TVStructureCandidate(
+        name="long_test",
+        direction=1,
+        trigger="choch_long",
+        filters=("vfi_positive",),
+        stop_points=4.0,
+        target_points=6.0,
+        hold_bars=8,
+        session="all",
+    )
+    rows = []
+    for index, timestamp in enumerate(pd.date_range("2020-01-01", periods=200, freq="D", tz="UTC")):
+        if timestamp < pd.Timestamp("2020-03-01", tz="UTC"):
+            net = 6.0 if index % 3 else -3.0
+        else:
+            net = 0.8 if index % 2 else -1.0
+        rows.append(
+            {
+                "entry_ts": timestamp,
+                "exit_ts": timestamp + pd.Timedelta(minutes=8),
+                "direction": 1,
+                "entry_price": 100.0,
+                "exit_price": 100.0 + net,
+                "gross_points": net,
+                "net_points": net,
+                "exit_reason": "take_profit" if net > 0 else "stop_loss",
+            }
+        )
+    trades = pd.DataFrame(rows)
+
+    folds, selected_trades = walk_forward_candidates(
+        candidate_trades={candidate.name: trades},
+        candidates=[candidate],
+        walk_start_date="2020-03-01",
+        end_date="2020-05-30",
+        train_days=30,
+        purge_days=0,
+        test_days=30,
+        step_days=30,
+        min_train_trades=10,
+        min_train_win_rate=0.53,
+        min_train_profit_factor=1.0,
+        min_train_payoff_ratio=1.0,
+        min_test_trades=10,
+        gate_win_rate=0.53,
+        gate_profit_factor=1.0,
+        gate_payoff_ratio=1.0,
+    )
+
+    assert not folds.empty
+    assert set(folds["train_end"]) <= {"2020-03-01", "2020-03-31", "2020-04-30"}
+    aggregate = aggregate_walk_forward(
+        folds=folds,
+        trades=selected_trades,
+        min_selected_folds=1,
+        min_aggregate_test_trades=10,
+        gate_win_rate=0.53,
+        gate_profit_factor=1.0,
+        gate_payoff_ratio=1.0,
+        min_positive_test_fold_rate=0.0,
+    )
+    assert "future_pass" in aggregate.columns
+    assert not bool(aggregate.iloc[0]["future_pass"])
+    assert float(aggregate.iloc[0]["test_payoff_ratio"]) <= 1.0
+
+
+def test_tv_structure_candidate_subset_balances_long_and_short() -> None:
+    selected = select_candidate_subset(build_candidates(), 20)
+
+    assert len(selected) == 20
+    assert {candidate.direction for candidate in selected} == {1, -1}
+    assert sum(1 for candidate in selected if candidate.direction > 0) == 10
+    assert sum(1 for candidate in selected if candidate.direction < 0) == 10
+
+
+def test_tv_structure_trade_builder_uses_stop_first_and_non_overlapping_entries() -> None:
+    timestamps = pd.date_range("2020-01-01 13:30:00+00:00", periods=6, freq="min")
+    features = pd.DataFrame(
+        {
+            "ts": timestamps,
+            "symbol": ["NQH0"] * 6,
+            "Open": [100.0, 100.0, 103.0, 104.0, 104.0, 106.0],
+            "High": [101.0, 105.0, 105.0, 106.0, 110.0, 111.0],
+            "Low": [99.0, 99.0, 99.0, 98.0, 103.0, 104.0],
+            "Close": [100.5, 104.0, 106.0, 105.0, 108.0, 110.0],
+            "Volume": [100] * 6,
+            "minute_of_day": [13 * 60 + 30 + index for index in range(6)],
+            "choch_signal": [1, 1, 1, 0, 0, 0],
+            "vfi_130": [1.0] * 6,
+        }
+    )
+    candidate = TVStructureCandidate(
+        name="long_stop_first",
+        direction=1,
+        trigger="choch_long",
+        filters=("vfi_positive",),
+        stop_points=2.0,
+        target_points=6.0,
+        hold_bars=2,
+        session="all",
+    )
+
+    trades = build_candidate_trades(
+        features,
+        candidate,
+        BacktestCosts(slippage_ticks_per_side=0, commission_per_contract=0),
+    )
+
+    assert len(trades) == 1
+    assert trades.iloc[0]["entry_ts"] == timestamps[1]
+    assert trades.iloc[0]["exit_ts"] == timestamps[3]
+    assert trades.iloc[0]["exit_reason"] == "stop_loss_ambiguous"
+    assert float(trades.iloc[0]["net_points"]) == -2.0
 
 
 def test_memory_records_full_chain_and_limits_prompt_state(tmp_path: Path) -> None:

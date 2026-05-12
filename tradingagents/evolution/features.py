@@ -88,7 +88,23 @@ def prepare_evolution_features(bars: pd.DataFrame) -> pd.DataFrame:
     data["rsi_14"] = _rsi(close, 14)
     middle = close.rolling(20, min_periods=10).mean()
     std = close.rolling(20, min_periods=10).std()
+    data["bollinger_mid_20"] = middle
+    data["bollinger_upper_20"] = middle + 2 * std
+    data["bollinger_lower_20"] = middle - 2 * std
     data["boll_position"] = (close - middle) / (2 * std).replace(0, np.nan)
+    data["boll_width_atr"] = ((data["bollinger_upper_20"] - data["bollinger_lower_20"]) / data["atr_30"].replace(0, np.nan))
+    data["boll_squeeze"] = (
+        data["boll_width_atr"] <= data["boll_width_atr"].rolling(120, min_periods=30).quantile(0.25)
+    ).fillna(False).astype(int)
+    data["boll_breakout_up"] = ((close > data["bollinger_upper_20"]) & (close.shift(1) <= data["bollinger_upper_20"].shift(1))).astype(int)
+    data["boll_breakout_down"] = ((close < data["bollinger_lower_20"]) & (close.shift(1) >= data["bollinger_lower_20"].shift(1))).astype(int)
+    session_key = data["trade_date"]
+    cumulative_session_volume = volume.replace(0, np.nan).groupby(session_key).cumsum()
+    data["session_vwap"] = (close * volume).groupby(session_key).cumsum() / cumulative_session_volume
+    data["session_vwap_distance"] = close - data["session_vwap"]
+    data["session_vwap_distance_atr"] = data["session_vwap_distance"] / data["atr_30"].replace(0, np.nan)
+    data["session_vwap_reclaim_up"] = ((close > data["session_vwap"]) & (close.shift(1) <= data["session_vwap"].shift(1))).astype(int)
+    data["session_vwap_reclaim_down"] = ((close < data["session_vwap"]) & (close.shift(1) >= data["session_vwap"].shift(1))).astype(int)
 
     data = _add_tradingview_style_indicators(data)
     data = _add_candlestick_features(data)
@@ -119,8 +135,10 @@ def summarize_segment_features(frame: pd.DataFrame) -> dict[str, object]:
         "price_volume_corr_20",
         "volume_price_trend_slope_20",
         "vwap_distance_z",
+        "session_vwap_distance_atr",
         "rsi_14",
         "boll_position",
+        "boll_width_atr",
         "macd_line",
         "macd_signal",
         "macd_hist",
@@ -177,6 +195,11 @@ def summarize_segment_features(frame: pd.DataFrame) -> dict[str, object]:
         "vfi_zero_cross_down",
         "vfi_bullish_divergence",
         "vfi_bearish_divergence",
+        "boll_squeeze",
+        "boll_breakout_up",
+        "boll_breakout_down",
+        "session_vwap_reclaim_up",
+        "session_vwap_reclaim_down",
         "sweep_signal",
         "choch_signal",
         "bos_signal",
