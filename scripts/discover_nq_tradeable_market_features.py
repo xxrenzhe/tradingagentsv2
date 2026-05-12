@@ -80,17 +80,53 @@ def build_market_features(data: pd.DataFrame) -> list[MarketFeature]:
     prior_high_120 = high.rolling(120, min_periods=60).max().shift(1)
     near_prior_low = (low <= prior_low_60 + 0.15 * atr) & (close > prior_low_60)
     near_prior_high = (high >= prior_high_60 - 0.15 * atr) & (close < prior_high_60)
-    donch = pd.to_numeric(data.get("donchian_20_position", np.nan), errors="coerce")
-    adx = pd.to_numeric(data.get("adx_14", np.nan), errors="coerce")
-    di_spread = pd.to_numeric(data.get("di_spread_14", np.nan), errors="coerce")
-    cmf = pd.to_numeric(data.get("cmf_20", np.nan), errors="coerce")
-    obv_slope = pd.to_numeric(data.get("obv_slope_20", np.nan), errors="coerce")
-    mfi = pd.to_numeric(data.get("mfi_14", np.nan), errors="coerce")
-    vfi = pd.to_numeric(data.get("vfi_130", np.nan), errors="coerce")
-    macd_hist = pd.to_numeric(data.get("macd_hist", np.nan), errors="coerce")
-    boll_pos = pd.to_numeric(data.get("boll_position", np.nan), errors="coerce")
-    range_pos = pd.to_numeric(data.get("range_100_position", np.nan), errors="coerce")
-    session_vwap_atr = pd.to_numeric(data.get("session_vwap_distance_atr", np.nan), errors="coerce")
+
+    def numeric(column: str, default: float = np.nan) -> pd.Series:
+        if column not in data:
+            return pd.Series(default, index=data.index, dtype="float64")
+        return pd.to_numeric(data[column], errors="coerce")
+
+    def signal(column: str) -> pd.Series:
+        if column not in data:
+            return pd.Series(False, index=data.index)
+        return pd.to_numeric(data[column], errors="coerce").fillna(0).ne(0)
+
+    donch = numeric("donchian_20_position")
+    adx = numeric("adx_14")
+    di_spread = numeric("di_spread_14")
+    cmf = numeric("cmf_20")
+    obv_slope = numeric("obv_slope_20")
+    mfi = numeric("mfi_14")
+    vfi = numeric("vfi_130")
+    macd_hist = numeric("macd_hist")
+    boll_pos = numeric("boll_position")
+    ichimoku_cloud_pos = numeric("ichimoku_cloud_position")
+    ichimoku_cloud_thickness = numeric("ichimoku_cloud_thickness_atr")
+    aroon_up = numeric("aroon_up_25")
+    aroon_down = numeric("aroon_down_25")
+    aroon_osc = numeric("aroon_osc_25")
+    trix = numeric("trix_15")
+    trix_signal = numeric("trix_signal_9")
+    tsi = numeric("tsi_25_13")
+    ultimate = numeric("ultimate_osc_7_14_28")
+    williams = numeric("williams_r_14")
+    kst = numeric("kst")
+    kst_signal = numeric("kst_signal")
+    roc_10 = numeric("roc_10")
+    roc_20 = numeric("roc_20")
+    psar_direction = numeric("psar_direction")
+    psar_distance = numeric("psar_distance_atr")
+    vortex_spread = numeric("vortex_spread_14")
+    vwma_spread = numeric("vwma_spread_atr")
+    tema_slope = numeric("tema_21_slope_atr")
+    cmo = numeric("cmo_14")
+    dpo = numeric("dpo_20")
+    chaikin = numeric("chaikin_osc_3_10")
+    chaikin_z = numeric("chaikin_osc_z_50")
+    force_z = numeric("force_index_z_50")
+    eom_z = numeric("eom_z_50")
+    range_pos = numeric("range_100_position")
+    session_vwap_atr = numeric("session_vwap_distance_atr")
     down_impulse_45 = close.diff(45) / atr <= -3.0
     up_impulse_45 = close.diff(45) / atr >= 3.0
     up_impulse_30 = close.diff(30) / atr >= 2.0
@@ -167,6 +203,204 @@ def build_market_features(data: pd.DataFrame) -> list[MarketFeature]:
             & (adx >= 18)
             & (di_spread < 0)
             & (donch < 0.4),
+        ),
+        MarketFeature(
+            "ichimoku_cloud_breakout_long",
+            "tradingview_trend",
+            "long",
+            "Price breaks above a thin Ichimoku cloud with Aroon and TRIX/KST momentum confirmation.",
+            signal("ichimoku_bullish_breakout")
+            & (ichimoku_cloud_thickness <= 2.5)
+            & (aroon_osc > 20)
+            & ((trix > trix_signal) | (kst > kst_signal) | (roc_10 > 0)),
+        ),
+        MarketFeature(
+            "ichimoku_cloud_breakdown_short",
+            "tradingview_trend",
+            "short",
+            "Price breaks below a thin Ichimoku cloud with Aroon and TRIX/KST downside momentum confirmation.",
+            signal("ichimoku_bearish_breakdown")
+            & (ichimoku_cloud_thickness <= 2.5)
+            & (aroon_osc < -20)
+            & ((trix < trix_signal) | (kst < kst_signal) | (roc_10 < 0)),
+        ),
+        MarketFeature(
+            "aroon_trend_start_long",
+            "tradingview_trend",
+            "long",
+            "Aroon flips to a fresh upside trend while price is above VWAP and medium momentum confirms.",
+            signal("aroon_bullish_cross")
+            & (aroon_up >= 70)
+            & (session_vwap_atr > 0)
+            & (roc_20 > 0)
+            & ((tsi > 0) | (kst > kst_signal)),
+        ),
+        MarketFeature(
+            "aroon_trend_start_short",
+            "tradingview_trend",
+            "short",
+            "Aroon flips to a fresh downside trend while price is below VWAP and medium momentum confirms.",
+            signal("aroon_bearish_cross")
+            & (aroon_down >= 70)
+            & (session_vwap_atr < 0)
+            & (roc_20 < 0)
+            & ((tsi < 0) | (kst < kst_signal)),
+        ),
+        MarketFeature(
+            "trix_kst_momentum_reversal_long",
+            "tradingview_momentum",
+            "long",
+            "TRIX or KST crosses up after discount/weak price, suggesting a momentum repair from oversold conditions.",
+            (signal("trix_cross_up") | signal("kst_cross_up"))
+            & ((range_pos <= 0.35) | (williams <= -70) | (ultimate <= 40))
+            & (close > close.shift(3))
+            & ((cmf > 0) | (mfi > 45) | (vfi > vfi.shift(10))),
+        ),
+        MarketFeature(
+            "trix_kst_momentum_reversal_short",
+            "tradingview_momentum",
+            "short",
+            "TRIX or KST crosses down after premium/strong price, suggesting upside momentum failure.",
+            (signal("trix_cross_down") | signal("kst_cross_down"))
+            & ((range_pos >= 0.65) | (williams >= -30) | (ultimate >= 60))
+            & (close < close.shift(3))
+            & ((cmf < 0) | (mfi < 55) | (vfi < vfi.shift(10))),
+        ),
+        MarketFeature(
+            "williams_ultimate_oversold_reclaim_long",
+            "tradingview_oscillator",
+            "long",
+            "Williams %R recovers from oversold while Ultimate Oscillator and price reclaim from a discount area.",
+            signal("williams_recover_up")
+            & (ultimate > ultimate.shift(3))
+            & ((range_pos <= 0.35) | near_prior_low)
+            & (close > (high + low) / 2)
+            & ((volume_z > 0) | (cmf > 0) | (mfi > 45)),
+        ),
+        MarketFeature(
+            "williams_ultimate_overbought_fade_short",
+            "tradingview_oscillator",
+            "short",
+            "Williams %R fades from overbought while Ultimate Oscillator and price reject a premium area.",
+            signal("williams_fade_down")
+            & (ultimate < ultimate.shift(3))
+            & ((range_pos >= 0.65) | near_prior_high)
+            & (close < (high + low) / 2)
+            & ((volume_z > 0) | (cmf < 0) | (mfi < 55)),
+        ),
+        MarketFeature(
+            "cloud_pullback_trend_long",
+            "tradingview_pullback",
+            "long",
+            "Price pulls back toward the Ichimoku cloud in an intact upside Aroon/TSI trend without losing VWAP.",
+            (ichimoku_cloud_pos.between(0.0, 1.2))
+            & (aroon_up > aroon_down)
+            & (tsi > 0)
+            & (roc_20 > 0)
+            & (session_vwap_atr >= -0.25)
+            & data["low_volume_pullback"].eq(1),
+        ),
+        MarketFeature(
+            "cloud_pullback_trend_short",
+            "tradingview_pullback",
+            "short",
+            "Price pulls back toward the Ichimoku cloud in an intact downside Aroon/TSI trend without reclaiming VWAP.",
+            (ichimoku_cloud_pos.between(-0.2, 1.0))
+            & (aroon_down > aroon_up)
+            & (tsi < 0)
+            & (roc_20 < 0)
+            & (session_vwap_atr <= 0.25)
+            & data["low_volume_pullback"].eq(1),
+        ),
+        MarketFeature(
+            "psar_vortex_trend_start_long",
+            "tradingview_trend",
+            "long",
+            "Parabolic SAR flips up with Vortex trend confirmation, VWMA/TEMA alignment, and positive money pressure.",
+            (signal("psar_flip_up") | signal("vortex_bullish_cross"))
+            & (psar_direction > 0)
+            & (psar_distance >= 0)
+            & (vortex_spread > 0)
+            & (tema_slope > 0)
+            & ((vwma_spread > 0) | (session_vwap_atr > 0))
+            & ((force_z > 0) | (chaikin > 0)),
+        ),
+        MarketFeature(
+            "psar_vortex_trend_start_short",
+            "tradingview_trend",
+            "short",
+            "Parabolic SAR flips down with Vortex trend confirmation, VWMA/TEMA alignment, and negative money pressure.",
+            (signal("psar_flip_down") | signal("vortex_bearish_cross"))
+            & (psar_direction < 0)
+            & (psar_distance <= 0)
+            & (vortex_spread < 0)
+            & (tema_slope < 0)
+            & ((vwma_spread < 0) | (session_vwap_atr < 0))
+            & ((force_z < 0) | (chaikin < 0)),
+        ),
+        MarketFeature(
+            "chaikin_force_accumulation_reversal_long",
+            "tradingview_volume_price",
+            "long",
+            "Discount-area price weakness meets Chaikin/Force accumulation and CMO repair, suggesting sell pressure is fading.",
+            ((range_pos <= 0.35) | near_prior_low | (boll_pos <= -0.75))
+            & ((signal("chaikin_bullish_cross")) | (chaikin_z > 0.5) | (force_z > 0.8))
+            & (cmo > cmo.shift(3))
+            & (close > (high + low) / 2),
+        ),
+        MarketFeature(
+            "chaikin_force_distribution_reversal_short",
+            "tradingview_volume_price",
+            "short",
+            "Premium-area price strength meets Chaikin/Force distribution and CMO deterioration, suggesting buy pressure is fading.",
+            ((range_pos >= 0.65) | near_prior_high | (boll_pos >= 0.75))
+            & ((signal("chaikin_bearish_cross")) | (chaikin_z < -0.5) | (force_z < -0.8))
+            & (cmo < cmo.shift(3))
+            & (close < (high + low) / 2),
+        ),
+        MarketFeature(
+            "cmo_dpo_cycle_reversal_long",
+            "tradingview_oscillator",
+            "long",
+            "CMO recovers from bearish momentum while DPO/EOM turn up from a discount cycle location.",
+            signal("cmo_recover_up")
+            & (dpo > dpo.shift(3))
+            & (eom_z > eom_z.shift(3))
+            & ((range_pos <= 0.4) | (williams <= -60) | (ultimate <= 45)),
+        ),
+        MarketFeature(
+            "cmo_dpo_cycle_reversal_short",
+            "tradingview_oscillator",
+            "short",
+            "CMO fades from bullish momentum while DPO/EOM turn down from a premium cycle location.",
+            signal("cmo_fade_down")
+            & (dpo < dpo.shift(3))
+            & (eom_z < eom_z.shift(3))
+            & ((range_pos >= 0.6) | (williams >= -40) | (ultimate >= 55)),
+        ),
+        MarketFeature(
+            "vwma_tema_pullback_continuation_long",
+            "tradingview_pullback",
+            "long",
+            "VWMA and TEMA stay positively aligned while a quiet pullback holds near VWAP and money pressure stays constructive.",
+            data["low_volume_pullback"].eq(1)
+            & (vwma_spread > 0)
+            & (tema_slope > 0)
+            & (psar_direction >= 0)
+            & (session_vwap_atr >= -0.25)
+            & ((force_z > -0.25) | (chaikin_z > -0.25)),
+        ),
+        MarketFeature(
+            "vwma_tema_pullback_continuation_short",
+            "tradingview_pullback",
+            "short",
+            "VWMA and TEMA stay negatively aligned while a quiet pullback stays below VWAP and money pressure stays weak.",
+            data["low_volume_pullback"].eq(1)
+            & (vwma_spread < 0)
+            & (tema_slope < 0)
+            & (psar_direction <= 0)
+            & (session_vwap_atr <= 0.25)
+            & ((force_z < 0.25) | (chaikin_z < 0.25)),
         ),
         MarketFeature(
             "fast_selloff_rebound",
@@ -565,29 +799,43 @@ def fallback_feature_analysis(
 
 
 def strategy_for_family(family: str) -> str:
-    if family in {"trend_start", "trend_pullback"}:
+    if family in {"trend_start", "trend_pullback", "tradingview_trend", "tradingview_pullback"}:
         return "breakout/continuation with structure stop and trailing/time exit"
-    if family in {"exhaustion_reversal", "absorption", "double_bottom", "double_top", "reclaim"}:
+    if family in {
+        "exhaustion_reversal",
+        "absorption",
+        "double_bottom",
+        "double_top",
+        "reclaim",
+        "tradingview_momentum",
+        "tradingview_oscillator",
+    }:
         return "confirmation reversal with extreme-based stop and VWAP/range target"
-    if family == "volume_price_mismatch":
+    if family in {"volume_price_mismatch", "tradingview_volume_price"}:
         return "confirmation-first reversal or failed-continuation strategy"
     return "family-specific bracket and time-stop comparison"
 
 
 def confirmation_for_family(family: str, direction: str) -> str:
     side = "above" if direction == "long" else "below"
-    if family == "trend_start":
+    if family in {"trend_start", "tradingview_trend"}:
         return f"Enter only after the next bar holds {side} the displacement midpoint or breaks continuation in the hinted direction."
-    if family == "volume_price_mismatch":
+    if family in {"trend_pullback", "tradingview_pullback"}:
+        return f"Require the pullback to hold VWAP or VWMA/TEMA alignment, then enter after a micro break {side} the pullback range."
+    if family in {"volume_price_mismatch", "tradingview_volume_price"}:
         return "Wait for price to reclaim/lose VWAP or break the prior micro swing in the hinted direction."
+    if family in {"tradingview_momentum", "tradingview_oscillator"}:
+        return "Require oscillator repair/fade to be followed by price reclaim/reject of the event midpoint or VWAP."
     if family in {"double_bottom", "double_top"}:
         return "Require neckline or midpoint reclaim/reject; avoid entering directly at the second touch without confirmation."
     return "Require follow-through close or failed retest in the hinted direction."
 
 
 def invalidation_for_family(family: str, direction: str) -> str:
-    if family in {"trend_start", "trend_pullback"}:
+    if family in {"trend_start", "trend_pullback", "tradingview_trend", "tradingview_pullback"}:
         return "Invalidate if price closes back through the breakout/displacement origin or volume expansion reverses against the trade."
+    if family in {"tradingview_momentum", "tradingview_oscillator"}:
+        return "Invalidate if the oscillator signal reverses and price cannot hold the event midpoint or VWAP within the test horizon."
     if direction == "long":
         return "Invalidate below the event low or if rebound cannot reclaim VWAP/midpoint within the chosen time window."
     return "Invalidate above the event high or if fade cannot lose VWAP/midpoint within the chosen time window."

@@ -155,6 +155,38 @@ def summarize_segment_features(frame: pd.DataFrame) -> dict[str, object]:
         "vfi_130",
         "vfi_signal_5",
         "vfi_hist",
+        "ichimoku_cloud_position",
+        "ichimoku_cloud_thickness_atr",
+        "aroon_up_25",
+        "aroon_down_25",
+        "aroon_osc_25",
+        "trix_15",
+        "trix_signal_9",
+        "tsi_25_13",
+        "ultimate_osc_7_14_28",
+        "williams_r_14",
+        "kst",
+        "kst_signal",
+        "roc_10",
+        "roc_20",
+        "psar",
+        "psar_direction",
+        "psar_distance_atr",
+        "vortex_plus_14",
+        "vortex_minus_14",
+        "vortex_spread_14",
+        "vwma_20",
+        "vwma_spread_atr",
+        "tema_21",
+        "tema_21_slope_atr",
+        "cmo_14",
+        "dpo_20",
+        "chaikin_osc_3_10",
+        "chaikin_osc_z_50",
+        "force_index_13",
+        "force_index_z_50",
+        "eom_14",
+        "eom_z_50",
         "range_100_position",
         "range_100_width_atr",
         "distance_to_demand_zone_atr",
@@ -195,6 +227,26 @@ def summarize_segment_features(frame: pd.DataFrame) -> dict[str, object]:
         "vfi_zero_cross_down",
         "vfi_bullish_divergence",
         "vfi_bearish_divergence",
+        "ichimoku_bullish_breakout",
+        "ichimoku_bearish_breakdown",
+        "aroon_bullish_cross",
+        "aroon_bearish_cross",
+        "trix_cross_up",
+        "trix_cross_down",
+        "tsi_cross_up",
+        "tsi_cross_down",
+        "kst_cross_up",
+        "kst_cross_down",
+        "williams_recover_up",
+        "williams_fade_down",
+        "psar_flip_up",
+        "psar_flip_down",
+        "vortex_bullish_cross",
+        "vortex_bearish_cross",
+        "chaikin_bullish_cross",
+        "chaikin_bearish_cross",
+        "cmo_recover_up",
+        "cmo_fade_down",
         "boll_squeeze",
         "boll_breakout_up",
         "boll_breakout_down",
@@ -291,8 +343,208 @@ def _add_tradingview_style_indicators(data: pd.DataFrame) -> pd.DataFrame:
     frame["supertrend_direction"] = direction
     frame["supertrend_flip"] = direction.ne(direction.shift()).fillna(False).astype(int)
 
+    frame = _add_additional_tradingview_indicators(frame, typical_price, volume)
     frame = _add_vfi_features(frame, typical_price, volume)
     return frame
+
+
+def _add_additional_tradingview_indicators(
+    frame: pd.DataFrame,
+    typical_price: pd.Series,
+    volume: pd.Series,
+) -> pd.DataFrame:
+    result = frame.copy()
+    high = result["High"]
+    low = result["Low"]
+    close = result["Close"]
+    atr = result["atr_30"].replace(0, np.nan)
+
+    conversion = (high.rolling(9, min_periods=5).max() + low.rolling(9, min_periods=5).min()) / 2.0
+    base = (high.rolling(26, min_periods=13).max() + low.rolling(26, min_periods=13).min()) / 2.0
+    span_a = (conversion + base) / 2.0
+    span_b = (high.rolling(52, min_periods=26).max() + low.rolling(52, min_periods=26).min()) / 2.0
+    cloud_top = pd.concat([span_a, span_b], axis=1).max(axis=1)
+    cloud_bottom = pd.concat([span_a, span_b], axis=1).min(axis=1)
+    result["ichimoku_conversion_9"] = conversion
+    result["ichimoku_base_26"] = base
+    result["ichimoku_span_a"] = span_a
+    result["ichimoku_span_b"] = span_b
+    result["ichimoku_cloud_position"] = (close - cloud_bottom) / (cloud_top - cloud_bottom).replace(0, np.nan)
+    result["ichimoku_cloud_thickness_atr"] = (cloud_top - cloud_bottom).abs() / atr
+    result["ichimoku_bullish_breakout"] = ((close > cloud_top) & (close.shift(1) <= cloud_top.shift(1))).astype(int)
+    result["ichimoku_bearish_breakdown"] = ((close < cloud_bottom) & (close.shift(1) >= cloud_bottom.shift(1))).astype(int)
+
+    aroon_lookback = 25
+    result["aroon_up_25"] = high.rolling(aroon_lookback, min_periods=aroon_lookback // 2).apply(
+        lambda values: 100.0 * (np.argmax(values) + 1) / len(values),
+        raw=True,
+    )
+    result["aroon_down_25"] = low.rolling(aroon_lookback, min_periods=aroon_lookback // 2).apply(
+        lambda values: 100.0 * (np.argmin(values) + 1) / len(values),
+        raw=True,
+    )
+    result["aroon_osc_25"] = result["aroon_up_25"] - result["aroon_down_25"]
+    result["aroon_bullish_cross"] = (
+        (result["aroon_up_25"] > result["aroon_down_25"])
+        & (result["aroon_up_25"].shift(1) <= result["aroon_down_25"].shift(1))
+    ).astype(int)
+    result["aroon_bearish_cross"] = (
+        (result["aroon_down_25"] > result["aroon_up_25"])
+        & (result["aroon_down_25"].shift(1) <= result["aroon_up_25"].shift(1))
+    ).astype(int)
+
+    ema_15 = close.ewm(span=15, adjust=False).mean()
+    result["trix_15"] = 100.0 * ema_15.ewm(span=15, adjust=False).mean().ewm(span=15, adjust=False).mean().pct_change()
+    result["trix_signal_9"] = result["trix_15"].ewm(span=9, adjust=False).mean()
+    result["trix_cross_up"] = ((result["trix_15"] > result["trix_signal_9"]) & (result["trix_15"].shift(1) <= result["trix_signal_9"].shift(1))).astype(int)
+    result["trix_cross_down"] = ((result["trix_15"] < result["trix_signal_9"]) & (result["trix_15"].shift(1) >= result["trix_signal_9"].shift(1))).astype(int)
+
+    momentum = close.diff()
+    abs_momentum = momentum.abs()
+    tsi_num = momentum.ewm(span=25, adjust=False).mean().ewm(span=13, adjust=False).mean()
+    tsi_den = abs_momentum.ewm(span=25, adjust=False).mean().ewm(span=13, adjust=False).mean()
+    result["tsi_25_13"] = 100.0 * tsi_num / tsi_den.replace(0, np.nan)
+    result["tsi_signal_7"] = result["tsi_25_13"].ewm(span=7, adjust=False).mean()
+    result["tsi_cross_up"] = ((result["tsi_25_13"] > result["tsi_signal_7"]) & (result["tsi_25_13"].shift(1) <= result["tsi_signal_7"].shift(1))).astype(int)
+    result["tsi_cross_down"] = ((result["tsi_25_13"] < result["tsi_signal_7"]) & (result["tsi_25_13"].shift(1) >= result["tsi_signal_7"].shift(1))).astype(int)
+
+    result["ultimate_osc_7_14_28"] = _ultimate_oscillator(high, low, close)
+    highest_14 = high.rolling(14, min_periods=7).max()
+    lowest_14 = low.rolling(14, min_periods=7).min()
+    result["williams_r_14"] = -100.0 * (highest_14 - close) / (highest_14 - lowest_14).replace(0, np.nan)
+    result["williams_recover_up"] = ((result["williams_r_14"] > -80) & (result["williams_r_14"].shift(1) <= -80)).astype(int)
+    result["williams_fade_down"] = ((result["williams_r_14"] < -20) & (result["williams_r_14"].shift(1) >= -20)).astype(int)
+
+    roc_10 = close.pct_change(10) * 100.0
+    roc_15 = close.pct_change(15) * 100.0
+    roc_20 = close.pct_change(20) * 100.0
+    roc_30 = close.pct_change(30) * 100.0
+    result["roc_10"] = roc_10
+    result["roc_20"] = roc_20
+    result["kst"] = (
+        roc_10.rolling(10, min_periods=5).sum()
+        + 2.0 * roc_15.rolling(10, min_periods=5).sum()
+        + 3.0 * roc_20.rolling(10, min_periods=5).sum()
+        + 4.0 * roc_30.rolling(15, min_periods=7).sum()
+    )
+    result["kst_signal"] = result["kst"].rolling(9, min_periods=4).mean()
+    result["kst_cross_up"] = ((result["kst"] > result["kst_signal"]) & (result["kst"].shift(1) <= result["kst_signal"].shift(1))).astype(int)
+    result["kst_cross_down"] = ((result["kst"] < result["kst_signal"]) & (result["kst"].shift(1) >= result["kst_signal"].shift(1))).astype(int)
+    result["typical_price_slope_20"] = typical_price.diff(20)
+
+    psar, psar_direction = _parabolic_sar(high, low)
+    result["psar"] = psar
+    result["psar_direction"] = psar_direction
+    result["psar_distance_atr"] = (close - psar) / atr
+    result["psar_flip_up"] = ((psar_direction > 0) & (psar_direction.shift(1) <= 0)).astype(int)
+    result["psar_flip_down"] = ((psar_direction < 0) & (psar_direction.shift(1) >= 0)).astype(int)
+
+    true_range = _true_range(high, low, close)
+    vortex_range = true_range.rolling(14, min_periods=7).sum().replace(0, np.nan)
+    result["vortex_plus_14"] = (high - low.shift(1)).abs().rolling(14, min_periods=7).sum() / vortex_range
+    result["vortex_minus_14"] = (low - high.shift(1)).abs().rolling(14, min_periods=7).sum() / vortex_range
+    result["vortex_spread_14"] = result["vortex_plus_14"] - result["vortex_minus_14"]
+    result["vortex_bullish_cross"] = (
+        (result["vortex_plus_14"] > result["vortex_minus_14"])
+        & (result["vortex_plus_14"].shift(1) <= result["vortex_minus_14"].shift(1))
+    ).astype(int)
+    result["vortex_bearish_cross"] = (
+        (result["vortex_minus_14"] > result["vortex_plus_14"])
+        & (result["vortex_minus_14"].shift(1) <= result["vortex_plus_14"].shift(1))
+    ).astype(int)
+
+    volume_sum_20 = volume.rolling(20, min_periods=10).sum().replace(0, np.nan)
+    result["vwma_20"] = (close * volume).rolling(20, min_periods=10).sum() / volume_sum_20
+    result["vwma_spread_atr"] = (close - result["vwma_20"]) / atr
+    ema_21 = close.ewm(span=21, adjust=False).mean()
+    ema_ema_21 = ema_21.ewm(span=21, adjust=False).mean()
+    ema_ema_ema_21 = ema_ema_21.ewm(span=21, adjust=False).mean()
+    result["tema_21"] = 3.0 * (ema_21 - ema_ema_21) + ema_ema_ema_21
+    result["tema_21_slope_atr"] = result["tema_21"].diff(5) / atr
+
+    cmo_gain = close.diff().clip(lower=0).rolling(14, min_periods=7).sum()
+    cmo_loss = (-close.diff().clip(upper=0)).rolling(14, min_periods=7).sum()
+    result["cmo_14"] = 100.0 * (cmo_gain - cmo_loss) / (cmo_gain + cmo_loss).replace(0, np.nan)
+    result["cmo_recover_up"] = ((result["cmo_14"] > -50) & (result["cmo_14"].shift(1) <= -50)).astype(int)
+    result["cmo_fade_down"] = ((result["cmo_14"] < 50) & (result["cmo_14"].shift(1) >= 50)).astype(int)
+    result["dpo_20"] = close - close.rolling(20, min_periods=10).mean()
+
+    money_flow_multiplier = ((close - low) - (high - close)) / (high - low).replace(0, np.nan)
+    accumulation_distribution = (money_flow_multiplier.fillna(0.0) * volume).cumsum()
+    result["chaikin_osc_3_10"] = (
+        accumulation_distribution.ewm(span=3, adjust=False).mean()
+        - accumulation_distribution.ewm(span=10, adjust=False).mean()
+    )
+    result["chaikin_osc_z_50"] = _zscore(result["chaikin_osc_3_10"], 50)
+    result["chaikin_bullish_cross"] = ((result["chaikin_osc_3_10"] > 0) & (result["chaikin_osc_3_10"].shift(1) <= 0)).astype(int)
+    result["chaikin_bearish_cross"] = ((result["chaikin_osc_3_10"] < 0) & (result["chaikin_osc_3_10"].shift(1) >= 0)).astype(int)
+
+    result["force_index_13"] = (close.diff() * volume).ewm(span=13, adjust=False).mean()
+    result["force_index_z_50"] = _zscore(result["force_index_13"], 50)
+    midpoint_change = ((high + low) / 2.0).diff()
+    box_ratio = volume / (high - low).replace(0, np.nan)
+    result["eom_14"] = (midpoint_change / box_ratio.replace(0, np.nan)).rolling(14, min_periods=7).mean()
+    result["eom_z_50"] = _zscore(result["eom_14"], 50)
+    return result
+
+
+def _parabolic_sar(high: pd.Series, low: pd.Series, step: float = 0.02, max_step: float = 0.2) -> tuple[pd.Series, pd.Series]:
+    high_values = high.to_numpy(dtype=float)
+    low_values = low.to_numpy(dtype=float)
+    sar = np.full(len(high_values), np.nan, dtype=float)
+    direction = np.zeros(len(high_values), dtype=float)
+    if len(high_values) == 0:
+        return pd.Series(sar, index=high.index), pd.Series(direction, index=high.index)
+
+    trend = 1.0
+    sar[0] = low_values[0]
+    extreme_point = high_values[0]
+    acceleration = step
+    direction[0] = trend
+
+    for index in range(1, len(high_values)):
+        candidate = sar[index - 1] + acceleration * (extreme_point - sar[index - 1])
+        if trend > 0:
+            candidate = min(candidate, low_values[index - 1])
+            if index > 1:
+                candidate = min(candidate, low_values[index - 2])
+            if low_values[index] < candidate:
+                trend = -1.0
+                sar[index] = extreme_point
+                extreme_point = low_values[index]
+                acceleration = step
+            else:
+                sar[index] = candidate
+                if high_values[index] > extreme_point:
+                    extreme_point = high_values[index]
+                    acceleration = min(acceleration + step, max_step)
+        else:
+            candidate = max(candidate, high_values[index - 1])
+            if index > 1:
+                candidate = max(candidate, high_values[index - 2])
+            if high_values[index] > candidate:
+                trend = 1.0
+                sar[index] = extreme_point
+                extreme_point = high_values[index]
+                acceleration = step
+            else:
+                sar[index] = candidate
+                if low_values[index] < extreme_point:
+                    extreme_point = low_values[index]
+                    acceleration = min(acceleration + step, max_step)
+        direction[index] = trend
+
+    return pd.Series(sar, index=high.index), pd.Series(direction, index=high.index)
+
+
+def _ultimate_oscillator(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
+    previous_close = close.shift(1)
+    buying_pressure = close - pd.concat([low, previous_close], axis=1).min(axis=1)
+    true_range = pd.concat([high, previous_close], axis=1).max(axis=1) - pd.concat([low, previous_close], axis=1).min(axis=1)
+    avg_7 = buying_pressure.rolling(7, min_periods=4).sum() / true_range.rolling(7, min_periods=4).sum().replace(0, np.nan)
+    avg_14 = buying_pressure.rolling(14, min_periods=7).sum() / true_range.rolling(14, min_periods=7).sum().replace(0, np.nan)
+    avg_28 = buying_pressure.rolling(28, min_periods=14).sum() / true_range.rolling(28, min_periods=14).sum().replace(0, np.nan)
+    return 100.0 * (4.0 * avg_7 + 2.0 * avg_14 + avg_28) / 7.0
 
 
 def _add_vfi_features(frame: pd.DataFrame, typical_price: pd.Series, volume: pd.Series) -> pd.DataFrame:

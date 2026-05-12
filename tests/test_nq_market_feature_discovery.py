@@ -84,6 +84,93 @@ def test_sequence_features_capture_breakdown_v_reversal_and_pullback_continuatio
     assert features["selloff_reversal_pullback_continuation_long"].signal.any()
 
 
+def test_tradingview_indicator_feature_ids_are_registered_and_triggerable() -> None:
+    frame = _three_wave_reversal_frame()
+    frame["ichimoku_bullish_breakout"] = 0
+    frame["ichimoku_bearish_breakdown"] = 0
+    frame["aroon_bullish_cross"] = 0
+    frame["aroon_bearish_cross"] = 0
+    frame["trix_cross_up"] = 0
+    frame["trix_cross_down"] = 0
+    frame["kst_cross_up"] = 0
+    frame["kst_cross_down"] = 0
+    frame["williams_recover_up"] = 0
+    frame["williams_fade_down"] = 0
+    frame["psar_flip_up"] = 0
+    frame["psar_flip_down"] = 0
+    frame["vortex_bullish_cross"] = 0
+    frame["vortex_bearish_cross"] = 0
+    frame["chaikin_bullish_cross"] = 0
+    frame["chaikin_bearish_cross"] = 0
+    frame["cmo_recover_up"] = 0
+    frame["cmo_fade_down"] = 0
+    frame["ichimoku_cloud_position"] = 0.5
+    frame["ichimoku_cloud_thickness_atr"] = 1.0
+    frame["aroon_up_25"] = 80.0
+    frame["aroon_down_25"] = 20.0
+    frame["aroon_osc_25"] = 60.0
+    frame["trix_15"] = 0.1
+    frame["trix_signal_9"] = 0.0
+    frame["tsi_25_13"] = 10.0
+    frame["ultimate_osc_7_14_28"] = 45.0
+    frame["williams_r_14"] = -50.0
+    frame["kst"] = 1.0
+    frame["kst_signal"] = 0.0
+    frame["roc_10"] = 0.5
+    frame["roc_20"] = 1.0
+    frame["psar_direction"] = 1.0
+    frame["psar_distance_atr"] = 0.3
+    frame["vortex_spread_14"] = 0.4
+    frame["vwma_spread_atr"] = 0.2
+    frame["tema_21_slope_atr"] = 0.1
+    frame["cmo_14"] = 15.0
+    frame["dpo_20"] = 0.2
+    frame["chaikin_osc_3_10"] = 1.0
+    frame["chaikin_osc_z_50"] = 0.6
+    frame["force_index_z_50"] = 0.8
+    frame["eom_z_50"] = 0.4
+    event_index = 160
+    frame.loc[event_index, "ichimoku_bullish_breakout"] = 1
+    frame.loc[event_index, "aroon_bullish_cross"] = 1
+    frame.loc[event_index, "psar_flip_up"] = 1
+    frame.loc[event_index, "chaikin_bullish_cross"] = 1
+    frame.loc[event_index, "cmo_recover_up"] = 1
+    frame.loc[event_index, "low_volume_pullback"] = 1
+    frame.loc[event_index, "range_100_position"] = 0.25
+    frame.loc[event_index - 3 : event_index - 1, "cmo_14"] = -10.0
+    frame.loc[event_index - 3 : event_index - 1, "dpo_20"] = -0.2
+    frame.loc[event_index - 3 : event_index - 1, "eom_z_50"] = -0.2
+
+    features = {feature.feature_id: feature for feature in script.build_market_features(frame)}
+
+    assert {
+        "ichimoku_cloud_breakout_long",
+        "ichimoku_cloud_breakdown_short",
+        "aroon_trend_start_long",
+        "aroon_trend_start_short",
+        "trix_kst_momentum_reversal_long",
+        "trix_kst_momentum_reversal_short",
+        "williams_ultimate_oversold_reclaim_long",
+        "williams_ultimate_overbought_fade_short",
+        "cloud_pullback_trend_long",
+        "cloud_pullback_trend_short",
+        "psar_vortex_trend_start_long",
+        "psar_vortex_trend_start_short",
+        "chaikin_force_accumulation_reversal_long",
+        "chaikin_force_distribution_reversal_short",
+        "cmo_dpo_cycle_reversal_long",
+        "cmo_dpo_cycle_reversal_short",
+        "vwma_tema_pullback_continuation_long",
+        "vwma_tema_pullback_continuation_short",
+    } <= set(features)
+    assert features["ichimoku_cloud_breakout_long"].signal.any()
+    assert features["aroon_trend_start_long"].signal.any()
+    assert features["psar_vortex_trend_start_long"].signal.any()
+    assert features["chaikin_force_accumulation_reversal_long"].signal.any()
+    assert features["cmo_dpo_cycle_reversal_long"].signal.any()
+    assert features["vwma_tema_pullback_continuation_long"].signal.any()
+
+
 def _three_wave_reversal_frame() -> pd.DataFrame:
     periods = 180
     ts = pd.date_range("2026-01-01 13:30", periods=periods, freq="min", tz="UTC")
