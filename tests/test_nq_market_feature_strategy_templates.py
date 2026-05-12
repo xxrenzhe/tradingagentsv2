@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
@@ -264,6 +265,268 @@ def test_staged_exit_can_fast_fail_before_scale_out() -> None:
     assert row["exit_index"] == 4
 
 
+def test_adaptive_bracket_exits_on_structure_invalidation_before_stop() -> None:
+    frame = _trade_frame()
+    frame.loc[4, ["Open", "High", "Low", "Close"]] = [101.0, 101.2, 99.2, 99.6]
+    feature = script.MarketFeature(
+        feature_id="synthetic_long",
+        family="ict_order_flow_shift",
+        direction_hint="long",
+        description="Synthetic long event.",
+        signal=pd.Series([index == 2 for index in range(len(frame))]),
+    )
+    template = script.StrategyTemplate(
+        name="synthetic_long_adaptive_bracket",
+        feature_id="synthetic_long",
+        family="ict_order_flow_shift",
+        direction=1,
+        entry_mode="next_open",
+        stop_mode="atr",
+        reward_risk=2.0,
+        horizon_minutes=5,
+        confirm_bars=1,
+        pullback_atr=0.25,
+        stop_atr_mult=2.0,
+        exit_mode="adaptive_bracket",
+        fast_fail_bars=2,
+    )
+
+    trades = script.build_template_trades(frame, feature, template, min_gap_minutes=1, min_stop_points=1.0)
+
+    assert len(trades) == 1
+    row = trades.iloc[0]
+    assert row["exit_reason"] == "structure_invalidation"
+    assert row["exit_index"] == 4
+    assert row["gross_points"] == pytest.approx(-1.4)
+
+
+def test_adaptive_staged_protects_runner_at_breakeven_after_scale_out() -> None:
+    frame = _trade_frame()
+    frame.loc[5, ["Open", "High", "Low", "Close"]] = [103.0, 103.5, 102.75, 103.25]
+    frame.loc[6, ["Open", "High", "Low", "Close"]] = [103.25, 103.4, 100.9, 101.5]
+    feature = script.MarketFeature(
+        feature_id="synthetic_long",
+        family="ict_order_flow_shift",
+        direction_hint="long",
+        description="Synthetic long event.",
+        signal=pd.Series([index == 2 for index in range(len(frame))]),
+    )
+    template = script.StrategyTemplate(
+        name="synthetic_long_adaptive",
+        feature_id="synthetic_long",
+        family="ict_order_flow_shift",
+        direction=1,
+        entry_mode="next_open",
+        stop_mode="atr",
+        reward_risk=2.0,
+        horizon_minutes=5,
+        confirm_bars=1,
+        pullback_atr=0.25,
+        stop_atr_mult=1.0,
+        exit_mode="adaptive",
+        fast_fail_bars=2,
+    )
+
+    trades = script.build_template_trades(frame, feature, template, min_gap_minutes=1, min_stop_points=1.0)
+
+    assert len(trades) == 1
+    row = trades.iloc[0]
+    assert row["exit_reason"] == "partial_breakeven"
+    assert row["exit_index"] == 6
+    assert row["gross_points"] == 1.0
+
+
+def test_staged_breakeven_protects_runner_after_scale_out() -> None:
+    frame = _trade_frame()
+    frame.loc[5, ["Open", "High", "Low", "Close"]] = [103.0, 103.5, 102.75, 103.25]
+    frame.loc[6, ["Open", "High", "Low", "Close"]] = [103.25, 103.4, 100.9, 101.5]
+    feature = script.MarketFeature(
+        feature_id="synthetic_long",
+        family="ict_order_flow_shift",
+        direction_hint="long",
+        description="Synthetic long event.",
+        signal=pd.Series([index == 2 for index in range(len(frame))]),
+    )
+    template = script.StrategyTemplate(
+        name="synthetic_long_staged_breakeven",
+        feature_id="synthetic_long",
+        family="ict_order_flow_shift",
+        direction=1,
+        entry_mode="next_open",
+        stop_mode="atr",
+        reward_risk=2.0,
+        horizon_minutes=5,
+        confirm_bars=1,
+        pullback_atr=0.25,
+        stop_atr_mult=1.0,
+        exit_mode="staged_breakeven",
+        fast_fail_bars=0,
+    )
+
+    trades = script.build_template_trades(frame, feature, template, min_gap_minutes=1, min_stop_points=1.0)
+
+    assert len(trades) == 1
+    row = trades.iloc[0]
+    assert row["exit_reason"] == "partial_breakeven"
+    assert row["exit_index"] == 6
+    assert row["gross_points"] == 1.0
+
+
+def test_breakeven_bracket_moves_stop_to_entry_after_progress() -> None:
+    frame = _trade_frame()
+    frame.loc[4, ["Open", "High", "Low", "Close"]] = [101.0, 102.7, 100.9, 102.2]
+    frame.loc[5, ["Open", "High", "Low", "Close"]] = [102.2, 102.5, 100.7, 101.2]
+    feature = script.MarketFeature(
+        feature_id="synthetic_long",
+        family="ict_order_flow_shift",
+        direction_hint="long",
+        description="Synthetic long event.",
+        signal=pd.Series([index == 2 for index in range(len(frame))]),
+    )
+    template = script.StrategyTemplate(
+        name="synthetic_long_breakeven_bracket",
+        feature_id="synthetic_long",
+        family="ict_order_flow_shift",
+        direction=1,
+        entry_mode="next_open",
+        stop_mode="atr",
+        reward_risk=2.0,
+        horizon_minutes=5,
+        confirm_bars=1,
+        pullback_atr=0.25,
+        stop_atr_mult=1.0,
+        exit_mode="breakeven_bracket",
+        fast_fail_bars=0,
+        breakeven_trigger_r=0.75,
+    )
+
+    trades = script.build_template_trades(frame, feature, template, min_gap_minutes=1, min_stop_points=1.0)
+
+    assert len(trades) == 1
+    row = trades.iloc[0]
+    assert row["exit_reason"] == "breakeven"
+    assert row["exit_index"] == 5
+    assert row["gross_points"] == 0.0
+
+
+def test_adaptive_bracket_exits_when_no_progress_after_entry() -> None:
+    frame = _trade_frame()
+    frame.loc[4, ["Open", "High", "Low", "Close"]] = [101.0, 101.8, 100.4, 100.7]
+    feature = script.MarketFeature(
+        feature_id="synthetic_long",
+        family="ict_order_flow_shift",
+        direction_hint="long",
+        description="Synthetic long event.",
+        signal=pd.Series([index == 2 for index in range(len(frame))]),
+    )
+    template = script.StrategyTemplate(
+        name="synthetic_long_adaptive_no_progress",
+        feature_id="synthetic_long",
+        family="ict_order_flow_shift",
+        direction=1,
+        entry_mode="next_open",
+        stop_mode="atr",
+        reward_risk=2.0,
+        horizon_minutes=5,
+        confirm_bars=1,
+        pullback_atr=0.25,
+        stop_atr_mult=2.0,
+        exit_mode="adaptive_bracket",
+        fast_fail_bars=2,
+    )
+
+    trades = script.build_template_trades(frame, feature, template, min_gap_minutes=1, min_stop_points=1.0)
+
+    assert len(trades) == 1
+    row = trades.iloc[0]
+    assert row["exit_reason"] == "no_progress_exit"
+    assert row["exit_index"] == 4
+    assert row["gross_points"] == pytest.approx(-0.3)
+
+
+def test_adaptive_exit_handles_rows_removed_by_stop_distance_filter() -> None:
+    frame = _trade_frame()
+    frame.loc[2, "Low"] = 98.25
+    frame.loc[5, ["Open", "High", "Low", "Close"]] = [103.0, 103.5, 102.75, 103.25]
+    feature = script.MarketFeature(
+        feature_id="synthetic_long",
+        family="ict_order_flow_shift",
+        direction_hint="long",
+        description="Two events, first removed because stop is too small.",
+        signal=pd.Series([index in {1, 2} for index in range(len(frame))]),
+    )
+    template = script.StrategyTemplate(
+        name="synthetic_long_adaptive_filter",
+        feature_id="synthetic_long",
+        family="ict_order_flow_shift",
+        direction=1,
+        entry_mode="next_open",
+        stop_mode="event_mid",
+        reward_risk=1.0,
+        horizon_minutes=5,
+        confirm_bars=1,
+        pullback_atr=0.25,
+        stop_atr_mult=1.0,
+        exit_mode="adaptive_bracket",
+        fast_fail_bars=2,
+    )
+
+    trades = script.build_template_trades(frame, feature, template, min_gap_minutes=1, min_stop_points=1.0)
+
+    assert len(trades) == 1
+    assert trades.iloc[0]["event_index"] == 2
+
+
+def test_summary_tracks_adaptive_exit_reason_rates() -> None:
+    trades = pd.DataFrame(
+        {
+            "net_points": [1.0, -1.0, -0.25, 0.5, 0.0],
+            "exit_reason": ["partial_breakeven", "structure_invalidation", "no_progress_exit", "partial_target", "breakeven"],
+        }
+    )
+
+    summary = script.summarize_trades(trades)
+
+    assert summary["structure_invalidation_exit_rate"] == 0.2
+    assert summary["no_progress_exit_rate"] == 0.2
+    assert summary["partial_breakeven_exit_rate"] == 0.2
+    assert summary["breakeven_exit_rate"] == 0.2
+
+
+def test_reclaim_followthrough_requires_next_bar_break_after_reclaim() -> None:
+    event_indexes = np.asarray([2, 6])
+    open_prices = np.full(12, 100.0)
+    high = np.full(12, 101.0)
+    low = np.full(12, 99.0)
+    close = np.full(12, 100.0)
+    atr = np.full(12, 2.0)
+    low[3] = 98.5
+    close[3] = 100.7
+    high[3] = 101.0
+    close[4] = 101.4
+    high[4] = 101.6
+    low[7] = 98.5
+    close[7] = 100.7
+    high[7] = 101.0
+    close[8] = 100.8
+
+    entries = script.resolve_entry_indexes(
+        event_indexes=event_indexes,
+        open_prices=open_prices,
+        high=high,
+        low=low,
+        close=close,
+        atr=atr,
+        direction=1,
+        entry_mode="reclaim_followthrough",
+        confirm_bars=3,
+        pullback_atr=0.25,
+    )
+
+    assert entries[0] == 5
+    assert np.isnan(entries[1])
+
+
 def test_quality_reclaim_requires_strong_close_through_prior_bar() -> None:
     event_indexes = np.asarray([2, 5])
     open_prices = np.full(12, 100.0)
@@ -426,6 +689,39 @@ def test_template_pool_respects_explicit_feature_direction() -> None:
     assert len(templates) == 2
     assert {template.direction for template in templates} == {-1}
     assert {template.stop_atr_mult for template in templates} == {1.0, 2.0}
+
+
+def test_template_pool_only_expands_breakeven_trigger_for_relevant_exit_modes() -> None:
+    market_features = {
+        "feature_long": script.MarketFeature(
+            feature_id="feature_long",
+            family="ict_order_flow_shift",
+            direction_hint="long",
+            description="Synthetic long feature.",
+            signal=pd.Series([False]),
+        )
+    }
+
+    templates = script.template_pool(
+        market_features,
+        ["feature_long"],
+        entry_modes=["next_open"],
+        stop_modes=["atr"],
+        reward_risks=[1.0],
+        horizons=[5],
+        confirm_bars=[1],
+        pullback_atr=[0.25],
+        stop_atr_mult=[1.0],
+        exit_modes=["bracket", "breakeven_bracket"],
+        fast_fail_bars=[3],
+        breakeven_trigger_r=[0.6, 0.75, 1.0],
+    )
+
+    bracket = [template for template in templates if template.exit_mode == "bracket"]
+    breakeven = [template for template in templates if template.exit_mode == "breakeven_bracket"]
+    assert len(bracket) == 1
+    assert len(breakeven) == 3
+    assert {template.breakeven_trigger_r for template in breakeven} == {0.6, 0.75, 1.0}
 
 
 def test_walk_forward_validate_selects_positive_train_template() -> None:
