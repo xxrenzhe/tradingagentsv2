@@ -233,6 +233,17 @@ def test_tradingview_chart_structure_features_are_available_for_llm_rules() -> N
         "demand_zone_retest",
         "supply_zone_retest",
         "order_block_retest_signal",
+        "bullish_fvg_low",
+        "bullish_fvg_high",
+        "bearish_fvg_low",
+        "bearish_fvg_high",
+        "distance_to_bullish_fvg_atr",
+        "distance_to_bearish_fvg_atr",
+        "bullish_fvg_retest",
+        "bearish_fvg_retest",
+        "bullish_order_flow_shift_setup",
+        "bearish_order_flow_shift_setup",
+        "ofs_leg_position",
     }
     assert expected_columns <= set(features.columns)
     summary = summarize_segment_features(features.iloc[150:220])
@@ -246,6 +257,7 @@ def test_tradingview_chart_structure_features_are_available_for_llm_rules() -> N
     assert "vortex_spread_14_mean" in summary
     assert "psar_flip_up_count" in summary
     assert "force_index_z_50_mean" in summary
+    assert "bullish_fvg_retest_count" in summary
 
 
 def test_rule_signature_is_stable_for_reordered_conditions() -> None:

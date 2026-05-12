@@ -191,6 +191,13 @@ def summarize_segment_features(frame: pd.DataFrame) -> dict[str, object]:
         "range_100_width_atr",
         "distance_to_demand_zone_atr",
         "distance_to_supply_zone_atr",
+        "bullish_fvg_low",
+        "bullish_fvg_high",
+        "bearish_fvg_low",
+        "bearish_fvg_high",
+        "distance_to_bullish_fvg_atr",
+        "distance_to_bearish_fvg_atr",
+        "ofs_leg_position",
     ]
     summary: dict[str, object] = {
         "start_ts": str(frame["ts"].iloc[0]),
@@ -256,6 +263,10 @@ def summarize_segment_features(frame: pd.DataFrame) -> dict[str, object]:
         "choch_signal",
         "bos_signal",
         "fvg_signal",
+        "bullish_fvg_retest",
+        "bearish_fvg_retest",
+        "bullish_order_flow_shift_setup",
+        "bearish_order_flow_shift_setup",
         "eqh_signal",
         "eql_signal",
         "liquidity_pool_signal",
@@ -655,6 +666,46 @@ def _add_lightglow_ict_features(data: pd.DataFrame) -> pd.DataFrame:
         & (body_share.shift(1) >= 0.55)
     )
     frame["fvg_signal"] = np.select([bullish_fvg, bearish_fvg], [BULLISH, BEARISH], default=0).astype(np.int8)
+    frame["bullish_fvg_low"] = high.shift(2).where(bullish_fvg).ffill()
+    frame["bullish_fvg_high"] = low.where(bullish_fvg).ffill()
+    frame["bearish_fvg_low"] = high.where(bearish_fvg).ffill()
+    frame["bearish_fvg_high"] = low.shift(2).where(bearish_fvg).ffill()
+    previous_bullish_fvg_low = frame["bullish_fvg_low"].shift(1)
+    previous_bullish_fvg_high = frame["bullish_fvg_high"].shift(1)
+    previous_bearish_fvg_low = frame["bearish_fvg_low"].shift(1)
+    previous_bearish_fvg_high = frame["bearish_fvg_high"].shift(1)
+    frame["bullish_fvg_retest"] = (
+        (low <= previous_bullish_fvg_high)
+        & (close >= previous_bullish_fvg_low)
+        & previous_bullish_fvg_low.notna()
+    ).fillna(False).astype(int)
+    frame["bearish_fvg_retest"] = (
+        (high >= previous_bearish_fvg_low)
+        & (close <= previous_bearish_fvg_high)
+        & previous_bearish_fvg_low.notna()
+    ).fillna(False).astype(int)
+
+    recent_bottom_sweep = bottom_sweep.rolling(20, min_periods=1).max().shift(1).fillna(False).astype(bool)
+    recent_top_sweep = top_sweep.rolling(20, min_periods=1).max().shift(1).fillna(False).astype(bool)
+    bullish_ofs_setup = recent_bottom_sweep & frame["displacement_candle"].eq(1) & (close > prior_internal_high) & bullish_fvg
+    bearish_ofs_setup = recent_top_sweep & frame["displacement_candle"].eq(1) & (close < prior_internal_low) & bearish_fvg
+    frame["bullish_order_flow_shift_setup"] = bullish_ofs_setup.fillna(False).astype(int)
+    frame["bearish_order_flow_shift_setup"] = bearish_ofs_setup.fillna(False).astype(int)
+
+    bullish_leg_low = low.rolling(20, min_periods=5).min().shift(1).where(bullish_ofs_setup).ffill()
+    bullish_leg_high = high.where(bullish_ofs_setup).ffill()
+    bearish_leg_low = low.where(bearish_ofs_setup).ffill()
+    bearish_leg_high = high.rolling(20, min_periods=5).max().shift(1).where(bearish_ofs_setup).ffill()
+    active_bullish = bullish_leg_low.notna() & (bullish_leg_high > bullish_leg_low)
+    active_bearish = bearish_leg_low.notna() & (bearish_leg_high > bearish_leg_low)
+    frame["ofs_leg_position"] = np.select(
+        [active_bullish, active_bearish],
+        [
+            (close - bullish_leg_low) / (bullish_leg_high - bullish_leg_low).replace(0, np.nan),
+            (close - bearish_leg_low) / (bearish_leg_high - bearish_leg_low).replace(0, np.nan),
+        ],
+        default=np.nan,
+    )
     return frame
 
 
@@ -687,6 +738,9 @@ def _add_chart_structure_features(data: pd.DataFrame) -> pd.DataFrame:
 
     frame["distance_to_demand_zone_atr"] = (close - demand_high) / atr
     frame["distance_to_supply_zone_atr"] = (supply_low - close) / atr
+    if {"bullish_fvg_high", "bearish_fvg_low"} <= set(frame.columns):
+        frame["distance_to_bullish_fvg_atr"] = (close - frame["bullish_fvg_high"]) / atr
+        frame["distance_to_bearish_fvg_atr"] = (frame["bearish_fvg_low"] - close) / atr
     frame["demand_zone_retest"] = ((low <= demand_high) & (close >= demand_low) & demand_low.notna()).fillna(False).astype(int)
     frame["supply_zone_retest"] = ((high >= supply_low) & (close <= supply_high) & supply_low.notna()).fillna(False).astype(int)
     frame["order_block_retest_signal"] = np.select(

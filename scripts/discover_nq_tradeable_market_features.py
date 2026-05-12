@@ -130,6 +130,8 @@ def build_market_features(data: pd.DataFrame) -> list[MarketFeature]:
     sweep = numeric("sweep_signal", default=0.0)
     choch = numeric("choch_signal", default=0.0)
     bos = numeric("bos_signal", default=0.0)
+    fvg = numeric("fvg_signal", default=0.0)
+    ofs_position = numeric("ofs_leg_position")
     session_vwap_atr = numeric("session_vwap_distance_atr")
     down_impulse_45 = close.diff(45) / atr <= -3.0
     up_impulse_45 = close.diff(45) / atr >= 3.0
@@ -155,6 +157,76 @@ def build_market_features(data: pd.DataFrame) -> list[MarketFeature]:
     local_base_high = high.rolling(30, min_periods=10).max().shift(1)
 
     features = [
+        MarketFeature(
+            "ict_bullish_order_flow_shift_setup",
+            "ict_order_flow_shift",
+            "long",
+            "Liquidity sweep below a prior low is followed by bullish displacement/MSS and a bullish FVG, marking a delivery-state shift.",
+            signal("bullish_order_flow_shift_setup")
+            & (fvg > 0)
+            & (body_share >= 0.55)
+            & (close > open_price)
+            & (macd_rising | (cmf > 0) | (force_z > 0) | (volume_z >= 0)),
+        ),
+        MarketFeature(
+            "ict_bearish_order_flow_shift_setup",
+            "ict_order_flow_shift",
+            "short",
+            "Liquidity sweep above a prior high is followed by bearish displacement/MSS and a bearish FVG, marking a delivery-state shift.",
+            signal("bearish_order_flow_shift_setup")
+            & (fvg < 0)
+            & (body_share >= 0.55)
+            & (close < open_price)
+            & (macd_falling | (cmf < 0) | (force_z < 0) | (volume_z >= 0)),
+        ),
+        MarketFeature(
+            "ict_bullish_ofs_fvg_retest_entry",
+            "ict_order_flow_shift_entry",
+            "long",
+            "After bullish OFS, price trades back into the bullish FVG/order block in discount and holds the reclaimed delivery leg.",
+            (signal("bullish_fvg_retest") | signal("demand_zone_retest"))
+            & (ofs_position <= 0.50)
+            & (ofs_position >= 0.0)
+            & ((range_pos <= 0.55) | (session_vwap_atr >= -0.50))
+            & ((close > open_price) | (close > (high + low) / 2))
+            & (macd_rising | (cmf > 0) | (force_z > 0)),
+        ),
+        MarketFeature(
+            "ict_bearish_ofs_fvg_retest_entry",
+            "ict_order_flow_shift_entry",
+            "short",
+            "After bearish OFS, price trades back into the bearish FVG/order block in premium and rejects the reclaimed delivery leg.",
+            (signal("bearish_fvg_retest") | signal("supply_zone_retest"))
+            & (ofs_position >= 0.50)
+            & (ofs_position <= 1.0)
+            & ((range_pos >= 0.45) | (session_vwap_atr <= 0.50))
+            & ((close < open_price) | (close < (high + low) / 2))
+            & (macd_falling | (cmf < 0) | (force_z < 0)),
+        ),
+        MarketFeature(
+            "ict_bullish_ofs_ob_retest_entry",
+            "ict_order_block_retest",
+            "long",
+            "Bullish OFS remains active and price retests the demand/order-block side of the displacement leg with supportive volume flow.",
+            signal("demand_zone_retest")
+            & (ofs_position <= 0.55)
+            & (sweep >= 0)
+            & ((choch > 0) | (bos > 0) | signal("bullish_fvg_retest"))
+            & (cmf > -0.05)
+            & (close >= open_price),
+        ),
+        MarketFeature(
+            "ict_bearish_ofs_ob_retest_entry",
+            "ict_order_block_retest",
+            "short",
+            "Bearish OFS remains active and price retests the supply/order-block side of the displacement leg with weak volume flow.",
+            signal("supply_zone_retest")
+            & (ofs_position >= 0.45)
+            & (sweep <= 0)
+            & ((choch < 0) | (bos < 0) | signal("bearish_fvg_retest"))
+            & (cmf < 0.05)
+            & (close <= open_price),
+        ),
         MarketFeature(
             "smc_breakdown_downtrend_wave",
             "smc_sequence",
@@ -885,6 +957,9 @@ def strategy_for_family(family: str) -> str:
         "reclaim",
         "base_reclaim",
         "liquidity_reversal",
+        "ict_order_flow_shift",
+        "ict_order_flow_shift_entry",
+        "ict_order_block_retest",
         "tradingview_momentum",
         "tradingview_oscillator",
     }:
@@ -904,6 +979,10 @@ def confirmation_for_family(family: str, direction: str) -> str:
         return "Wait for price to reclaim/lose VWAP or break the prior micro swing in the hinted direction."
     if family == "liquidity_reversal":
         return "Require the sweep to fail back inside the prior range, then enter after midpoint/VWAP confirmation."
+    if family == "ict_order_flow_shift":
+        return "Do not chase the displacement; wait for the FVG/order-block retest in the correct premium/discount half."
+    if family in {"ict_order_flow_shift_entry", "ict_order_block_retest"}:
+        return "Enter on the FVG or order-block retest only after price rejects back in the shifted order-flow direction."
     if family == "base_reclaim":
         return "Require a local base break/reclaim after failed continuation, with the base low/high defining invalidation."
     if family in {"tradingview_momentum", "tradingview_oscillator"}:
@@ -918,6 +997,8 @@ def invalidation_for_family(family: str, direction: str) -> str:
         return "Invalidate if price closes back through the breakout/displacement origin or volume expansion reverses against the trade."
     if family == "liquidity_reversal":
         return "Invalidate beyond the sweep extreme; do not keep the trade if price accepts outside the swept level."
+    if family in {"ict_order_flow_shift", "ict_order_flow_shift_entry", "ict_order_block_retest"}:
+        return "Invalidate beyond the liquidity-sweep extreme or beyond the candle that created the traded FVG/order block."
     if family == "base_reclaim":
         return "Invalidate if price breaks back through the local base after the reclaim/reject confirmation."
     if family in {"tradingview_momentum", "tradingview_oscillator"}:

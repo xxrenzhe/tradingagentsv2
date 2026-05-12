@@ -248,6 +248,78 @@ def test_screenshot_trade_point_feature_gaps_are_covered() -> None:
     assert features["low_base_reclaim_long"].signal.any()
 
 
+def test_ict_order_flow_shift_features_are_registered_and_triggerable() -> None:
+    frame = _three_wave_reversal_frame()
+    periods = len(frame)
+    frame["fvg_signal"] = np.zeros(periods, dtype=int)
+    frame["bullish_order_flow_shift_setup"] = np.zeros(periods, dtype=int)
+    frame["bearish_order_flow_shift_setup"] = np.zeros(periods, dtype=int)
+    frame["bullish_fvg_retest"] = np.zeros(periods, dtype=int)
+    frame["bearish_fvg_retest"] = np.zeros(periods, dtype=int)
+    frame["demand_zone_retest"] = np.zeros(periods, dtype=int)
+    frame["supply_zone_retest"] = np.zeros(periods, dtype=int)
+    frame["ofs_leg_position"] = np.nan
+    frame["sweep_signal"] = np.zeros(periods, dtype=int)
+    frame["choch_signal"] = np.zeros(periods, dtype=int)
+    frame["bos_signal"] = np.zeros(periods, dtype=int)
+    frame["force_index_z_50"] = 0.0
+
+    bullish_setup = 120
+    frame.loc[bullish_setup, ["Open", "High", "Low", "Close"]] = [91.0, 97.0, 90.5, 96.5]
+    frame.loc[bullish_setup, "bullish_order_flow_shift_setup"] = 1
+    frame.loc[bullish_setup, "fvg_signal"] = 1
+    frame.loc[bullish_setup, "displacement_candle"] = 1
+    frame.loc[bullish_setup, "body_share"] = 0.85
+    frame.loc[bullish_setup - 3 : bullish_setup - 1, "macd_hist"] = -0.3
+    frame.loc[bullish_setup, "macd_hist"] = 0.4
+    frame.loc[bullish_setup, "force_index_z_50"] = 0.5
+
+    bullish_entry = 126
+    frame.loc[bullish_entry, ["Open", "High", "Low", "Close"]] = [93.2, 94.4, 92.2, 94.1]
+    frame.loc[bullish_entry, "bullish_fvg_retest"] = 1
+    frame.loc[bullish_entry, "demand_zone_retest"] = 1
+    frame.loc[bullish_entry, "ofs_leg_position"] = 0.35
+    frame.loc[bullish_entry, "range_100_position"] = 0.35
+    frame.loc[bullish_entry, "cmf_20"] = 0.1
+    frame.loc[bullish_entry, "choch_signal"] = 1
+
+    bearish_setup = 145
+    frame.loc[bearish_setup, ["Open", "High", "Low", "Close"]] = [101.0, 101.5, 94.0, 94.5]
+    frame.loc[bearish_setup, "bearish_order_flow_shift_setup"] = 1
+    frame.loc[bearish_setup, "fvg_signal"] = -1
+    frame.loc[bearish_setup, "displacement_candle"] = 1
+    frame.loc[bearish_setup, "body_share"] = 0.86
+    frame.loc[bearish_setup - 3 : bearish_setup - 1, "macd_hist"] = 0.3
+    frame.loc[bearish_setup, "macd_hist"] = -0.4
+    frame.loc[bearish_setup, "force_index_z_50"] = -0.5
+
+    bearish_entry = 151
+    frame.loc[bearish_entry, ["Open", "High", "Low", "Close"]] = [97.8, 99.4, 96.8, 97.0]
+    frame.loc[bearish_entry, "bearish_fvg_retest"] = 1
+    frame.loc[bearish_entry, "supply_zone_retest"] = 1
+    frame.loc[bearish_entry, "ofs_leg_position"] = 0.65
+    frame.loc[bearish_entry, "range_100_position"] = 0.65
+    frame.loc[bearish_entry, "cmf_20"] = -0.1
+    frame.loc[bearish_entry, "choch_signal"] = -1
+
+    features = {feature.feature_id: feature for feature in script.build_market_features(frame)}
+
+    assert {
+        "ict_bullish_order_flow_shift_setup",
+        "ict_bearish_order_flow_shift_setup",
+        "ict_bullish_ofs_fvg_retest_entry",
+        "ict_bearish_ofs_fvg_retest_entry",
+        "ict_bullish_ofs_ob_retest_entry",
+        "ict_bearish_ofs_ob_retest_entry",
+    } <= set(features)
+    assert features["ict_bullish_order_flow_shift_setup"].signal.any()
+    assert features["ict_bearish_order_flow_shift_setup"].signal.any()
+    assert features["ict_bullish_ofs_fvg_retest_entry"].signal.any()
+    assert features["ict_bearish_ofs_fvg_retest_entry"].signal.any()
+    assert features["ict_bullish_ofs_ob_retest_entry"].signal.any()
+    assert features["ict_bearish_ofs_ob_retest_entry"].signal.any()
+
+
 def _three_wave_reversal_frame() -> pd.DataFrame:
     periods = 180
     ts = pd.date_range("2026-01-01 13:30", periods=periods, freq="min", tz="UTC")
