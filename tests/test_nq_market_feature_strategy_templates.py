@@ -146,6 +146,90 @@ def test_staged_exit_books_half_at_one_r_then_time_exit() -> None:
     assert row["gross_points"] == 1.75
 
 
+def test_staged_exit_uses_reward_risk_for_second_target() -> None:
+    frame = _trade_frame()
+    frame.loc[5:, "High"] = 105.5
+    feature = script.MarketFeature(
+        feature_id="synthetic_long",
+        family="trend_start",
+        direction_hint="long",
+        description="Synthetic long event.",
+        signal=pd.Series([index == 2 for index in range(len(frame))]),
+    )
+    rr1_template = script.StrategyTemplate(
+        name="synthetic_long_staged_rr1",
+        feature_id="synthetic_long",
+        family="trend_start",
+        direction=1,
+        entry_mode="next_open",
+        stop_mode="atr",
+        reward_risk=1.0,
+        horizon_minutes=5,
+        confirm_bars=1,
+        pullback_atr=0.25,
+        stop_atr_mult=1.0,
+        exit_mode="staged",
+        fast_fail_bars=0,
+    )
+    rr2_template = script.StrategyTemplate(
+        name="synthetic_long_staged_rr2",
+        feature_id="synthetic_long",
+        family="trend_start",
+        direction=1,
+        entry_mode="next_open",
+        stop_mode="atr",
+        reward_risk=2.0,
+        horizon_minutes=5,
+        confirm_bars=1,
+        pullback_atr=0.25,
+        stop_atr_mult=1.0,
+        exit_mode="staged",
+        fast_fail_bars=0,
+    )
+
+    rr1 = script.build_template_trades(frame, feature, rr1_template, min_gap_minutes=1, min_stop_points=1.0)
+    rr2 = script.build_template_trades(frame, feature, rr2_template, min_gap_minutes=1, min_stop_points=1.0)
+
+    assert rr1.iloc[0]["exit_reason"] == "partial_target"
+    assert rr2.iloc[0]["exit_reason"] == "partial_target"
+    assert rr1.iloc[0]["gross_points"] == 2.0
+    assert rr2.iloc[0]["gross_points"] == 3.0
+
+
+def test_staged_exit_can_fast_fail_before_scale_out() -> None:
+    frame = _trade_frame()
+    frame.loc[4, "Close"] = 99.5
+    feature = script.MarketFeature(
+        feature_id="synthetic_long",
+        family="trend_start",
+        direction_hint="long",
+        description="Synthetic long event.",
+        signal=pd.Series([index == 2 for index in range(len(frame))]),
+    )
+    template = script.StrategyTemplate(
+        name="synthetic_long_staged_fast_fail",
+        feature_id="synthetic_long",
+        family="trend_start",
+        direction=1,
+        entry_mode="next_open",
+        stop_mode="atr",
+        reward_risk=2.0,
+        horizon_minutes=5,
+        confirm_bars=1,
+        pullback_atr=0.25,
+        stop_atr_mult=2.0,
+        exit_mode="staged",
+        fast_fail_bars=2,
+    )
+
+    trades = script.build_template_trades(frame, feature, template, min_gap_minutes=1, min_stop_points=1.0)
+
+    assert len(trades) == 1
+    row = trades.iloc[0]
+    assert row["exit_reason"] == "fast_fail"
+    assert row["exit_index"] == 4
+
+
 def test_hybrid_event_atr_caps_structural_stop_distance() -> None:
     template = script.StrategyTemplate(
         name="hybrid",

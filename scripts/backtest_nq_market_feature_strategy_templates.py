@@ -85,7 +85,7 @@ def template_pool(
                                         continue
                                     for exit_mode in exit_modes:
                                         for fail_bars in fast_fail_bars:
-                                            if exit_mode != "fast_fail" and fail_bars != fast_fail_bars[0]:
+                                            if exit_mode not in {"fast_fail", "staged"} and fail_bars != fast_fail_bars[0]:
                                                 continue
                                             name = (
                                                 f"{feature_id}_{entry_mode}_{stop_mode}_{exit_mode}_rr{rr:g}"
@@ -215,7 +215,8 @@ def build_template_trades(
     target_hits &= same_symbol
     first_target_hits &= same_symbol
     fast_fail_hits &= same_symbol
-    if template.exit_mode == "fast_fail" and template.fast_fail_bars > 0:
+    fast_fail_enabled = template.exit_mode in {"fast_fail", "staged"} and template.fast_fail_bars > 0
+    if fast_fail_enabled:
         fast_fail_hits[:, 0] = False
         max_fast_fail_offset = min(template.fast_fail_bars, template.horizon_minutes)
         if max_fast_fail_offset + 1 < fast_fail_hits.shape[1]:
@@ -227,25 +228,43 @@ def build_template_trades(
     first_target = np.where(target_hits.any(axis=1), target_hits.argmax(axis=1), no_hit)
     first_fast_fail = np.where(fast_fail_hits.any(axis=1), fast_fail_hits.argmax(axis=1), no_hit)
     if template.exit_mode == "staged":
-        first_target_hit = np.where(first_target_hits.any(axis=1), first_target_hits.argmax(axis=1), no_hit)
-        first_event = np.minimum(first_stop, first_target_hit)
-        stopped_before_scale = first_stop <= first_target_hit
+        first_scale = np.where(first_target_hits.any(axis=1), first_target_hits.argmax(axis=1), no_hit)
+        first_event = np.minimum(np.minimum(first_stop, first_scale), first_fast_fail)
+        stopped_before_scale = first_stop <= np.minimum(first_scale, first_fast_fail)
+        fast_fail_before_scale = first_fast_fail < np.minimum(first_stop, first_scale)
+        scaled_before_exit = first_scale < np.minimum(first_stop, first_fast_fail)
         first_exit_hit = first_event < no_hit
-        realized_offsets = np.where(first_exit_hit & stopped_before_scale, first_stop, template.horizon_minutes)
-        realized_offsets = np.where(first_exit_hit & ~stopped_before_scale, template.horizon_minutes, realized_offsets)
+        target_after_scale = target_hits & (offsets[None, :] >= first_scale[:, None])
+        second_target = np.where(target_after_scale.any(axis=1), target_after_scale.argmax(axis=1), no_hit)
+        second_target_hit = scaled_before_exit & (second_target < no_hit)
+        realized_offsets = np.full(len(event_indexes), template.horizon_minutes, dtype=int)
+        realized_offsets = np.where(stopped_before_scale, first_stop, realized_offsets)
+        realized_offsets = np.where(fast_fail_before_scale, first_fast_fail, realized_offsets)
+        realized_offsets = np.where(second_target_hit, second_target, realized_offsets)
         realized_exit_indexes = entry_indexes + realized_offsets
         final_exit_prices = close[max_exit]
-        first_leg_points = np.where(stopped_before_scale, -stop_distances, stop_distances)
-        second_leg_points = (final_exit_prices - entry_prices) * direction
+        first_leg_points = np.where(scaled_before_exit, stop_distances, 0.0)
+        second_leg_points = np.where(second_target_hit, target_distances, (final_exit_prices - entry_prices) * direction)
         gross_points = np.where(
-            first_exit_hit,
-            np.where(stopped_before_scale, -stop_distances, (first_leg_points + second_leg_points) / 2.0),
+            stopped_before_scale,
+            -stop_distances,
+            np.where(
+                fast_fail_before_scale,
+                (close[realized_exit_indexes] - entry_prices) * direction,
+                np.where(scaled_before_exit, (first_leg_points + second_leg_points) / 2.0, second_leg_points),
+            ),
+        )
+        gross_points = np.where(
+            first_exit_hit | scaled_before_exit,
+            gross_points,
             second_leg_points,
         )
         exit_prices = entry_prices + gross_points * direction
         exit_reasons = np.full(len(event_indexes), "time", dtype=object)
-        exit_reasons[first_exit_hit & stopped_before_scale] = "stop_loss"
-        exit_reasons[first_exit_hit & ~stopped_before_scale] = "partial_time"
+        exit_reasons[stopped_before_scale] = "stop_loss"
+        exit_reasons[fast_fail_before_scale] = "fast_fail"
+        exit_reasons[scaled_before_exit & ~second_target_hit] = "partial_time"
+        exit_reasons[second_target_hit] = "partial_target"
     else:
         first_event = np.minimum(np.minimum(first_stop, first_target), first_fast_fail)
         bracket_hit = first_event < no_hit
@@ -483,6 +502,7 @@ def summarize_trades(trades: pd.DataFrame) -> dict[str, float]:
             "time_exit_rate": 0.0,
             "fast_fail_exit_rate": 0.0,
             "partial_time_exit_rate": 0.0,
+            "partial_target_exit_rate": 0.0,
             "median_points": 0.0,
         }
     wins = net[net > 0]
@@ -494,6 +514,7 @@ def summarize_trades(trades: pd.DataFrame) -> dict[str, float]:
     equity = net.cumsum()
     drawdown = equity.cummax() - equity
     reasons = trades["exit_reason"].astype(str) if "exit_reason" in trades.columns else pd.Series(dtype=str)
+    target_like = reasons.isin(["take_profit", "partial_target"]) if len(reasons) else pd.Series(dtype=bool)
     return {
         "trades": float(len(net)),
         "net_points": float(net.sum()),
@@ -503,11 +524,12 @@ def summarize_trades(trades: pd.DataFrame) -> dict[str, float]:
         "avg_points": float(net.mean()),
         "expectancy_points": float(net.mean()),
         "max_drawdown_points": float(drawdown.max()) if not drawdown.empty else 0.0,
-        "target_exit_rate": float((reasons == "take_profit").mean()) if len(reasons) else 0.0,
+        "target_exit_rate": float(target_like.mean()) if len(reasons) else 0.0,
         "stop_exit_rate": float((reasons == "stop_loss").mean()) if len(reasons) else 0.0,
         "time_exit_rate": float((reasons == "time").mean()) if len(reasons) else 0.0,
         "fast_fail_exit_rate": float((reasons == "fast_fail").mean()) if len(reasons) else 0.0,
         "partial_time_exit_rate": float((reasons == "partial_time").mean()) if len(reasons) else 0.0,
+        "partial_target_exit_rate": float((reasons == "partial_target").mean()) if len(reasons) else 0.0,
         "median_points": float(net.median()),
     }
 
