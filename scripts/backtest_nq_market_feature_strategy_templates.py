@@ -40,6 +40,7 @@ class StrategyTemplate:
     confirm_bars: int
     pullback_atr: float
     stop_atr_mult: float
+    context_filter: str = "all"
     exit_mode: str = "bracket"
     fast_fail_bars: int = 5
     breakeven_trigger_r: float = 0.75
@@ -65,6 +66,7 @@ def template_pool(
     confirm_bars: list[int],
     pullback_atr: list[float],
     stop_atr_mult: list[float],
+    context_filters: list[str] | None = None,
     exit_modes: list[str] | None = None,
     fast_fail_bars: list[int] | None = None,
     breakeven_trigger_r: list[float] | None = None,
@@ -74,6 +76,7 @@ def template_pool(
     fast_fail_bars = fast_fail_bars or [5]
     breakeven_trigger_r = breakeven_trigger_r or [0.75]
     partial_fractions = partial_fractions or [0.25, 0.33]
+    context_filters = context_filters or ["all"]
     templates: list[StrategyTemplate] = []
     for feature_id in feature_ids:
         feature = market_features[feature_id]
@@ -96,65 +99,72 @@ def template_pool(
                                         continue
                                     if stop_mode not in {"atr", "hybrid_event_atr"} and atr_mult != stop_atr_mult[0]:
                                         continue
-                                    for exit_mode in exit_modes:
-                                        for fail_bars in fast_fail_bars:
-                                            if exit_mode not in {
-                                                "adaptive",
-                                                "adaptive_bracket",
-                                                "breakeven_bracket",
-                                                "bracket_fast_fail",
-                                                "fast_fail",
-                                                "progress_bracket",
-                                                "progress_protective_bracket",
-                                                "staged",
-                                                "staged_breakeven",
-                                            } and fail_bars != fast_fail_bars[0]:
-                                                continue
-                                            trigger_values = (
-                                                breakeven_trigger_r
-                                                if exit_mode
-                                                in {
+                                    for context_filter in context_filters:
+                                        for exit_mode in exit_modes:
+                                            for fail_bars in fast_fail_bars:
+                                                if exit_mode not in {
                                                     "adaptive",
+                                                    "adaptive_bracket",
                                                     "breakeven_bracket",
+                                                    "bracket_fast_fail",
+                                                    "fast_fail",
                                                     "progress_bracket",
                                                     "progress_protective_bracket",
-                                                    "protective_bracket",
+                                                    "staged",
                                                     "staged_breakeven",
-                                                }
-                                                else [breakeven_trigger_r[0]]
-                                            )
-                                            for trigger_r in trigger_values:
-                                                partial_values = (
-                                                    partial_fractions if exit_mode == "light_partial" else [0.5]
+                                                } and fail_bars != fast_fail_bars[0]:
+                                                    continue
+                                                trigger_values = (
+                                                    breakeven_trigger_r
+                                                    if exit_mode
+                                                    in {
+                                                        "adaptive",
+                                                        "breakeven_bracket",
+                                                        "progress_bracket",
+                                                        "progress_protective_bracket",
+                                                        "protective_bracket",
+                                                        "staged_breakeven",
+                                                    }
+                                                    else [breakeven_trigger_r[0]]
                                                 )
-                                                for partial_fraction in partial_values:
-                                                    partial_suffix = (
-                                                        f"_pf{partial_fraction:g}" if exit_mode == "light_partial" else ""
+                                                for trigger_r in trigger_values:
+                                                    partial_values = (
+                                                        partial_fractions if exit_mode == "light_partial" else [0.5]
                                                     )
-                                                    name = (
-                                                        f"{feature_id}_{entry_mode}_{stop_mode}_{exit_mode}_rr{rr:g}"
-                                                        f"_h{horizon}_c{confirm}_pb{pullback:g}_atr{atr_mult:g}_ff{fail_bars}"
-                                                        f"_be{trigger_r:g}{partial_suffix}"
-                                                    )
-                                                    templates.append(
-                                                        StrategyTemplate(
-                                                            name=name,
-                                                            feature_id=feature_id,
-                                                            family=feature.family,
-                                                            direction=direction,
-                                                            entry_mode=entry_mode,
-                                                            stop_mode=stop_mode,
-                                                            reward_risk=float(rr),
-                                                            horizon_minutes=int(horizon),
-                                                            confirm_bars=int(confirm),
-                                                            pullback_atr=float(pullback),
-                                                            stop_atr_mult=float(atr_mult),
-                                                            exit_mode=str(exit_mode),
-                                                            fast_fail_bars=int(fail_bars),
-                                                            breakeven_trigger_r=float(trigger_r),
-                                                            partial_fraction=float(partial_fraction),
+                                                    for partial_fraction in partial_values:
+                                                        partial_suffix = (
+                                                            f"_pf{partial_fraction:g}"
+                                                            if exit_mode == "light_partial"
+                                                            else ""
                                                         )
-                                                    )
+                                                        context_suffix = (
+                                                            "" if context_filter == "all" else f"_ctx{context_filter}"
+                                                        )
+                                                        name = (
+                                                            f"{feature_id}_{entry_mode}_{stop_mode}_{exit_mode}_rr{rr:g}"
+                                                            f"_h{horizon}_c{confirm}_pb{pullback:g}_atr{atr_mult:g}_ff{fail_bars}"
+                                                            f"_be{trigger_r:g}{partial_suffix}{context_suffix}"
+                                                        )
+                                                        templates.append(
+                                                            StrategyTemplate(
+                                                                name=name,
+                                                                feature_id=feature_id,
+                                                                family=feature.family,
+                                                                direction=direction,
+                                                                entry_mode=entry_mode,
+                                                                stop_mode=stop_mode,
+                                                                reward_risk=float(rr),
+                                                                horizon_minutes=int(horizon),
+                                                                confirm_bars=int(confirm),
+                                                                pullback_atr=float(pullback),
+                                                                stop_atr_mult=float(atr_mult),
+                                                                context_filter=str(context_filter),
+                                                                exit_mode=str(exit_mode),
+                                                                fast_fail_bars=int(fail_bars),
+                                                                breakeven_trigger_r=float(trigger_r),
+                                                                partial_fraction=float(partial_fraction),
+                                                            )
+                                                        )
     return templates
 
 
@@ -201,6 +211,14 @@ def build_template_trades(
         return empty_trades()
     max_exit = entry_indexes + template.horizon_minutes
     valid = max_exit < len(data)
+    event_indexes = event_indexes[valid]
+    entry_indexes = entry_indexes[valid]
+    max_exit = max_exit[valid]
+    if len(entry_indexes) == 0:
+        return empty_trades()
+    context_mask = context_filter_mask(data, template.context_filter, template.direction).to_numpy(dtype=bool)
+    context_indexes = np.minimum(entry_indexes, len(context_mask) - 1)
+    valid = context_mask[context_indexes]
     event_indexes = event_indexes[valid]
     entry_indexes = entry_indexes[valid]
     max_exit = max_exit[valid]
@@ -542,6 +560,7 @@ def build_template_trades(
                 "family": template.family,
                 "entry_mode": template.entry_mode,
                 "stop_mode": template.stop_mode,
+                "context_filter": template.context_filter,
                 "exit_mode": template.exit_mode,
                 "breakeven_trigger_r": template.breakeven_trigger_r,
                 "partial_fraction": template.partial_fraction,
@@ -752,6 +771,71 @@ def resolve_entry_indexes(
     return entry_indexes
 
 
+def context_filter_mask(data: pd.DataFrame, context_filter: str, direction: int) -> pd.Series:
+    context_filter = str(context_filter or "all")
+    if context_filter == "all":
+        return pd.Series(True, index=data.index)
+
+    minute = _numeric_column(data, "minute_of_day")
+    session_vwap_atr = _numeric_column(data, "session_vwap_distance_atr")
+    relative_volume = _numeric_column(data, "relative_volume_20")
+    cmf = _numeric_column(data, "cmf_20")
+    mfi = _numeric_column(data, "mfi_14")
+    obv_slope = _numeric_column(data, "obv_slope_20")
+    ema10 = _numeric_column(data, "ema_10")
+    ema20 = _numeric_column(data, "ema_20")
+    ema50 = _numeric_column(data, "ema_50")
+    atr30 = _numeric_column(data, "atr_30")
+    atr120 = _numeric_column(data, "atr_120")
+
+    rth_open = (minute >= 13 * 60 + 30) & (minute < 16 * 60)
+    rth_mid = (minute >= 16 * 60) & (minute < 18 * 60 + 30)
+    rth_late = (minute >= 18 * 60 + 30) & (minute < 20 * 60)
+    atr_expanding = atr30 >= atr120
+    not_low_volume = relative_volume >= 0.8
+    high_relative_volume = relative_volume >= 1.2
+    if direction > 0:
+        vwap_aligned = session_vwap_atr >= 0.0
+        vwap_support = session_vwap_atr >= -0.25
+        trend_stack = (ema10 > ema20) & (ema20 > ema50)
+        volume_pressure = (cmf > 0) | (mfi >= 50) | (obv_slope > 0)
+    else:
+        vwap_aligned = session_vwap_atr <= 0.0
+        vwap_support = session_vwap_atr <= 0.25
+        trend_stack = (ema10 < ema20) & (ema20 < ema50)
+        volume_pressure = (cmf < 0) | (mfi <= 50) | (obv_slope < 0)
+    trend_or_vwap = trend_stack | vwap_aligned
+
+    masks = {
+        "rth_open": rth_open,
+        "rth_mid": rth_mid,
+        "rth_late": rth_late,
+        "vwap_aligned": vwap_aligned,
+        "vwap_support": vwap_support,
+        "trend_stack": trend_stack,
+        "trend_or_vwap": trend_or_vwap,
+        "volume_pressure": volume_pressure,
+        "not_low_volume": not_low_volume,
+        "high_relative_volume": high_relative_volume,
+        "atr_expanding": atr_expanding,
+        "open_vwap": rth_open & vwap_support,
+        "open_trend_volume": rth_open & trend_or_vwap & not_low_volume,
+        "vwap_volume": vwap_support & volume_pressure,
+        "trend_volume": trend_stack & volume_pressure,
+        "trend_vwap_volume": trend_or_vwap & vwap_support & volume_pressure,
+        "atr_trend_volume": atr_expanding & trend_or_vwap & volume_pressure,
+    }
+    if context_filter not in masks:
+        raise ValueError(f"unknown context filter: {context_filter}")
+    return masks[context_filter].fillna(False)
+
+
+def _numeric_column(data: pd.DataFrame, column: str) -> pd.Series:
+    if column not in data.columns:
+        return pd.Series(np.nan, index=data.index, dtype=float)
+    return pd.to_numeric(data[column], errors="coerce")
+
+
 def early_exit_reasons(first_fast_fail: np.ndarray, first_invalidation: np.ndarray, first_no_progress: np.ndarray) -> np.ndarray:
     reasons = np.full(len(first_fast_fail), "fast_fail", dtype=object)
     reasons[first_invalidation <= np.minimum(first_fast_fail, first_no_progress)] = "structure_invalidation"
@@ -813,6 +897,7 @@ def empty_trades() -> pd.DataFrame:
             "family",
             "entry_mode",
             "stop_mode",
+            "context_filter",
             "exit_mode",
             "breakeven_trigger_r",
             "partial_fraction",
@@ -998,6 +1083,7 @@ def walk_forward_validate(
                     "family": template.family,
                     "entry_mode": template.entry_mode,
                     "stop_mode": template.stop_mode,
+                    "context_filter": template.context_filter,
                     "exit_mode": template.exit_mode,
                     "breakeven_trigger_r": template.breakeven_trigger_r,
                     "partial_fraction": template.partial_fraction,
@@ -1041,6 +1127,7 @@ def aggregate_walk_forward(folds: pd.DataFrame, selected_trades: pd.DataFrame) -
                 "family": str(group["family"].iloc[0]),
                 "entry_mode": str(group["entry_mode"].iloc[0]),
                 "stop_mode": str(group["stop_mode"].iloc[0]),
+                "context_filter": str(group["context_filter"].iloc[0]) if "context_filter" in group.columns else "all",
                 "exit_mode": str(group["exit_mode"].iloc[0]) if "exit_mode" in group.columns else "bracket",
                 "breakeven_trigger_r": (
                     float(group["breakeven_trigger_r"].iloc[0]) if "breakeven_trigger_r" in group.columns else 0.75
@@ -1288,6 +1375,7 @@ def main() -> int:
     parser.add_argument("--confirm-bars", type=int, nargs="+", default=[2, 5])
     parser.add_argument("--pullback-atr", type=float, nargs="+", default=[0.25, 0.50])
     parser.add_argument("--stop-atr-mult", type=float, nargs="+", default=[1.5, 2.0])
+    parser.add_argument("--context-filters", nargs="+", default=["all"])
     parser.add_argument("--exit-modes", nargs="+", default=["bracket"])
     parser.add_argument("--fast-fail-bars", type=int, nargs="+", default=[5])
     parser.add_argument("--breakeven-trigger-r", type=float, nargs="+", default=[0.75])
@@ -1354,6 +1442,7 @@ def main() -> int:
             confirm_bars=args.confirm_bars,
             pullback_atr=args.pullback_atr,
             stop_atr_mult=args.stop_atr_mult,
+            context_filters=args.context_filters,
             exit_modes=args.exit_modes,
             fast_fail_bars=args.fast_fail_bars,
             breakeven_trigger_r=args.breakeven_trigger_r,

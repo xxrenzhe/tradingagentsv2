@@ -79,6 +79,59 @@ def test_build_template_trades_hits_target_for_long_setup() -> None:
     assert row["gross_points"] == 2.0
 
 
+def test_context_filter_mask_uses_directional_vwap_and_volume_state() -> None:
+    frame = _trade_frame()
+    frame["session_vwap_distance_atr"] = [-0.5, -0.1, 0.2, 0.4, -0.2, 0.5, 0.3, -0.3, 0.1]
+    frame["cmf_20"] = [-0.1, 0.2, -0.2, 0.1, -0.3, 0.2, 0.2, -0.2, 0.1]
+    frame["mfi_14"] = [40, 55, 45, 60, 40, 55, 55, 45, 60]
+    frame["obv_slope_20"] = [-1, 1, -1, 1, -1, 1, 1, -1, 1]
+
+    long_mask = script.context_filter_mask(frame, "vwap_volume", 1)
+    short_mask = script.context_filter_mask(frame, "vwap_volume", -1)
+
+    assert bool(long_mask.iloc[3])
+    assert not bool(long_mask.iloc[0])
+    assert bool(short_mask.iloc[0])
+    assert not bool(short_mask.iloc[3])
+
+
+def test_build_template_trades_applies_context_filter_at_entry_index() -> None:
+    frame = _trade_frame()
+    frame["session_vwap_distance_atr"] = [-0.5, -0.5, -0.5, -0.1, 0.3, 0.3, 0.3, 0.3, 0.3]
+    feature = script.MarketFeature(
+        feature_id="synthetic_long",
+        family="trend_start",
+        direction_hint="long",
+        description="Synthetic long event.",
+        signal=pd.Series([index == 2 for index in range(len(frame))]),
+    )
+    blocked_template = script.StrategyTemplate(
+        name="synthetic_long_blocked_context",
+        feature_id="synthetic_long",
+        family="trend_start",
+        direction=1,
+        entry_mode="next_open",
+        stop_mode="atr",
+        reward_risk=1.0,
+        horizon_minutes=5,
+        confirm_bars=1,
+        pullback_atr=0.25,
+        stop_atr_mult=1.0,
+        context_filter="vwap_aligned",
+        exit_mode="bracket",
+    )
+    allowed_template = script.StrategyTemplate(
+        **{**blocked_template.__dict__, "name": "synthetic_long_allowed_context", "context_filter": "vwap_support"}
+    )
+
+    blocked = script.build_template_trades(frame, feature, blocked_template, min_gap_minutes=1, min_stop_points=1.0)
+    allowed = script.build_template_trades(frame, feature, allowed_template, min_gap_minutes=1, min_stop_points=1.0)
+
+    assert blocked.empty
+    assert len(allowed) == 1
+    assert allowed.iloc[0]["context_filter"] == "vwap_support"
+
+
 def test_fast_fail_exit_cuts_trade_before_full_horizon() -> None:
     frame = _trade_frame()
     frame.loc[4, "Close"] = 99.5
@@ -1090,6 +1143,37 @@ def test_template_pool_only_expands_partial_fraction_for_light_partial() -> None
     assert len(bracket) == 1
     assert len(light_partial) == 2
     assert {template.partial_fraction for template in light_partial} == {0.25, 0.33}
+
+
+def test_template_pool_expands_context_filters() -> None:
+    market_features = {
+        "feature_long": script.MarketFeature(
+            feature_id="feature_long",
+            family="ict_order_flow_shift",
+            direction_hint="long",
+            description="Synthetic long feature.",
+            signal=pd.Series([False]),
+        )
+    }
+
+    templates = script.template_pool(
+        market_features,
+        ["feature_long"],
+        entry_modes=["next_open"],
+        stop_modes=["atr"],
+        reward_risks=[1.0],
+        horizons=[5],
+        confirm_bars=[1],
+        pullback_atr=[0.25],
+        stop_atr_mult=[1.0],
+        context_filters=["all", "vwap_volume"],
+        exit_modes=["bracket"],
+        fast_fail_bars=[3],
+    )
+
+    assert len(templates) == 2
+    assert {template.context_filter for template in templates} == {"all", "vwap_volume"}
+    assert any("_ctxvwap_volume" in template.name for template in templates)
 
 
 def test_walk_forward_validate_selects_positive_train_template() -> None:
