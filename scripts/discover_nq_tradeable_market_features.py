@@ -154,6 +154,16 @@ def build_market_features(data: pd.DataFrame) -> list[MarketFeature]:
     micro_break_down = close < low.rolling(8, min_periods=4).min().shift(1)
     macd_rising = macd_hist > macd_hist.shift(3)
     macd_falling = macd_hist < macd_hist.shift(3)
+    macd_cross_up = (macd_hist > 0) & (macd_hist.shift(1) <= 0)
+    macd_cross_down = (macd_hist < 0) & (macd_hist.shift(1) >= 0)
+    trend_stack_up = (data["ema_10"] > data["ema_20"]) & (data["ema_20"] > data["ema_50"])
+    trend_stack_down = (data["ema_10"] < data["ema_20"]) & (data["ema_20"] < data["ema_50"])
+    recent_bullish_bos_count = (bos > 0).rolling(90, min_periods=1).sum().shift(1).fillna(0)
+    recent_bearish_bos_count = (bos < 0).rolling(90, min_periods=1).sum().shift(1).fillna(0)
+    recent_bullish_choch = (choch > 0).rolling(45, min_periods=1).max().shift(1).fillna(False).astype(bool)
+    recent_bearish_choch = (choch < 0).rolling(45, min_periods=1).max().shift(1).fillna(False).astype(bool)
+    bullish_step_pullback = (close - low.rolling(20, min_periods=5).min().shift(1)) / atr
+    bearish_step_pullback = (high.rolling(20, min_periods=5).max().shift(1) - close) / atr
     compressed_range = (
         (range_width_atr <= 4.0)
         | (range_width_atr <= range_width_atr.rolling(240, min_periods=60).quantile(0.35))
@@ -370,6 +380,100 @@ def build_market_features(data: pd.DataFrame) -> list[MarketFeature]:
             & ((bos < 0) | data["displacement_candle"].eq(1) | signal("session_vwap_reclaim_down"))
             & (session_vwap_atr <= 0.10)
             & (macd_falling | (trix < trix_signal) | (force_z < 0)),
+        ),
+        MarketFeature(
+            "bos_stair_step_continuation_long",
+            "smc_bos_continuation",
+            "long",
+            "Repeated bullish BOS creates a stair-step trend; a controlled pullback holds VWAP/EMA structure and breaks upward again.",
+            (recent_bullish_bos_count >= 2)
+            & trend_stack_up
+            & (session_vwap_atr >= -0.25)
+            & (bullish_step_pullback.between(0.20, 3.00))
+            & (micro_break_up | (bos > 0))
+            & (macd_rising | (force_z > 0) | (cmf > 0)),
+        ),
+        MarketFeature(
+            "bos_stair_step_continuation_short",
+            "smc_bos_continuation",
+            "short",
+            "Repeated bearish BOS creates a stair-step downtrend; a controlled bounce rejects VWAP/EMA structure and breaks downward again.",
+            (recent_bearish_bos_count >= 2)
+            & trend_stack_down
+            & (session_vwap_atr <= 0.25)
+            & (bearish_step_pullback.between(0.20, 3.00))
+            & (micro_break_down | (bos < 0))
+            & (macd_falling | (force_z < 0) | (cmf < 0)),
+        ),
+        MarketFeature(
+            "failed_bearish_choch_uptrend_continuation_long",
+            "smc_failed_choch_continuation",
+            "long",
+            "A bearish CHoCH appears inside an established bullish BOS sequence but fails to create acceptance lower; the next upside break resumes trend.",
+            (recent_bullish_bos_count >= 1)
+            & recent_bearish_choch
+            & (session_vwap_atr >= -0.35)
+            & ((low >= low.rolling(60, min_periods=20).min().shift(1) + 0.15 * atr) | trend_stack_up)
+            & micro_break_up
+            & (macd_rising | (force_z > 0) | (cmf > -0.05)),
+        ),
+        MarketFeature(
+            "failed_bullish_choch_downtrend_continuation_short",
+            "smc_failed_choch_continuation",
+            "short",
+            "A bullish CHoCH appears inside an established bearish BOS sequence but fails to create acceptance higher; the next downside break resumes trend.",
+            (recent_bearish_bos_count >= 1)
+            & recent_bullish_choch
+            & (session_vwap_atr <= 0.35)
+            & ((high <= high.rolling(60, min_periods=20).max().shift(1) - 0.15 * atr) | trend_stack_down)
+            & micro_break_down
+            & (macd_falling | (force_z < 0) | (cmf < 0.05)),
+        ),
+        MarketFeature(
+            "eql_sweep_macd_reversal_long",
+            "smc_liquidity_macd_reversal",
+            "long",
+            "Equal-low or lower-liquidity sweep rejects with lower wick, MACD histogram repair, and improving money pressure.",
+            (signal("eql_signal") | (sweep > 0) | near_prior_low)
+            & (wick_lower >= 0.25)
+            & (close > (high + low) / 2)
+            & (macd_cross_up | macd_rising)
+            & ((force_z > 0) | (cmf > -0.05) | (mfi > 40)),
+        ),
+        MarketFeature(
+            "eqh_sweep_macd_reversal_short",
+            "smc_liquidity_macd_reversal",
+            "short",
+            "Equal-high or upper-liquidity sweep rejects with upper wick, MACD histogram deterioration, and weakening money pressure.",
+            (signal("eqh_signal") | (sweep < 0) | near_prior_high)
+            & (wick_upper >= 0.25)
+            & (close < (high + low) / 2)
+            & (macd_cross_down | macd_falling)
+            & ((force_z < 0) | (cmf < 0.05) | (mfi < 60)),
+        ),
+        MarketFeature(
+            "displacement_pullback_continuation_long",
+            "smc_displacement_pullback",
+            "long",
+            "A bullish displacement/BOS leg leaves a demand/FVG area; the first controlled pullback holds and re-breaks upward.",
+            ((bos > 0).rolling(20, min_periods=1).max().shift(1).fillna(False).astype(bool) | signal("bullish_fvg_retest") | signal("demand_zone_retest"))
+            & (session_vwap_atr >= -0.30)
+            & (recent_pullback_depth.between(0.25, 2.25))
+            & (close >= open_price)
+            & micro_break_up
+            & (macd_rising | (force_z > 0) | (cmf > -0.05)),
+        ),
+        MarketFeature(
+            "displacement_pullback_continuation_short",
+            "smc_displacement_pullback",
+            "short",
+            "A bearish displacement/BOS leg leaves a supply/FVG area; the first controlled pullback rejects and re-breaks downward.",
+            ((bos < 0).rolling(20, min_periods=1).max().shift(1).fillna(False).astype(bool) | signal("bearish_fvg_retest") | signal("supply_zone_retest"))
+            & (session_vwap_atr <= 0.30)
+            & (recent_short_pullback_depth.between(0.25, 2.25))
+            & (close <= open_price)
+            & micro_break_down
+            & (macd_falling | (force_z < 0) | (cmf < 0.05)),
         ),
         MarketFeature(
             "ichimoku_cloud_breakout_long",
@@ -1031,7 +1135,16 @@ def fallback_feature_analysis(
 
 
 def strategy_for_family(family: str) -> str:
-    if family in {"trend_start", "trend_pullback", "tradingview_trend", "tradingview_pullback", "range_breakout"}:
+    if family in {
+        "trend_start",
+        "trend_pullback",
+        "tradingview_trend",
+        "tradingview_pullback",
+        "range_breakout",
+        "smc_bos_continuation",
+        "smc_failed_choch_continuation",
+        "smc_displacement_pullback",
+    }:
         return "breakout/continuation with structure stop and trailing/time exit"
     if family in {
         "exhaustion_reversal",
@@ -1044,6 +1157,7 @@ def strategy_for_family(family: str) -> str:
         "ict_order_flow_shift",
         "ict_order_flow_shift_entry",
         "ict_order_block_retest",
+        "smc_liquidity_macd_reversal",
         "tradingview_momentum",
         "tradingview_oscillator",
     }:
@@ -1057,12 +1171,20 @@ def confirmation_for_family(family: str, direction: str) -> str:
     side = "above" if direction == "long" else "below"
     if family in {"trend_start", "tradingview_trend", "range_breakout"}:
         return f"Enter only after the next bar holds {side} the displacement midpoint or breaks continuation in the hinted direction."
+    if family == "smc_bos_continuation":
+        return f"Require repeated BOS in the same direction, then enter only after a controlled pullback breaks {side} the local pullback range."
+    if family == "smc_failed_choch_continuation":
+        return f"Treat the CHoCH as a trap only after price fails to accept beyond it and breaks {side} the post-CHoCH range."
+    if family == "smc_displacement_pullback":
+        return "Wait for the first pullback into the displacement/FVG/order-block area, then require rejection back with momentum in the trend direction."
     if family in {"trend_pullback", "tradingview_pullback"}:
         return f"Require the pullback to hold VWAP or VWMA/TEMA alignment, then enter after a micro break {side} the pullback range."
     if family in {"volume_price_mismatch", "tradingview_volume_price"}:
         return "Wait for price to reclaim/lose VWAP or break the prior micro swing in the hinted direction."
     if family == "liquidity_reversal":
         return "Require the sweep to fail back inside the prior range, then enter after midpoint/VWAP confirmation."
+    if family == "smc_liquidity_macd_reversal":
+        return "Require EQH/EQL or sweep rejection plus MACD histogram repair/fade, then enter after the sweep candle midpoint is reclaimed/rejected."
     if family == "ict_order_flow_shift":
         return "Do not chase the displacement; wait for the FVG/order-block retest in the correct premium/discount half."
     if family in {"ict_order_flow_shift_entry", "ict_order_block_retest"}:
@@ -1077,9 +1199,18 @@ def confirmation_for_family(family: str, direction: str) -> str:
 
 
 def invalidation_for_family(family: str, direction: str) -> str:
-    if family in {"trend_start", "trend_pullback", "tradingview_trend", "tradingview_pullback", "range_breakout"}:
+    if family in {
+        "trend_start",
+        "trend_pullback",
+        "tradingview_trend",
+        "tradingview_pullback",
+        "range_breakout",
+        "smc_bos_continuation",
+        "smc_failed_choch_continuation",
+        "smc_displacement_pullback",
+    }:
         return "Invalidate if price closes back through the breakout/displacement origin or volume expansion reverses against the trade."
-    if family == "liquidity_reversal":
+    if family in {"liquidity_reversal", "smc_liquidity_macd_reversal"}:
         return "Invalidate beyond the sweep extreme; do not keep the trade if price accepts outside the swept level."
     if family in {"ict_order_flow_shift", "ict_order_flow_shift_entry", "ict_order_block_retest"}:
         return "Invalidate beyond the liquidity-sweep extreme or beyond the candle that created the traded FVG/order block."

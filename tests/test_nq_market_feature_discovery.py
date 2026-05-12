@@ -307,6 +307,196 @@ def test_updated_screenshot_downtrend_retest_and_sweep_watch_features_are_covere
     assert features["selloff_liquidity_sweep_rebound_watch_long"].signal.any()
 
 
+def test_multi_screenshot_smc_momentum_features_are_covered() -> None:
+    frame = _three_wave_reversal_frame()
+    periods = len(frame)
+    frame["bos_signal"] = np.zeros(periods, dtype=int)
+    frame["choch_signal"] = np.zeros(periods, dtype=int)
+    frame["sweep_signal"] = np.zeros(periods, dtype=int)
+    frame["eqh_signal"] = np.zeros(periods, dtype=int)
+    frame["eql_signal"] = np.zeros(periods, dtype=int)
+    frame["bullish_fvg_retest"] = np.zeros(periods, dtype=int)
+    frame["bearish_fvg_retest"] = np.zeros(periods, dtype=int)
+    frame["demand_zone_retest"] = np.zeros(periods, dtype=int)
+    frame["supply_zone_retest"] = np.zeros(periods, dtype=int)
+    frame["session_vwap_distance_atr"] = 0.0
+    frame["force_index_z_50"] = 0.0
+    frame["cmf_20"] = 0.0
+    frame["mfi_14"] = 50.0
+    frame["macd_hist"] = 0.0
+    frame["ema_10"] = frame["Close"]
+    frame["ema_20"] = frame["Close"]
+    frame["ema_50"] = frame["Close"]
+
+    long_step_index = 82
+    frame.loc[10, "bos_signal"] = 1
+    frame.loc[45, "bos_signal"] = 1
+    frame.loc[70:long_step_index, "ema_10"] = 103.0
+    frame.loc[70:long_step_index, "ema_20"] = 102.0
+    frame.loc[70:long_step_index, "ema_50"] = 101.0
+    frame.loc[long_step_index - 20 : long_step_index - 1, "Low"] = 100.0
+    frame.loc[long_step_index - 8 : long_step_index - 1, "High"] = 103.0
+    frame.loc[long_step_index, ["Open", "High", "Low", "Close"]] = [103.2, 106.0, 102.8, 105.6]
+    frame.loc[long_step_index, "macd_hist"] = 0.5
+    frame.loc[long_step_index - 3 : long_step_index - 1, "macd_hist"] = 0.1
+    frame.loc[long_step_index, "force_index_z_50"] = 0.7
+    frame.loc[long_step_index, "cmf_20"] = 0.2
+    frame.loc[long_step_index, "session_vwap_distance_atr"] = 0.3
+
+    short_step_index = 102
+    frame.loc[20, "bos_signal"] = -1
+    frame.loc[62, "bos_signal"] = -1
+    frame.loc[90:short_step_index, "ema_10"] = 97.0
+    frame.loc[90:short_step_index, "ema_20"] = 98.0
+    frame.loc[90:short_step_index, "ema_50"] = 99.0
+    frame.loc[short_step_index - 20 : short_step_index - 1, "High"] = 101.0
+    frame.loc[short_step_index - 8 : short_step_index - 1, "Low"] = 98.0
+    frame.loc[short_step_index, ["Open", "High", "Low", "Close"]] = [97.8, 98.3, 95.0, 95.4]
+    frame.loc[short_step_index, "macd_hist"] = -0.5
+    frame.loc[short_step_index - 3 : short_step_index - 1, "macd_hist"] = -0.1
+    frame.loc[short_step_index, "force_index_z_50"] = -0.7
+    frame.loc[short_step_index, "cmf_20"] = -0.2
+    frame.loc[short_step_index, "session_vwap_distance_atr"] = -0.3
+
+    failed_bearish_index = 123
+    frame.loc[100, "bos_signal"] = 1
+    frame.loc[112, "choch_signal"] = -1
+    frame.loc[failed_bearish_index - 60 : failed_bearish_index - 1, "Low"] = 100.2
+    frame.loc[failed_bearish_index - 8 : failed_bearish_index - 1, "High"] = 101.0
+    frame.loc[failed_bearish_index, ["Open", "High", "Low", "Close"]] = [101.2, 104.0, 100.8, 103.7]
+    frame.loc[failed_bearish_index, "macd_hist"] = 0.4
+    frame.loc[failed_bearish_index - 3 : failed_bearish_index - 1, "macd_hist"] = -0.1
+    frame.loc[failed_bearish_index, "force_index_z_50"] = 0.5
+    frame.loc[failed_bearish_index, "session_vwap_distance_atr"] = 0.2
+
+    failed_bullish_index = 140
+    frame.loc[118, "bos_signal"] = -1
+    frame.loc[130, "choch_signal"] = 1
+    frame.loc[failed_bullish_index - 60 : failed_bullish_index - 1, "High"] = 96.0
+    frame.loc[failed_bullish_index - 8 : failed_bullish_index - 1, "Low"] = 99.0
+    frame.loc[failed_bullish_index, ["Open", "High", "Low", "Close"]] = [98.8, 99.4, 96.0, 96.2]
+    frame.loc[failed_bullish_index, "macd_hist"] = -0.4
+    frame.loc[failed_bullish_index - 3 : failed_bullish_index - 1, "macd_hist"] = 0.1
+    frame.loc[failed_bullish_index, "force_index_z_50"] = -0.5
+    frame.loc[failed_bullish_index, "session_vwap_distance_atr"] = -0.2
+
+    eql_index = 152
+    frame.loc[eql_index - 60 : eql_index - 1, "Low"] = 92.0
+    frame.loc[eql_index, ["Open", "High", "Low", "Close"]] = [92.2, 95.0, 89.0, 94.4]
+    frame.loc[eql_index, "eql_signal"] = 1
+    frame.loc[eql_index, "sweep_signal"] = 1
+    frame.loc[eql_index, "macd_hist"] = 0.3
+    frame.loc[eql_index - 3 : eql_index - 1, "macd_hist"] = -0.2
+    frame.loc[eql_index, "force_index_z_50"] = 0.6
+    frame.loc[eql_index, "mfi_14"] = 45.0
+
+    eqh_index = 158
+    frame.loc[eqh_index - 50 : eqh_index - 1, "High"] = 108.0
+    frame.loc[eqh_index, ["Open", "High", "Low", "Close"]] = [107.8, 111.0, 105.0, 105.8]
+    frame.loc[eqh_index, "eqh_signal"] = 1
+    frame.loc[eqh_index, "sweep_signal"] = -1
+    frame.loc[eqh_index, "macd_hist"] = -0.3
+    frame.loc[eqh_index - 3 : eqh_index - 1, "macd_hist"] = 0.2
+    frame.loc[eqh_index, "force_index_z_50"] = -0.6
+    frame.loc[eqh_index, "mfi_14"] = 55.0
+
+    displacement_long_index = 166
+    frame.loc[displacement_long_index - 10, "bos_signal"] = 1
+    frame.loc[displacement_long_index - 20 : displacement_long_index - 1, "Low"] = 100.0
+    frame.loc[displacement_long_index - 8 : displacement_long_index - 1, "High"] = 103.0
+    frame.loc[displacement_long_index, ["Open", "High", "Low", "Close"]] = [103.0, 106.0, 102.2, 105.5]
+    frame.loc[displacement_long_index, "bullish_fvg_retest"] = 1
+    frame.loc[displacement_long_index, "demand_zone_retest"] = 1
+    frame.loc[displacement_long_index, "macd_hist"] = 0.5
+    frame.loc[displacement_long_index - 3 : displacement_long_index - 1, "macd_hist"] = 0.0
+    frame.loc[displacement_long_index, "force_index_z_50"] = 0.6
+
+    displacement_short_index = 174
+    frame.loc[displacement_short_index - 10, "bos_signal"] = -1
+    frame.loc[displacement_short_index - 20 : displacement_short_index - 1, "High"] = 106.0
+    frame.loc[displacement_short_index - 8 : displacement_short_index - 1, "Low"] = 102.0
+    frame.loc[displacement_short_index, ["Open", "High", "Low", "Close"]] = [101.8, 102.8, 98.5, 99.0]
+    frame.loc[displacement_short_index, "bearish_fvg_retest"] = 1
+    frame.loc[displacement_short_index, "supply_zone_retest"] = 1
+    frame.loc[displacement_short_index, "macd_hist"] = -0.5
+    frame.loc[displacement_short_index - 3 : displacement_short_index - 1, "macd_hist"] = 0.0
+    frame.loc[displacement_short_index, "force_index_z_50"] = -0.6
+
+    frame.loc[short_step_index - 8 : short_step_index - 1, "Low"] = 98.0
+    frame.loc[short_step_index, ["Open", "High", "Low", "Close"]] = [97.8, 98.3, 95.0, 95.4]
+    frame.loc[failed_bearish_index - 8 : failed_bearish_index - 1, "High"] = 101.0
+    frame.loc[failed_bearish_index, ["Open", "High", "Low", "Close"]] = [101.2, 104.0, 100.8, 103.7]
+    frame.loc[failed_bullish_index - 8 : failed_bullish_index - 1, "Low"] = 99.0
+    frame.loc[failed_bullish_index, ["Open", "High", "Low", "Close"]] = [98.8, 99.4, 96.0, 96.2]
+    frame.loc[eql_index - 3 : eql_index - 1, "macd_hist"] = -0.2
+    frame.loc[eql_index, ["Open", "High", "Low", "Close"]] = [92.2, 95.0, 89.0, 94.4]
+    frame.loc[eqh_index - 3 : eqh_index - 1, "macd_hist"] = 0.2
+    frame.loc[eqh_index, ["Open", "High", "Low", "Close"]] = [107.8, 111.0, 105.0, 105.8]
+
+    range_points = frame["High"] - frame["Low"]
+    frame["body_share"] = (frame["Close"] - frame["Open"]).abs() / range_points
+    frame["lower_wick_points"] = np.minimum(frame["Open"], frame["Close"]) - frame["Low"]
+    frame["upper_wick_points"] = frame["High"] - np.maximum(frame["Open"], frame["Close"])
+
+    features = {feature.feature_id: feature for feature in script.build_market_features(frame)}
+
+    assert features["bos_stair_step_continuation_long"].signal.any()
+    assert features["bos_stair_step_continuation_short"].signal.any()
+    assert features["failed_bearish_choch_uptrend_continuation_long"].signal.any()
+    assert features["failed_bullish_choch_downtrend_continuation_short"].signal.any()
+    assert features["eql_sweep_macd_reversal_long"].signal.any()
+    assert features["eqh_sweep_macd_reversal_short"].signal.any()
+
+
+def test_screenshot_displacement_pullback_features_are_covered() -> None:
+    frame = _three_wave_reversal_frame()
+    periods = len(frame)
+    frame["bos_signal"] = np.zeros(periods, dtype=int)
+    frame["bullish_fvg_retest"] = np.zeros(periods, dtype=int)
+    frame["bearish_fvg_retest"] = np.zeros(periods, dtype=int)
+    frame["demand_zone_retest"] = np.zeros(periods, dtype=int)
+    frame["supply_zone_retest"] = np.zeros(periods, dtype=int)
+    frame["session_vwap_distance_atr"] = 0.0
+    frame["force_index_z_50"] = 0.0
+    frame["cmf_20"] = 0.0
+    frame["macd_hist"] = 0.0
+
+    long_index = 96
+    frame.loc[long_index - 10, "bos_signal"] = 1
+    frame.loc[long_index - 20 : long_index - 1, "Low"] = 100.0
+    frame.loc[long_index - 8 : long_index - 1, "High"] = 103.0
+    frame.loc[long_index, ["Open", "High", "Low", "Close"]] = [103.0, 106.0, 102.2, 105.5]
+    frame.loc[long_index, "bullish_fvg_retest"] = 1
+    frame.loc[long_index, "demand_zone_retest"] = 1
+    frame.loc[long_index, "macd_hist"] = 0.5
+    frame.loc[long_index - 3 : long_index - 1, "macd_hist"] = 0.0
+    frame.loc[long_index, "force_index_z_50"] = 0.6
+    frame.loc[long_index, "session_vwap_distance_atr"] = 0.2
+
+    short_index = 150
+    frame.loc[short_index - 10, "bos_signal"] = -1
+    frame.loc[short_index - 20 : short_index - 1, "High"] = 106.0
+    frame.loc[short_index - 20 : short_index - 1, "Low"] = 101.0
+    frame.loc[short_index - 8 : short_index - 1, "Low"] = 102.0
+    frame.loc[short_index, ["Open", "High", "Low", "Close"]] = [101.8, 102.8, 98.5, 99.0]
+    frame.loc[short_index, "bearish_fvg_retest"] = 1
+    frame.loc[short_index, "supply_zone_retest"] = 1
+    frame.loc[short_index, "macd_hist"] = -0.5
+    frame.loc[short_index - 3 : short_index - 1, "macd_hist"] = 0.0
+    frame.loc[short_index, "force_index_z_50"] = -0.6
+    frame.loc[short_index, "session_vwap_distance_atr"] = -0.2
+
+    range_points = frame["High"] - frame["Low"]
+    frame["body_share"] = (frame["Close"] - frame["Open"]).abs() / range_points
+    frame["lower_wick_points"] = np.minimum(frame["Open"], frame["Close"]) - frame["Low"]
+    frame["upper_wick_points"] = frame["High"] - np.maximum(frame["Open"], frame["Close"])
+
+    features = {feature.feature_id: feature for feature in script.build_market_features(frame)}
+
+    assert features["displacement_pullback_continuation_long"].signal.any()
+    assert features["displacement_pullback_continuation_short"].signal.any()
+
+
 def test_ict_order_flow_shift_features_are_registered_and_triggerable() -> None:
     frame = _three_wave_reversal_frame()
     periods = len(frame)

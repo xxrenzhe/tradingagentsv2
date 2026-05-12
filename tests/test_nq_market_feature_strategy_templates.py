@@ -26,6 +26,16 @@ assert PRESSURE_SPEC.loader is not None
 sys.modules["pressure_test_nq_ofs_candidates"] = pressure_script
 PRESSURE_SPEC.loader.exec_module(pressure_script)
 
+SCREENSHOT_PRESSURE_SCRIPT_PATH = SCRIPTS_DIR / "pressure_test_nq_screenshot_smc_candidates.py"
+SCREENSHOT_PRESSURE_SPEC = importlib.util.spec_from_file_location(
+    "pressure_test_nq_screenshot_smc_candidates",
+    SCREENSHOT_PRESSURE_SCRIPT_PATH,
+)
+screenshot_pressure_script = importlib.util.module_from_spec(SCREENSHOT_PRESSURE_SPEC)
+assert SCREENSHOT_PRESSURE_SPEC.loader is not None
+sys.modules["pressure_test_nq_screenshot_smc_candidates"] = screenshot_pressure_script
+SCREENSHOT_PRESSURE_SPEC.loader.exec_module(screenshot_pressure_script)
+
 
 def test_confirm_break_entry_ignores_events_too_close_to_end() -> None:
     event_indexes = np.asarray([2, 8])
@@ -1264,6 +1274,57 @@ def test_pressure_yearly_and_rolling_summaries_use_entry_ts() -> None:
     assert yearly.loc[yearly["year"] == 2020, "net_points"].iloc[0] == pytest.approx(3.75)
     assert not rolling.empty
     assert {"start", "end", "net_points"}.issubset(rolling.columns)
+
+
+def test_screenshot_pressure_candidates_cover_smc_momentum_readouts() -> None:
+    templates = screenshot_pressure_script.candidate_specs()
+    feature_ids = {template.feature_id for template in templates}
+    families = {template.family for template in templates}
+
+    assert len(templates) == 8
+    assert "eql_sweep_macd_reversal_long_us_rth" in feature_ids
+    assert "eqh_sweep_macd_reversal_short_us_rth" in feature_ids
+    assert "displacement_pullback_continuation_long_us_rth" in feature_ids
+    assert "displacement_pullback_continuation_short_us_rth" in feature_ids
+    assert "bos_stair_step_continuation_long_us_rth" in feature_ids
+    assert "bos_stair_step_continuation_short_us_rth" in feature_ids
+    assert {"smc_liquidity_macd_reversal", "smc_displacement_pullback", "smc_bos_continuation"}.issubset(families)
+    assert {template.direction for template in templates} == {-1, 1}
+
+
+def test_screenshot_pressure_summaries_and_cost_stress_are_reproducible() -> None:
+    template = screenshot_pressure_script.candidate_specs()[0]
+    costs = script.BacktestCosts()
+    trades = pd.DataFrame(
+        {
+            "entry_ts": pd.to_datetime(
+                [
+                    "2020-01-10",
+                    "2020-02-10",
+                    "2020-03-10",
+                    "2020-04-10",
+                    "2020-05-10",
+                    "2021-01-10",
+                    "2021-03-10",
+                ],
+                utc=True,
+            ),
+            "net_points": [2.0, -1.0, 3.0, -0.5, 1.0, 4.0, -1.5],
+            "gross_points": [2.625, -0.375, 3.625, 0.125, 1.625, 4.625, -0.875],
+            "exit_reason": ["take_profit", "stop_loss", "take_profit", "time", "take_profit", "take_profit", "stop_loss"],
+        }
+    )
+
+    stress = screenshot_pressure_script.cost_stress_summary(trades, costs, [1.0, 3.0])
+    yearly = screenshot_pressure_script.yearly_summary(template, trades)
+    rolling = screenshot_pressure_script.rolling_summary(template, trades, 180, 90)
+
+    assert stress["cost_1x_net_points"] == pytest.approx(sum(trades["gross_points"] - costs.round_trip_cost_points))
+    assert stress["cost_3x_profit_factor"] < stress["cost_1x_profit_factor"]
+    assert set(yearly["year"]) == {2020, 2021}
+    assert yearly.loc[yearly["year"] == 2020, "net_points"].iloc[0] == pytest.approx(4.5)
+    assert not rolling.empty
+    assert {"template", "start", "end", "net_points"}.issubset(rolling.columns)
 
 
 def _trade_frame() -> pd.DataFrame:
