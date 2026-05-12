@@ -19,6 +19,13 @@ assert SPEC.loader is not None
 sys.modules["backtest_nq_market_feature_strategy_templates"] = script
 SPEC.loader.exec_module(script)
 
+PRESSURE_SCRIPT_PATH = SCRIPTS_DIR / "pressure_test_nq_ofs_candidates.py"
+PRESSURE_SPEC = importlib.util.spec_from_file_location("pressure_test_nq_ofs_candidates", PRESSURE_SCRIPT_PATH)
+pressure_script = importlib.util.module_from_spec(PRESSURE_SPEC)
+assert PRESSURE_SPEC.loader is not None
+sys.modules["pressure_test_nq_ofs_candidates"] = pressure_script
+PRESSURE_SPEC.loader.exec_module(pressure_script)
+
 
 def test_confirm_break_entry_ignores_events_too_close_to_end() -> None:
     event_indexes = np.asarray([2, 8])
@@ -1215,6 +1222,48 @@ def test_walk_forward_validate_selects_positive_train_template() -> None:
     assert folds.iloc[0]["template"] == "template_a"
     assert not aggregate.empty
     assert not selected.empty
+
+
+def test_pressure_cost_stress_recomputes_net_from_gross_points() -> None:
+    trades = pd.DataFrame({"gross_points": [2.0, -1.0, 3.0]})
+    costs = script.BacktestCosts()
+
+    stress = pressure_script.cost_stress_summary(trades, costs, [1.0, 2.0])
+
+    assert stress["cost_1x_net_points"] == pytest.approx(sum(trades["gross_points"] - costs.round_trip_cost_points))
+    assert stress["cost_2x_net_points"] == pytest.approx(sum(trades["gross_points"] - 2 * costs.round_trip_cost_points))
+    assert stress["cost_2x_profit_factor"] < stress["cost_1x_profit_factor"]
+
+
+def test_pressure_yearly_and_rolling_summaries_use_entry_ts() -> None:
+    template = pressure_script.candidate_specs()[0]
+    trades = pd.DataFrame(
+        {
+            "entry_ts": pd.to_datetime(
+                [
+                    "2020-01-10",
+                    "2020-02-10",
+                    "2020-03-10",
+                    "2020-04-10",
+                    "2020-05-10",
+                    "2021-01-10",
+                    "2021-03-10",
+                ],
+                utc=True,
+            ),
+            "net_points": [3.0, -1.0, 1.5, 0.5, -0.25, 2.0, -0.5],
+            "gross_points": [3.625, -0.375, 2.125, 1.125, 0.375, 2.625, 0.125],
+            "exit_reason": ["take_profit", "stop_loss", "take_profit", "time", "stop_loss", "take_profit", "time"],
+        }
+    )
+
+    yearly = pressure_script.yearly_summary(template, trades, [1.0], script.BacktestCosts())
+    rolling = pressure_script.rolling_summary(template, trades, 180, 90)
+
+    assert set(yearly["year"]) == {2020, 2021}
+    assert yearly.loc[yearly["year"] == 2020, "net_points"].iloc[0] == pytest.approx(3.75)
+    assert not rolling.empty
+    assert {"start", "end", "net_points"}.issubset(rolling.columns)
 
 
 def _trade_frame() -> pd.DataFrame:
