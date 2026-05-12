@@ -66,6 +66,7 @@ def test_build_template_trades_hits_target_for_long_setup() -> None:
         confirm_bars=1,
         pullback_atr=0.25,
         stop_atr_mult=1.0,
+        exit_mode="bracket",
     )
 
     trades = script.build_template_trades(frame, feature, template, min_gap_minutes=1, min_stop_points=1.0)
@@ -75,6 +76,131 @@ def test_build_template_trades_hits_target_for_long_setup() -> None:
     assert row["entry_index"] == 3
     assert row["exit_reason"] == "take_profit"
     assert row["gross_points"] == 2.0
+
+
+def test_fast_fail_exit_cuts_trade_before_full_horizon() -> None:
+    frame = _trade_frame()
+    frame.loc[4, "Close"] = 99.5
+    feature = script.MarketFeature(
+        feature_id="synthetic_long",
+        family="trend_start",
+        direction_hint="long",
+        description="Synthetic long event.",
+        signal=pd.Series([index == 2 for index in range(len(frame))]),
+    )
+    template = script.StrategyTemplate(
+        name="synthetic_long_fast_fail",
+        feature_id="synthetic_long",
+        family="trend_start",
+        direction=1,
+        entry_mode="next_open",
+        stop_mode="atr",
+        reward_risk=2.0,
+        horizon_minutes=5,
+        confirm_bars=1,
+        pullback_atr=0.25,
+        stop_atr_mult=2.0,
+        exit_mode="fast_fail",
+        fast_fail_bars=2,
+    )
+
+    trades = script.build_template_trades(frame, feature, template, min_gap_minutes=1, min_stop_points=1.0)
+
+    assert len(trades) == 1
+    row = trades.iloc[0]
+    assert row["exit_reason"] == "fast_fail"
+    assert row["exit_index"] == 4
+
+
+def test_staged_exit_books_half_at_one_r_then_time_exit() -> None:
+    frame = _trade_frame()
+    frame.loc[5:, "Close"] = 102.5
+    frame.loc[5:, "High"] = 103.5
+    feature = script.MarketFeature(
+        feature_id="synthetic_long",
+        family="trend_start",
+        direction_hint="long",
+        description="Synthetic long event.",
+        signal=pd.Series([index == 2 for index in range(len(frame))]),
+    )
+    template = script.StrategyTemplate(
+        name="synthetic_long_staged",
+        feature_id="synthetic_long",
+        family="trend_start",
+        direction=1,
+        entry_mode="next_open",
+        stop_mode="atr",
+        reward_risk=2.0,
+        horizon_minutes=5,
+        confirm_bars=1,
+        pullback_atr=0.25,
+        stop_atr_mult=1.0,
+        exit_mode="staged",
+    )
+
+    trades = script.build_template_trades(frame, feature, template, min_gap_minutes=1, min_stop_points=1.0)
+
+    assert len(trades) == 1
+    row = trades.iloc[0]
+    assert row["exit_reason"] == "partial_time"
+    assert row["gross_points"] == 1.75
+
+
+def test_hybrid_event_atr_caps_structural_stop_distance() -> None:
+    template = script.StrategyTemplate(
+        name="hybrid",
+        feature_id="feature",
+        family="trend_start",
+        direction=1,
+        entry_mode="next_open",
+        stop_mode="hybrid_event_atr",
+        reward_risk=1.0,
+        horizon_minutes=5,
+        confirm_bars=1,
+        pullback_atr=0.25,
+        stop_atr_mult=1.5,
+    )
+
+    distances = script.stop_distances_for_template(
+        template=template,
+        event_indexes=np.asarray([0]),
+        entry_prices=np.asarray([100.0]),
+        high=np.asarray([101.0]),
+        low=np.asarray([80.0]),
+        atr=np.asarray([4.0]),
+        min_stop_points=1.0,
+        stop_buffer_atr=0.1,
+        min_buffer_points=0.25,
+    )
+
+    assert distances[0] == 6.0
+
+
+def test_reclaim_hold_requires_second_hold_bar() -> None:
+    event_indexes = np.asarray([2])
+    open_prices = np.arange(10, dtype=float) + 100.0
+    high = open_prices + 1.0
+    low = open_prices - 1.0
+    close = open_prices.copy()
+    low[3] = 99.0
+    close[3] = 102.5
+    close[4] = 103.0
+    atr = np.full(10, 2.0)
+
+    entries = script.resolve_entry_indexes(
+        event_indexes=event_indexes,
+        open_prices=open_prices,
+        high=high,
+        low=low,
+        close=close,
+        atr=atr,
+        direction=1,
+        entry_mode="reclaim_hold",
+        confirm_bars=3,
+        pullback_atr=0.25,
+    )
+
+    assert entries[0] == 5
 
 
 def test_aggregate_walk_forward_dedupes_overlapping_selected_trades() -> None:
@@ -144,6 +270,8 @@ def test_template_pool_respects_explicit_feature_direction() -> None:
         confirm_bars=[1],
         pullback_atr=[0.25, 0.5],
         stop_atr_mult=[1.0, 2.0],
+        exit_modes=["bracket"],
+        fast_fail_bars=[5],
     )
 
     assert len(templates) == 2
@@ -246,4 +374,5 @@ def _template(name: str) -> script.StrategyTemplate:
         confirm_bars=1,
         pullback_atr=0.25,
         stop_atr_mult=1.0,
+        exit_mode="bracket",
     )

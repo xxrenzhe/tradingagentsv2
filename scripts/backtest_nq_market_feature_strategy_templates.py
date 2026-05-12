@@ -40,6 +40,8 @@ class StrategyTemplate:
     confirm_bars: int
     pullback_atr: float
     stop_atr_mult: float
+    exit_mode: str = "bracket"
+    fast_fail_bars: int = 5
 
 
 def select_feature_ids(summary: pd.DataFrame, *, explicit: list[str] | None, top_features: int) -> list[str]:
@@ -61,7 +63,11 @@ def template_pool(
     confirm_bars: list[int],
     pullback_atr: list[float],
     stop_atr_mult: list[float],
+    exit_modes: list[str] | None = None,
+    fast_fail_bars: list[int] | None = None,
 ) -> list[StrategyTemplate]:
+    exit_modes = exit_modes or ["bracket"]
+    fast_fail_bars = fast_fail_bars or [5]
     templates: list[StrategyTemplate] = []
     for feature_id in feature_ids:
         feature = market_features[feature_id]
@@ -73,29 +79,35 @@ def template_pool(
                         for confirm in confirm_bars:
                             for pullback in pullback_atr:
                                 for atr_mult in stop_atr_mult:
-                                    if entry_mode != "pullback_reclaim" and pullback != pullback_atr[0]:
+                                    if entry_mode not in {"pullback_reclaim", "reclaim_hold"} and pullback != pullback_atr[0]:
                                         continue
-                                    if stop_mode != "atr" and atr_mult != stop_atr_mult[0]:
+                                    if stop_mode not in {"atr", "hybrid_event_atr"} and atr_mult != stop_atr_mult[0]:
                                         continue
-                                    name = (
-                                        f"{feature_id}_{entry_mode}_{stop_mode}_rr{rr:g}"
-                                        f"_h{horizon}_c{confirm}_pb{pullback:g}_atr{atr_mult:g}"
-                                    )
-                                    templates.append(
-                                        StrategyTemplate(
-                                            name=name,
-                                            feature_id=feature_id,
-                                            family=feature.family,
-                                            direction=direction,
-                                            entry_mode=entry_mode,
-                                            stop_mode=stop_mode,
-                                            reward_risk=float(rr),
-                                            horizon_minutes=int(horizon),
-                                            confirm_bars=int(confirm),
-                                            pullback_atr=float(pullback),
-                                            stop_atr_mult=float(atr_mult),
-                                        )
-                                    )
+                                    for exit_mode in exit_modes:
+                                        for fail_bars in fast_fail_bars:
+                                            if exit_mode != "fast_fail" and fail_bars != fast_fail_bars[0]:
+                                                continue
+                                            name = (
+                                                f"{feature_id}_{entry_mode}_{stop_mode}_{exit_mode}_rr{rr:g}"
+                                                f"_h{horizon}_c{confirm}_pb{pullback:g}_atr{atr_mult:g}_ff{fail_bars}"
+                                            )
+                                            templates.append(
+                                                StrategyTemplate(
+                                                    name=name,
+                                                    feature_id=feature_id,
+                                                    family=feature.family,
+                                                    direction=direction,
+                                                    entry_mode=entry_mode,
+                                                    stop_mode=stop_mode,
+                                                    reward_risk=float(rr),
+                                                    horizon_minutes=int(horizon),
+                                                    confirm_bars=int(confirm),
+                                                    pullback_atr=float(pullback),
+                                                    stop_atr_mult=float(atr_mult),
+                                                    exit_mode=str(exit_mode),
+                                                    fast_fail_bars=int(fail_bars),
+                                                )
+                                            )
     return templates
 
 
@@ -189,29 +201,71 @@ def build_template_trades(
     if direction > 0:
         stop_hits = low[window_indexes] <= stop_prices[:, None]
         target_hits = high[window_indexes] >= target_prices[:, None]
+        first_target_prices = entry_prices + stop_distances
+        first_target_hits = high[window_indexes] >= first_target_prices[:, None]
+        fast_fail_hits = close[window_indexes] < entry_prices[:, None]
     else:
         stop_hits = high[window_indexes] >= stop_prices[:, None]
         target_hits = low[window_indexes] <= target_prices[:, None]
+        first_target_prices = entry_prices - stop_distances
+        first_target_hits = low[window_indexes] <= first_target_prices[:, None]
+        fast_fail_hits = close[window_indexes] > entry_prices[:, None]
     same_symbol = symbols[window_indexes] == symbols[event_indexes, None]
     stop_hits &= same_symbol
     target_hits &= same_symbol
+    first_target_hits &= same_symbol
+    fast_fail_hits &= same_symbol
+    if template.exit_mode == "fast_fail" and template.fast_fail_bars > 0:
+        fast_fail_hits[:, 0] = False
+        max_fast_fail_offset = min(template.fast_fail_bars, template.horizon_minutes)
+        if max_fast_fail_offset + 1 < fast_fail_hits.shape[1]:
+            fast_fail_hits[:, max_fast_fail_offset + 1 :] = False
+    else:
+        fast_fail_hits[:] = False
     no_hit = template.horizon_minutes + 1
     first_stop = np.where(stop_hits.any(axis=1), stop_hits.argmax(axis=1), no_hit)
     first_target = np.where(target_hits.any(axis=1), target_hits.argmax(axis=1), no_hit)
-    stop_first = first_stop <= first_target
-    bracket_hit = (first_stop < no_hit) | (first_target < no_hit)
-    realized_offsets = np.where(bracket_hit, np.minimum(first_stop, first_target), template.horizon_minutes)
-    realized_exit_indexes = entry_indexes + realized_offsets
-    exit_prices = close[max_exit]
-    stop_rows = bracket_hit & stop_first
-    target_rows = bracket_hit & ~stop_first
-    exit_prices = np.where(stop_rows, stop_prices, exit_prices)
-    exit_prices = np.where(target_rows, target_prices, exit_prices)
-    exit_reasons = np.full(len(event_indexes), "time", dtype=object)
-    exit_reasons[stop_rows] = "stop_loss"
-    exit_reasons[target_rows] = "take_profit"
-
-    gross_points = (exit_prices - entry_prices) * direction
+    first_fast_fail = np.where(fast_fail_hits.any(axis=1), fast_fail_hits.argmax(axis=1), no_hit)
+    if template.exit_mode == "staged":
+        first_target_hit = np.where(first_target_hits.any(axis=1), first_target_hits.argmax(axis=1), no_hit)
+        first_event = np.minimum(first_stop, first_target_hit)
+        stopped_before_scale = first_stop <= first_target_hit
+        first_exit_hit = first_event < no_hit
+        realized_offsets = np.where(first_exit_hit & stopped_before_scale, first_stop, template.horizon_minutes)
+        realized_offsets = np.where(first_exit_hit & ~stopped_before_scale, template.horizon_minutes, realized_offsets)
+        realized_exit_indexes = entry_indexes + realized_offsets
+        final_exit_prices = close[max_exit]
+        first_leg_points = np.where(stopped_before_scale, -stop_distances, stop_distances)
+        second_leg_points = (final_exit_prices - entry_prices) * direction
+        gross_points = np.where(
+            first_exit_hit,
+            np.where(stopped_before_scale, -stop_distances, (first_leg_points + second_leg_points) / 2.0),
+            second_leg_points,
+        )
+        exit_prices = entry_prices + gross_points * direction
+        exit_reasons = np.full(len(event_indexes), "time", dtype=object)
+        exit_reasons[first_exit_hit & stopped_before_scale] = "stop_loss"
+        exit_reasons[first_exit_hit & ~stopped_before_scale] = "partial_time"
+    else:
+        first_event = np.minimum(np.minimum(first_stop, first_target), first_fast_fail)
+        bracket_hit = first_event < no_hit
+        stop_first = first_stop <= np.minimum(first_target, first_fast_fail)
+        target_first = first_target < np.minimum(first_stop, first_fast_fail)
+        fast_fail_first = first_fast_fail < np.minimum(first_stop, first_target)
+        realized_offsets = np.where(bracket_hit, first_event, template.horizon_minutes)
+        realized_exit_indexes = entry_indexes + realized_offsets
+        exit_prices = close[max_exit]
+        stop_rows = bracket_hit & stop_first
+        target_rows = bracket_hit & target_first
+        fast_fail_rows = bracket_hit & fast_fail_first
+        exit_prices = np.where(stop_rows, stop_prices, exit_prices)
+        exit_prices = np.where(target_rows, target_prices, exit_prices)
+        exit_prices = np.where(fast_fail_rows, close[realized_exit_indexes], exit_prices)
+        exit_reasons = np.full(len(event_indexes), "time", dtype=object)
+        exit_reasons[stop_rows] = "stop_loss"
+        exit_reasons[target_rows] = "take_profit"
+        exit_reasons[fast_fail_rows] = "fast_fail"
+        gross_points = (exit_prices - entry_prices) * direction
     net_points = gross_points - costs.round_trip_cost_points
     rows: list[dict[str, Any]] = []
     next_available = 0
@@ -226,6 +280,7 @@ def build_template_trades(
                 "family": template.family,
                 "entry_mode": template.entry_mode,
                 "stop_mode": template.stop_mode,
+                "exit_mode": template.exit_mode,
                 "reward_risk": template.reward_risk,
                 "horizon_minutes": template.horizon_minutes,
                 "direction": direction,
@@ -308,6 +363,24 @@ def resolve_entry_indexes(
                 valid_condition = (
                     high[valid_probe] >= event_close[valid_positions] + pullback_atr * event_atr[valid_positions]
                 ) & (close[valid_probe] < event_mid[valid_positions])
+        elif entry_mode == "confirm_hold":
+            previous = valid_probe - 1
+            if direction > 0:
+                valid_condition = (close[previous] > event_mid[valid_positions]) & (close[valid_probe] > close[previous])
+            else:
+                valid_condition = (close[previous] < event_mid[valid_positions]) & (close[valid_probe] < close[previous])
+        elif entry_mode == "reclaim_hold":
+            previous = valid_probe - 1
+            if direction > 0:
+                pulled_back = low[previous] <= event_close[valid_positions] - pullback_atr * event_atr[valid_positions]
+                valid_condition = pulled_back & (close[previous] > event_mid[valid_positions]) & (
+                    close[valid_probe] > event_mid[valid_positions]
+                )
+            else:
+                pulled_back = high[previous] >= event_close[valid_positions] + pullback_atr * event_atr[valid_positions]
+                valid_condition = pulled_back & (close[previous] < event_mid[valid_positions]) & (
+                    close[valid_probe] < event_mid[valid_positions]
+                )
         else:
             raise ValueError(f"unknown entry mode: {entry_mode}")
         condition = np.zeros(len(event_indexes), dtype=bool)
@@ -333,10 +406,15 @@ def stop_distances_for_template(
     if template.stop_mode == "atr":
         return np.maximum(min_stop_points, template.stop_atr_mult * event_atr)
     buffer = np.maximum(min_buffer_points, stop_buffer_atr * event_atr)
-    if template.stop_mode == "event_extreme":
+    if template.stop_mode in {"event_extreme", "hybrid_event_atr"}:
         if template.direction > 0:
-            return entry_prices - (low[event_indexes] - buffer)
-        return (high[event_indexes] + buffer) - entry_prices
+            structural = entry_prices - (low[event_indexes] - buffer)
+        else:
+            structural = (high[event_indexes] + buffer) - entry_prices
+        if template.stop_mode == "hybrid_event_atr":
+            atr_stop = np.maximum(min_stop_points, template.stop_atr_mult * event_atr)
+            return np.minimum(structural, atr_stop)
+        return structural
     if template.stop_mode == "event_mid":
         midpoint = (high[event_indexes] + low[event_indexes]) / 2.0
         if template.direction > 0:
@@ -366,6 +444,7 @@ def empty_trades() -> pd.DataFrame:
             "family",
             "entry_mode",
             "stop_mode",
+            "exit_mode",
             "reward_risk",
             "horizon_minutes",
             "direction",
@@ -402,6 +481,8 @@ def summarize_trades(trades: pd.DataFrame) -> dict[str, float]:
             "target_exit_rate": 0.0,
             "stop_exit_rate": 0.0,
             "time_exit_rate": 0.0,
+            "fast_fail_exit_rate": 0.0,
+            "partial_time_exit_rate": 0.0,
             "median_points": 0.0,
         }
     wins = net[net > 0]
@@ -425,6 +506,8 @@ def summarize_trades(trades: pd.DataFrame) -> dict[str, float]:
         "target_exit_rate": float((reasons == "take_profit").mean()) if len(reasons) else 0.0,
         "stop_exit_rate": float((reasons == "stop_loss").mean()) if len(reasons) else 0.0,
         "time_exit_rate": float((reasons == "time").mean()) if len(reasons) else 0.0,
+        "fast_fail_exit_rate": float((reasons == "fast_fail").mean()) if len(reasons) else 0.0,
+        "partial_time_exit_rate": float((reasons == "partial_time").mean()) if len(reasons) else 0.0,
         "median_points": float(net.median()),
     }
 
@@ -519,6 +602,7 @@ def walk_forward_validate(
                     "family": template.family,
                     "entry_mode": template.entry_mode,
                     "stop_mode": template.stop_mode,
+                    "exit_mode": template.exit_mode,
                     "reward_risk": template.reward_risk,
                     "horizon_minutes": template.horizon_minutes,
                     "train_start": str(train_start.date()),
@@ -559,6 +643,7 @@ def aggregate_walk_forward(folds: pd.DataFrame, selected_trades: pd.DataFrame) -
                 "family": str(group["family"].iloc[0]),
                 "entry_mode": str(group["entry_mode"].iloc[0]),
                 "stop_mode": str(group["stop_mode"].iloc[0]),
+                "exit_mode": str(group["exit_mode"].iloc[0]) if "exit_mode" in group.columns else "bracket",
                 "reward_risk": float(group["reward_risk"].iloc[0]),
                 "horizon_minutes": int(group["horizon_minutes"].iloc[0]),
                 "selected_folds": int(group["fold"].nunique()),
@@ -799,6 +884,8 @@ def main() -> int:
     parser.add_argument("--confirm-bars", type=int, nargs="+", default=[2, 5])
     parser.add_argument("--pullback-atr", type=float, nargs="+", default=[0.25, 0.50])
     parser.add_argument("--stop-atr-mult", type=float, nargs="+", default=[1.5, 2.0])
+    parser.add_argument("--exit-modes", nargs="+", default=["bracket"])
+    parser.add_argument("--fast-fail-bars", type=int, nargs="+", default=[5])
     parser.add_argument("--min-gap-minutes", type=int, default=15)
     parser.add_argument("--min-stop-points", type=float, default=4.0)
     parser.add_argument("--max-stop-points", type=float, default=100.0)
@@ -861,6 +948,8 @@ def main() -> int:
             confirm_bars=args.confirm_bars,
             pullback_atr=args.pullback_atr,
             stop_atr_mult=args.stop_atr_mult,
+            exit_modes=args.exit_modes,
+            fast_fail_bars=args.fast_fail_bars,
         )
         full_sample, trades_by_template = full_sample_results(features, market_features, templates, args)
         folds, aggregate, selected_trades = walk_forward_validate(trades_by_template, templates, args)
