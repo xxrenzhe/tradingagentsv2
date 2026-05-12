@@ -155,6 +155,28 @@ def build_market_features(data: pd.DataFrame) -> list[MarketFeature]:
     )
     local_base_low = low.rolling(30, min_periods=10).min().shift(1)
     local_base_high = high.rolling(30, min_periods=10).max().shift(1)
+    range_close_position = ((close - low) / range_points.replace(0, np.nan)).clip(0.0, 1.0)
+    range_close_position = range_close_position.fillna(0.5)
+    opening_drive_rth = rth & (minute < 16 * 60)
+    prior_session_impulse_30 = close.diff(30).abs() / atr
+    impulse_to_pullback = prior_session_impulse_30 / recent_pullback_depth.replace(0, np.nan)
+    bullish_reclaim_quality = (
+        signal("bullish_order_flow_shift_setup")
+        & (close > open_price)
+        & (body_share >= 0.70)
+        & (range_close_position >= 0.70)
+        & (volume_z >= 0.25)
+        & ((cmf > 0) | (force_z > 0.5) | (vfi > vfi.shift(10)))
+        & (session_vwap_atr >= -0.25)
+    )
+    bullish_pullback_quality = (
+        (ofs_position.between(0.15, 0.55))
+        & (range_close_position >= 0.60)
+        & (recent_pullback_depth.between(0.25, 1.75))
+        & (impulse_to_pullback >= 1.25)
+        & ((close > high.shift(1)) | (close > (high + low) / 2))
+        & (macd_rising | (cmf > 0) | (force_z > 0.25))
+    )
 
     features = [
         MarketFeature(
@@ -167,6 +189,22 @@ def build_market_features(data: pd.DataFrame) -> list[MarketFeature]:
             & (body_share >= 0.55)
             & (close > open_price)
             & (macd_rising | (cmf > 0) | (force_z > 0) | (volume_z >= 0)),
+        ),
+        MarketFeature(
+            "ict_bullish_order_flow_shift_quality_setup",
+            "ict_order_flow_shift_quality",
+            "long",
+            "Bullish OFS with stronger displacement quality: dominant body, high close, constructive volume flow, and VWAP acceptance.",
+            bullish_reclaim_quality,
+        ),
+        MarketFeature(
+            "ict_bullish_order_flow_shift_opening_drive_setup",
+            "ict_order_flow_shift_quality",
+            "long",
+            "High-quality bullish OFS during the early US RTH opening-drive window, where directional continuation is more likely.",
+            bullish_reclaim_quality
+            & opening_drive_rth
+            & (prior_session_impulse_30 >= 1.0),
         ),
         MarketFeature(
             "ict_bearish_order_flow_shift_setup",
@@ -190,6 +228,24 @@ def build_market_features(data: pd.DataFrame) -> list[MarketFeature]:
             & ((range_pos <= 0.55) | (session_vwap_atr >= -0.50))
             & ((close > open_price) | (close > (high + low) / 2))
             & (macd_rising | (cmf > 0) | (force_z > 0)),
+        ),
+        MarketFeature(
+            "ict_bullish_ofs_quality_pullback_reclaim",
+            "ict_order_flow_shift_quality",
+            "long",
+            "After bullish OFS, the pullback is shallow enough, closes strong, and reclaims with favorable impulse-to-pullback quality.",
+            (signal("bullish_fvg_retest") | signal("demand_zone_retest"))
+            & bullish_pullback_quality,
+        ),
+        MarketFeature(
+            "ict_bullish_ofs_opening_drive_pullback_reclaim",
+            "ict_order_flow_shift_quality",
+            "long",
+            "Opening-drive bullish OFS pullback reclaim: retest holds the discount half and reclaims with strong close/flow confirmation.",
+            (signal("bullish_fvg_retest") | signal("demand_zone_retest"))
+            & bullish_pullback_quality
+            & opening_drive_rth
+            & (session_vwap_atr >= 0),
         ),
         MarketFeature(
             "ict_bearish_ofs_fvg_retest_entry",
@@ -1143,6 +1199,7 @@ def main() -> int:
     parser.add_argument("--source-zip")
     parser.add_argument("--min-volume", type=float, default=1.0)
     parser.add_argument("--rebuild-features", action="store_true")
+    parser.add_argument("--feature-ids", nargs="+", help="Optional explicit market feature ids to include.")
     parser.add_argument("--horizons", type=int, nargs="+", default=[5, 15, 30, 60, 120])
     parser.add_argument("--min-gap-minutes", type=int, default=15)
     parser.add_argument("--min-events", type=int, default=30)
@@ -1165,6 +1222,13 @@ def main() -> int:
 
     features = load_or_prepare_features(args)
     market_features = build_market_features(features)
+    if args.feature_ids:
+        requested = list(dict.fromkeys(args.feature_ids))
+        available = {feature.feature_id: feature for feature in market_features}
+        missing = sorted(set(requested) - set(available))
+        if missing:
+            raise ValueError(f"Feature ids not available: {missing}")
+        market_features = [available[feature_id] for feature_id in requested]
     events = event_path_rows(
         features,
         market_features,

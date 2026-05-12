@@ -112,6 +112,40 @@ def test_fast_fail_exit_cuts_trade_before_full_horizon() -> None:
     assert row["exit_index"] == 4
 
 
+def test_bracket_fast_fail_cuts_trade_before_full_stop() -> None:
+    frame = _trade_frame()
+    frame.loc[4, "Close"] = 99.5
+    feature = script.MarketFeature(
+        feature_id="synthetic_long",
+        family="trend_start",
+        direction_hint="long",
+        description="Synthetic long event.",
+        signal=pd.Series([index == 2 for index in range(len(frame))]),
+    )
+    template = script.StrategyTemplate(
+        name="synthetic_long_bracket_fast_fail",
+        feature_id="synthetic_long",
+        family="trend_start",
+        direction=1,
+        entry_mode="next_open",
+        stop_mode="atr",
+        reward_risk=2.0,
+        horizon_minutes=5,
+        confirm_bars=1,
+        pullback_atr=0.25,
+        stop_atr_mult=2.0,
+        exit_mode="bracket_fast_fail",
+        fast_fail_bars=2,
+    )
+
+    trades = script.build_template_trades(frame, feature, template, min_gap_minutes=1, min_stop_points=1.0)
+
+    assert len(trades) == 1
+    row = trades.iloc[0]
+    assert row["exit_reason"] == "fast_fail"
+    assert row["exit_index"] == 4
+
+
 def test_staged_exit_books_half_at_one_r_then_time_exit() -> None:
     frame = _trade_frame()
     frame.loc[5:, "Close"] = 102.5
@@ -228,6 +262,37 @@ def test_staged_exit_can_fast_fail_before_scale_out() -> None:
     row = trades.iloc[0]
     assert row["exit_reason"] == "fast_fail"
     assert row["exit_index"] == 4
+
+
+def test_quality_reclaim_requires_strong_close_through_prior_bar() -> None:
+    event_indexes = np.asarray([2, 5])
+    open_prices = np.full(12, 100.0)
+    high = np.full(12, 101.0)
+    low = np.full(12, 99.0)
+    close = np.full(12, 100.0)
+    atr = np.full(12, 2.0)
+    high[3] = 101.0
+    low[3] = 98.5
+    close[3] = 101.6
+    high[6] = 101.0
+    low[6] = 98.5
+    close[6] = 100.8
+
+    entries = script.resolve_entry_indexes(
+        event_indexes=event_indexes,
+        open_prices=open_prices,
+        high=high,
+        low=low,
+        close=close,
+        atr=atr,
+        direction=1,
+        entry_mode="quality_reclaim",
+        confirm_bars=2,
+        pullback_atr=0.25,
+    )
+
+    assert entries[0] == 4
+    assert np.isnan(entries[1])
 
 
 def test_hybrid_event_atr_caps_structural_stop_distance() -> None:

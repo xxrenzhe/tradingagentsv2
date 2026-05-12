@@ -79,13 +79,13 @@ def template_pool(
                         for confirm in confirm_bars:
                             for pullback in pullback_atr:
                                 for atr_mult in stop_atr_mult:
-                                    if entry_mode not in {"pullback_reclaim", "reclaim_hold"} and pullback != pullback_atr[0]:
+                                    if entry_mode not in {"pullback_reclaim", "reclaim_hold", "quality_reclaim"} and pullback != pullback_atr[0]:
                                         continue
                                     if stop_mode not in {"atr", "hybrid_event_atr"} and atr_mult != stop_atr_mult[0]:
                                         continue
                                     for exit_mode in exit_modes:
                                         for fail_bars in fast_fail_bars:
-                                            if exit_mode not in {"fast_fail", "staged"} and fail_bars != fast_fail_bars[0]:
+                                            if exit_mode not in {"bracket_fast_fail", "fast_fail", "staged"} and fail_bars != fast_fail_bars[0]:
                                                 continue
                                             name = (
                                                 f"{feature_id}_{entry_mode}_{stop_mode}_{exit_mode}_rr{rr:g}"
@@ -215,7 +215,7 @@ def build_template_trades(
     target_hits &= same_symbol
     first_target_hits &= same_symbol
     fast_fail_hits &= same_symbol
-    fast_fail_enabled = template.exit_mode in {"fast_fail", "staged"} and template.fast_fail_bars > 0
+    fast_fail_enabled = template.exit_mode in {"bracket_fast_fail", "fast_fail", "staged"} and template.fast_fail_bars > 0
     if fast_fail_enabled:
         fast_fail_hits[:, 0] = False
         max_fast_fail_offset = min(template.fast_fail_bars, template.horizon_minutes)
@@ -399,6 +399,31 @@ def resolve_entry_indexes(
                 pulled_back = high[previous] >= event_close[valid_positions] + pullback_atr * event_atr[valid_positions]
                 valid_condition = pulled_back & (close[previous] < event_mid[valid_positions]) & (
                     close[valid_probe] < event_mid[valid_positions]
+                )
+        elif entry_mode == "quality_reclaim":
+            previous = valid_probe - 1
+            probe_range = high[valid_probe] - low[valid_probe]
+            close_position = np.divide(
+                close[valid_probe] - low[valid_probe],
+                probe_range,
+                out=np.full(len(valid_probe), 0.5, dtype=float),
+                where=probe_range > 0,
+            )
+            if direction > 0:
+                pulled_back = low[valid_probe] <= event_close[valid_positions] - pullback_atr * event_atr[valid_positions]
+                valid_condition = (
+                    pulled_back
+                    & (close[valid_probe] > event_mid[valid_positions])
+                    & (close[valid_probe] > high[previous])
+                    & (close_position >= 0.65)
+                )
+            else:
+                pulled_back = high[valid_probe] >= event_close[valid_positions] + pullback_atr * event_atr[valid_positions]
+                valid_condition = (
+                    pulled_back
+                    & (close[valid_probe] < event_mid[valid_positions])
+                    & (close[valid_probe] < low[previous])
+                    & (close_position <= 0.35)
                 )
         else:
             raise ValueError(f"unknown entry mode: {entry_mode}")

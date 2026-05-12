@@ -1,0 +1,585 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>NQ 2020+ Tradeable Market Feature Discovery</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; color: #172026; }
+    h1, h2 { margin: 0 0 12px; }
+    section { margin: 22px 0; }
+    table { border-collapse: collapse; width: 100%; font-size: 12px; }
+    th, td { border: 1px solid #d8dee4; padding: 6px 8px; vertical-align: top; }
+    th { background: #f6f8fa; text-align: left; position: sticky; top: 0; }
+    .metric { display: inline-block; margin: 0 14px 10px 0; padding: 8px 10px; background: #f6f8fa; border: 1px solid #d8dee4; border-radius: 6px; }
+    pre { white-space: pre-wrap; background: #0f1720; color: #e6edf3; padding: 14px; border-radius: 6px; overflow: auto; }
+    .muted { color: #59636e; }
+  </style>
+</head>
+<body>
+  <h1>NQ 2020+ 可交易行情特征发现</h1>
+  <p class="muted">先发现行情结构与路径机会，再为结构匹配策略。当前不使用 53% 胜率或盈亏比硬门槛作为筛选条件。</p>
+  <section>
+    <span class="metric">Features rows: 2,230,054</span>
+    <span class="metric">Event rows: 6,954</span>
+    <span class="metric">Summary rows: 6</span>
+    <span class="metric">Window: 2020-01-01 to 2026-04-28</span>
+  </section>
+  <section>
+    <h2>Top Event Path Statistics</h2>
+    <table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th>feature_id</th>
+      <th>family</th>
+      <th>direction_hint</th>
+      <th>description</th>
+      <th>events</th>
+      <th>first_ts</th>
+      <th>last_ts</th>
+      <th>mean_close_move_5m</th>
+      <th>median_close_move_5m</th>
+      <th>favorable_close_rate_5m</th>
+      <th>median_mfe_5m</th>
+      <th>median_mae_5m</th>
+      <th>hit_10pt_rate_5m</th>
+      <th>hit_20pt_rate_5m</th>
+      <th>adverse_10pt_rate_5m</th>
+      <th>path_payoff_5m</th>
+      <th>mean_close_move_15m</th>
+      <th>median_close_move_15m</th>
+      <th>favorable_close_rate_15m</th>
+      <th>median_mfe_15m</th>
+      <th>median_mae_15m</th>
+      <th>hit_10pt_rate_15m</th>
+      <th>hit_20pt_rate_15m</th>
+      <th>adverse_10pt_rate_15m</th>
+      <th>path_payoff_15m</th>
+      <th>mean_close_move_30m</th>
+      <th>median_close_move_30m</th>
+      <th>favorable_close_rate_30m</th>
+      <th>median_mfe_30m</th>
+      <th>median_mae_30m</th>
+      <th>hit_10pt_rate_30m</th>
+      <th>hit_20pt_rate_30m</th>
+      <th>adverse_10pt_rate_30m</th>
+      <th>path_payoff_30m</th>
+      <th>mean_close_move_60m</th>
+      <th>median_close_move_60m</th>
+      <th>favorable_close_rate_60m</th>
+      <th>median_mfe_60m</th>
+      <th>median_mae_60m</th>
+      <th>hit_10pt_rate_60m</th>
+      <th>hit_20pt_rate_60m</th>
+      <th>adverse_10pt_rate_60m</th>
+      <th>path_payoff_60m</th>
+      <th>mean_close_move_120m</th>
+      <th>median_close_move_120m</th>
+      <th>favorable_close_rate_120m</th>
+      <th>median_mfe_120m</th>
+      <th>median_mae_120m</th>
+      <th>hit_10pt_rate_120m</th>
+      <th>hit_20pt_rate_120m</th>
+      <th>adverse_10pt_rate_120m</th>
+      <th>path_payoff_120m</th>
+      <th>opportunity_score</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>ict_bullish_order_flow_shift_setup_us_rth</td>
+      <td>ict_order_flow_shift</td>
+      <td>long</td>
+      <td>Liquidity sweep below a prior low is followed by bullish displacement/MSS and a bullish FVG, marking a delivery-state shift. Session-filtered to US RTH.</td>
+      <td>1209</td>
+      <td>2020-01-02 18:48:00+00:00</td>
+      <td>2026-04-27 19:13:00+00:00</td>
+      <td>0.3747</td>
+      <td>0.0000</td>
+      <td>0.4971</td>
+      <td>9.5000</td>
+      <td>9.7500</td>
+      <td>0.4880</td>
+      <td>0.2473</td>
+      <td>0.4988</td>
+      <td>0.9744</td>
+      <td>-0.3443</td>
+      <td>0.5000</td>
+      <td>0.5070</td>
+      <td>17.0000</td>
+      <td>16.7500</td>
+      <td>0.6708</td>
+      <td>0.4367</td>
+      <td>0.6625</td>
+      <td>1.0149</td>
+      <td>0.6865</td>
+      <td>1.5000</td>
+      <td>0.5161</td>
+      <td>24.0000</td>
+      <td>23.7500</td>
+      <td>0.7643</td>
+      <td>0.5674</td>
+      <td>0.7543</td>
+      <td>1.0105</td>
+      <td>1.8923</td>
+      <td>4.5000</td>
+      <td>0.5318</td>
+      <td>33.2500</td>
+      <td>34.0000</td>
+      <td>0.8354</td>
+      <td>0.6782</td>
+      <td>0.8065</td>
+      <td>0.9779</td>
+      <td>5.4305</td>
+      <td>6.0000</td>
+      <td>0.5467</td>
+      <td>46.2500</td>
+      <td>46.5000</td>
+      <td>0.8792</td>
+      <td>0.7651</td>
+      <td>0.8586</td>
+      <td>0.9946</td>
+      <td>4.5314</td>
+    </tr>
+    <tr>
+      <td>ict_bullish_order_flow_shift_quality_setup_us_rth</td>
+      <td>ict_order_flow_shift_quality</td>
+      <td>long</td>
+      <td>Bullish OFS with stronger displacement quality: dominant body, high close, constructive volume flow, and VWAP acceptance. Session-filtered to US RTH.</td>
+      <td>608</td>
+      <td>2020-01-02 18:57:00+00:00</td>
+      <td>2026-04-27 19:13:00+00:00</td>
+      <td>-0.1505</td>
+      <td>-0.2500</td>
+      <td>0.4901</td>
+      <td>9.7500</td>
+      <td>9.7500</td>
+      <td>0.4918</td>
+      <td>0.2681</td>
+      <td>0.4934</td>
+      <td>1.0000</td>
+      <td>-2.4490</td>
+      <td>1.5000</td>
+      <td>0.5148</td>
+      <td>17.7500</td>
+      <td>16.5000</td>
+      <td>0.6793</td>
+      <td>0.4507</td>
+      <td>0.6382</td>
+      <td>1.0758</td>
+      <td>-3.6657</td>
+      <td>0.0000</td>
+      <td>0.4967</td>
+      <td>24.6250</td>
+      <td>23.5000</td>
+      <td>0.7632</td>
+      <td>0.5773</td>
+      <td>0.7336</td>
+      <td>1.0479</td>
+      <td>-1.3162</td>
+      <td>4.1250</td>
+      <td>0.5247</td>
+      <td>35.3750</td>
+      <td>35.5000</td>
+      <td>0.8240</td>
+      <td>0.6891</td>
+      <td>0.7878</td>
+      <td>0.9965</td>
+      <td>2.0629</td>
+      <td>5.0000</td>
+      <td>0.5345</td>
+      <td>46.2500</td>
+      <td>46.8750</td>
+      <td>0.8684</td>
+      <td>0.7681</td>
+      <td>0.8322</td>
+      <td>0.9867</td>
+      <td>4.3024</td>
+    </tr>
+    <tr>
+      <td>ict_bullish_order_flow_shift_opening_drive_setup_us_rth</td>
+      <td>ict_order_flow_shift_quality</td>
+      <td>long</td>
+      <td>High-quality bullish OFS during the early US RTH opening-drive window, where directional continuation is more likely. Session-filtered to US RTH.</td>
+      <td>289</td>
+      <td>2020-01-03 14:31:00+00:00</td>
+      <td>2026-04-13 13:49:00+00:00</td>
+      <td>-0.1548</td>
+      <td>-0.7500</td>
+      <td>0.4879</td>
+      <td>14.5000</td>
+      <td>12.0000</td>
+      <td>0.6159</td>
+      <td>0.3460</td>
+      <td>0.5882</td>
+      <td>1.2083</td>
+      <td>-2.3339</td>
+      <td>1.5000</td>
+      <td>0.5156</td>
+      <td>23.2500</td>
+      <td>20.7500</td>
+      <td>0.7751</td>
+      <td>0.5571</td>
+      <td>0.6920</td>
+      <td>1.1205</td>
+      <td>-5.4810</td>
+      <td>-1.0000</td>
+      <td>0.4913</td>
+      <td>29.0000</td>
+      <td>30.7500</td>
+      <td>0.8201</td>
+      <td>0.6540</td>
+      <td>0.7889</td>
+      <td>0.9431</td>
+      <td>-6.3322</td>
+      <td>1.0000</td>
+      <td>0.5087</td>
+      <td>41.5000</td>
+      <td>47.7500</td>
+      <td>0.8651</td>
+      <td>0.7751</td>
+      <td>0.8270</td>
+      <td>0.8691</td>
+      <td>-3.3452</td>
+      <td>4.5000</td>
+      <td>0.5260</td>
+      <td>56.5000</td>
+      <td>61.7500</td>
+      <td>0.8927</td>
+      <td>0.8201</td>
+      <td>0.8720</td>
+      <td>0.9150</td>
+      <td>4.2707</td>
+    </tr>
+    <tr>
+      <td>ict_bullish_ofs_ob_retest_entry_us_rth</td>
+      <td>ict_order_block_retest</td>
+      <td>long</td>
+      <td>Bullish OFS remains active and price retests the demand/order-block side of the displacement leg with supportive volume flow. Session-filtered to US RTH.</td>
+      <td>3931</td>
+      <td>2020-01-03 13:54:00+00:00</td>
+      <td>2026-04-27 17:12:00+00:00</td>
+      <td>-0.1907</td>
+      <td>0.2500</td>
+      <td>0.5009</td>
+      <td>9.7500</td>
+      <td>9.7500</td>
+      <td>0.4986</td>
+      <td>0.2363</td>
+      <td>0.4945</td>
+      <td>1.0000</td>
+      <td>-0.3229</td>
+      <td>0.5000</td>
+      <td>0.5057</td>
+      <td>16.2500</td>
+      <td>17.2500</td>
+      <td>0.6706</td>
+      <td>0.4302</td>
+      <td>0.6779</td>
+      <td>0.9420</td>
+      <td>-0.3762</td>
+      <td>1.0000</td>
+      <td>0.5118</td>
+      <td>23.7500</td>
+      <td>24.7500</td>
+      <td>0.7695</td>
+      <td>0.5627</td>
+      <td>0.7685</td>
+      <td>0.9596</td>
+      <td>-0.7581</td>
+      <td>0.7500</td>
+      <td>0.5062</td>
+      <td>33.2500</td>
+      <td>34.5000</td>
+      <td>0.8418</td>
+      <td>0.6820</td>
+      <td>0.8331</td>
+      <td>0.9638</td>
+      <td>-1.5153</td>
+      <td>2.5000</td>
+      <td>0.5154</td>
+      <td>44.5000</td>
+      <td>48.5000</td>
+      <td>0.8845</td>
+      <td>0.7599</td>
+      <td>0.8736</td>
+      <td>0.9175</td>
+      <td>4.2222</td>
+    </tr>
+    <tr>
+      <td>ict_bullish_ofs_quality_pullback_reclaim_us_rth</td>
+      <td>ict_order_flow_shift_quality</td>
+      <td>long</td>
+      <td>After bullish OFS, the pullback is shallow enough, closes strong, and reclaims with favorable impulse-to-pullback quality. Session-filtered to US RTH.</td>
+      <td>726</td>
+      <td>2020-01-16 16:40:00+00:00</td>
+      <td>2026-04-27 17:28:00+00:00</td>
+      <td>-1.2772</td>
+      <td>-0.5000</td>
+      <td>0.4766</td>
+      <td>8.5000</td>
+      <td>9.0000</td>
+      <td>0.4408</td>
+      <td>0.1970</td>
+      <td>0.4669</td>
+      <td>0.9444</td>
+      <td>-1.2483</td>
+      <td>-0.5000</td>
+      <td>0.4876</td>
+      <td>13.6250</td>
+      <td>15.5000</td>
+      <td>0.6295</td>
+      <td>0.3815</td>
+      <td>0.6474</td>
+      <td>0.8790</td>
+      <td>-0.6567</td>
+      <td>-0.2500</td>
+      <td>0.4959</td>
+      <td>21.5000</td>
+      <td>22.5000</td>
+      <td>0.7259</td>
+      <td>0.5262</td>
+      <td>0.7479</td>
+      <td>0.9556</td>
+      <td>0.9583</td>
+      <td>1.6250</td>
+      <td>0.5193</td>
+      <td>29.5000</td>
+      <td>29.6250</td>
+      <td>0.8113</td>
+      <td>0.6501</td>
+      <td>0.8058</td>
+      <td>0.9958</td>
+      <td>1.4824</td>
+      <td>5.3750</td>
+      <td>0.5331</td>
+      <td>40.8750</td>
+      <td>41.5000</td>
+      <td>0.8650</td>
+      <td>0.7424</td>
+      <td>0.8485</td>
+      <td>0.9849</td>
+      <td>4.1291</td>
+    </tr>
+    <tr>
+      <td>ict_bullish_ofs_opening_drive_pullback_reclaim_us_rth</td>
+      <td>ict_order_flow_shift_quality</td>
+      <td>long</td>
+      <td>Opening-drive bullish OFS pullback reclaim: retest holds the discount half and reclaims with strong close/flow confirmation. Session-filtered to US RTH.</td>
+      <td>191</td>
+      <td>2020-02-07 15:43:00+00:00</td>
+      <td>2026-04-23 14:23:00+00:00</td>
+      <td>-2.8377</td>
+      <td>-1.2500</td>
+      <td>0.4555</td>
+      <td>10.2500</td>
+      <td>12.7500</td>
+      <td>0.5131</td>
+      <td>0.2461</td>
+      <td>0.5707</td>
+      <td>0.8039</td>
+      <td>-4.1950</td>
+      <td>-0.5000</td>
+      <td>0.4817</td>
+      <td>15.7500</td>
+      <td>21.7500</td>
+      <td>0.6911</td>
+      <td>0.4136</td>
+      <td>0.7330</td>
+      <td>0.7241</td>
+      <td>-2.0903</td>
+      <td>-1.7500</td>
+      <td>0.4921</td>
+      <td>23.2500</td>
+      <td>30.0000</td>
+      <td>0.7487</td>
+      <td>0.5445</td>
+      <td>0.7853</td>
+      <td>0.7750</td>
+      <td>-1.6165</td>
+      <td>1.5000</td>
+      <td>0.5079</td>
+      <td>34.7500</td>
+      <td>37.0000</td>
+      <td>0.8534</td>
+      <td>0.6963</td>
+      <td>0.8377</td>
+      <td>0.9392</td>
+      <td>8.1178</td>
+      <td>12.0000</td>
+      <td>0.6126</td>
+      <td>47.7500</td>
+      <td>50.0000</td>
+      <td>0.8848</td>
+      <td>0.7749</td>
+      <td>0.8691</td>
+      <td>0.9550</td>
+      <td>4.1043</td>
+    </tr>
+  </tbody>
+</table>
+  </section>
+  <section>
+    <h2>LLM / Rule Analysis</h2>
+    <pre>{
+  "feature_rankings": [
+    {
+      "confirmation": "Do not chase the displacement; wait for the FVG/order-block retest in the correct premium/discount half.",
+      "feature_id": "ict_bullish_order_flow_shift_setup_us_rth",
+      "invalidation": "Invalidate beyond the liquidity-sweep extreme or beyond the candle that created the traded FVG/order block.",
+      "preferred_strategy": "confirmation reversal with extreme-based stop and VWAP/range target",
+      "reason": "ict_order_flow_shift long event has 1209 samples and opportunity_score 4.531; use as a hypothesis source, not as a complete strategy.",
+      "tradeability": "research"
+    },
+    {
+      "confirmation": "Require follow-through close or failed retest in the hinted direction.",
+      "feature_id": "ict_bullish_order_flow_shift_quality_setup_us_rth",
+      "invalidation": "Invalidate below the event low or if rebound cannot reclaim VWAP/midpoint within the chosen time window.",
+      "preferred_strategy": "family-specific bracket and time-stop comparison",
+      "reason": "ict_order_flow_shift_quality long event has 608 samples and opportunity_score 4.302; use as a hypothesis source, not as a complete strategy.",
+      "tradeability": "research"
+    },
+    {
+      "confirmation": "Require follow-through close or failed retest in the hinted direction.",
+      "feature_id": "ict_bullish_order_flow_shift_opening_drive_setup_us_rth",
+      "invalidation": "Invalidate below the event low or if rebound cannot reclaim VWAP/midpoint within the chosen time window.",
+      "preferred_strategy": "family-specific bracket and time-stop comparison",
+      "reason": "ict_order_flow_shift_quality long event has 289 samples and opportunity_score 4.271; use as a hypothesis source, not as a complete strategy.",
+      "tradeability": "research"
+    },
+    {
+      "confirmation": "Enter on the FVG or order-block retest only after price rejects back in the shifted order-flow direction.",
+      "feature_id": "ict_bullish_ofs_ob_retest_entry_us_rth",
+      "invalidation": "Invalidate beyond the liquidity-sweep extreme or beyond the candle that created the traded FVG/order block.",
+      "preferred_strategy": "confirmation reversal with extreme-based stop and VWAP/range target",
+      "reason": "ict_order_block_retest long event has 3931 samples and opportunity_score 4.222; use as a hypothesis source, not as a complete strategy.",
+      "tradeability": "research"
+    },
+    {
+      "confirmation": "Require follow-through close or failed retest in the hinted direction.",
+      "feature_id": "ict_bullish_ofs_quality_pullback_reclaim_us_rth",
+      "invalidation": "Invalidate below the event low or if rebound cannot reclaim VWAP/midpoint within the chosen time window.",
+      "preferred_strategy": "family-specific bracket and time-stop comparison",
+      "reason": "ict_order_flow_shift_quality long event has 726 samples and opportunity_score 4.129; use as a hypothesis source, not as a complete strategy.",
+      "tradeability": "research"
+    },
+    {
+      "confirmation": "Require follow-through close or failed retest in the hinted direction.",
+      "feature_id": "ict_bullish_ofs_opening_drive_pullback_reclaim_us_rth",
+      "invalidation": "Invalidate below the event low or if rebound cannot reclaim VWAP/midpoint within the chosen time window.",
+      "preferred_strategy": "family-specific bracket and time-stop comparison",
+      "reason": "ict_order_flow_shift_quality long event has 191 samples and opportunity_score 4.104; use as a hypothesis source, not as a complete strategy.",
+      "tradeability": "research"
+    }
+  ],
+  "memory_note_count": 20,
+  "model": "feature_fallback",
+  "next_research_steps": [
+    "For top features, run bracket and time-stop strategy grids separately by family.",
+    "Validate whether MFE arrives before MAE enough to support realistic entries.",
+    "Split event statistics by session and volatility regime before promoting a setup."
+  ],
+  "provider": "rule",
+  "risk_principles": [
+    "先验证事件后的路径分布，再为该事件选择趋势跟随、反转或回归执行策略。",
+    "每个结构都必须定义失效条件，失效时不补仓、不扩大止损。",
+    "量价不匹配必须等待价格确认，不能只凭背离逆势入场。",
+    "趋势起点优先用结构止损，快速反抽/回落优先用极值失效止损。"
+  ],
+  "status": "fallback",
+  "strategy_hypotheses": [
+    {
+      "direction": "long",
+      "entry_logic": "Do not chase the displacement; wait for the FVG/order-block retest in the correct premium/discount half.",
+      "exit_logic": "Compare fixed R, structure target, and time stop variants after event-level opportunity is confirmed.",
+      "filters_to_test": [
+        "session",
+        "relative_volume_20",
+        "session_vwap_distance_atr",
+        "adx_14",
+        "cmf_20",
+        "mfi_14"
+      ],
+      "setup": "ict_bullish_order_flow_shift_setup_us_rth",
+      "stop_logic": "Invalidate beyond the liquidity-sweep extreme or beyond the candle that created the traded FVG/order block."
+    },
+    {
+      "direction": "long",
+      "entry_logic": "Require follow-through close or failed retest in the hinted direction.",
+      "exit_logic": "Compare fixed R, structure target, and time stop variants after event-level opportunity is confirmed.",
+      "filters_to_test": [
+        "session",
+        "relative_volume_20",
+        "session_vwap_distance_atr",
+        "adx_14",
+        "cmf_20",
+        "mfi_14"
+      ],
+      "setup": "ict_bullish_order_flow_shift_quality_setup_us_rth",
+      "stop_logic": "Invalidate below the event low or if rebound cannot reclaim VWAP/midpoint within the chosen time window."
+    },
+    {
+      "direction": "long",
+      "entry_logic": "Require follow-through close or failed retest in the hinted direction.",
+      "exit_logic": "Compare fixed R, structure target, and time stop variants after event-level opportunity is confirmed.",
+      "filters_to_test": [
+        "session",
+        "relative_volume_20",
+        "session_vwap_distance_atr",
+        "adx_14",
+        "cmf_20",
+        "mfi_14"
+      ],
+      "setup": "ict_bullish_order_flow_shift_opening_drive_setup_us_rth",
+      "stop_logic": "Invalidate below the event low or if rebound cannot reclaim VWAP/midpoint within the chosen time window."
+    },
+    {
+      "direction": "long",
+      "entry_logic": "Enter on the FVG or order-block retest only after price rejects back in the shifted order-flow direction.",
+      "exit_logic": "Compare fixed R, structure target, and time stop variants after event-level opportunity is confirmed.",
+      "filters_to_test": [
+        "session",
+        "relative_volume_20",
+        "session_vwap_distance_atr",
+        "adx_14",
+        "cmf_20",
+        "mfi_14"
+      ],
+      "setup": "ict_bullish_ofs_ob_retest_entry_us_rth",
+      "stop_logic": "Invalidate beyond the liquidity-sweep extreme or beyond the candle that created the traded FVG/order block."
+    },
+    {
+      "direction": "long",
+      "entry_logic": "Require follow-through close or failed retest in the hinted direction.",
+      "exit_logic": "Compare fixed R, structure target, and time stop variants after event-level opportunity is confirmed.",
+      "filters_to_test": [
+        "session",
+        "relative_volume_20",
+        "session_vwap_distance_atr",
+        "adx_14",
+        "cmf_20",
+        "mfi_14"
+      ],
+      "setup": "ict_bullish_ofs_quality_pullback_reclaim_us_rth",
+      "stop_logic": "Invalidate below the event low or if rebound cannot reclaim VWAP/midpoint within the chosen time window."
+    },
+    {
+      "direction": "long",
+      "entry_logic": "Require follow-through close or failed retest in the hinted direction.",
+      "exit_logic": "Compare fixed R, structure target, and time stop variants after event-level opportunity is confirmed.",
+      "filters_to_test": [
+        "session",
+        "relative_volume_20",
+        "session_vwap_distance_atr",
+        "adx_14",
+        "cmf_20",
+        "mfi_14"
+      ],
+      "setup": "ict_bullish_ofs_opening_drive_pullback_reclaim_us_rth",
+      "stop_logic": "Invalidate below the event low or if rebound cannot reclaim VWAP/midpoint within the chosen time window."
+    }
+  ],
+  "summary": "Fallback analysis ranked event families by path opportunity; LLM unavailable or disabled."
+}</pre>
+  </section>
+</body>
+</html>

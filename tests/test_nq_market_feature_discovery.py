@@ -74,6 +74,15 @@ def test_fallback_feature_analysis_returns_strategy_principles() -> None:
     assert payload["risk_principles"]
 
 
+def test_explicit_feature_id_filter_selects_requested_market_features() -> None:
+    frame = _three_wave_reversal_frame()
+    features = {feature.feature_id: feature for feature in script.build_market_features(frame)}
+    requested = ["w_bottom_reclaim_us_rth", "trend_start_long_displacement"]
+    selected = [features[feature_id] for feature_id in requested]
+
+    assert [feature.feature_id for feature in selected] == requested
+
+
 def test_sequence_features_capture_breakdown_v_reversal_and_pullback_continuation() -> None:
     frame = _three_wave_reversal_frame()
 
@@ -275,7 +284,7 @@ def test_ict_order_flow_shift_features_are_registered_and_triggerable() -> None:
     frame.loc[bullish_setup, "force_index_z_50"] = 0.5
 
     bullish_entry = 126
-    frame.loc[bullish_entry, ["Open", "High", "Low", "Close"]] = [93.2, 94.4, 92.2, 94.1]
+    frame.loc[bullish_entry, ["Open", "High", "Low", "Close"]] = [94.0, 96.2, 93.8, 96.0]
     frame.loc[bullish_entry, "bullish_fvg_retest"] = 1
     frame.loc[bullish_entry, "demand_zone_retest"] = 1
     frame.loc[bullish_entry, "ofs_leg_position"] = 0.35
@@ -311,6 +320,10 @@ def test_ict_order_flow_shift_features_are_registered_and_triggerable() -> None:
         "ict_bearish_ofs_fvg_retest_entry",
         "ict_bullish_ofs_ob_retest_entry",
         "ict_bearish_ofs_ob_retest_entry",
+        "ict_bullish_order_flow_shift_quality_setup",
+        "ict_bullish_order_flow_shift_opening_drive_setup",
+        "ict_bullish_ofs_quality_pullback_reclaim",
+        "ict_bullish_ofs_opening_drive_pullback_reclaim",
     } <= set(features)
     assert features["ict_bullish_order_flow_shift_setup"].signal.any()
     assert features["ict_bearish_order_flow_shift_setup"].signal.any()
@@ -318,6 +331,10 @@ def test_ict_order_flow_shift_features_are_registered_and_triggerable() -> None:
     assert features["ict_bearish_ofs_fvg_retest_entry"].signal.any()
     assert features["ict_bullish_ofs_ob_retest_entry"].signal.any()
     assert features["ict_bearish_ofs_ob_retest_entry"].signal.any()
+    assert features["ict_bullish_order_flow_shift_quality_setup"].signal.any()
+    assert features["ict_bullish_order_flow_shift_opening_drive_setup"].signal.any()
+    assert features["ict_bullish_ofs_quality_pullback_reclaim"].signal.any()
+    assert features["ict_bullish_ofs_opening_drive_pullback_reclaim"].signal.any()
 
 
 def _three_wave_reversal_frame() -> pd.DataFrame:
