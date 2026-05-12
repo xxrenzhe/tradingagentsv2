@@ -515,6 +515,117 @@ def test_breakeven_bracket_moves_stop_to_entry_after_progress() -> None:
     assert row["gross_points"] == 0.0
 
 
+def test_protective_bracket_moves_stop_to_entry_after_progress() -> None:
+    frame = _trade_frame()
+    frame.loc[4, ["Open", "High", "Low", "Close"]] = [101.0, 102.7, 100.9, 102.2]
+    frame.loc[5, ["Open", "High", "Low", "Close"]] = [102.2, 102.5, 100.7, 101.2]
+    feature = script.MarketFeature(
+        feature_id="synthetic_long",
+        family="ict_order_flow_shift",
+        direction_hint="long",
+        description="Synthetic long event.",
+        signal=pd.Series([index == 2 for index in range(len(frame))]),
+    )
+    template = script.StrategyTemplate(
+        name="synthetic_long_protective_bracket",
+        feature_id="synthetic_long",
+        family="ict_order_flow_shift",
+        direction=1,
+        entry_mode="next_open",
+        stop_mode="atr",
+        reward_risk=2.0,
+        horizon_minutes=5,
+        confirm_bars=1,
+        pullback_atr=0.25,
+        stop_atr_mult=1.0,
+        exit_mode="protective_bracket",
+        fast_fail_bars=0,
+        breakeven_trigger_r=0.75,
+    )
+
+    trades = script.build_template_trades(frame, feature, template, min_gap_minutes=1, min_stop_points=1.0)
+
+    assert len(trades) == 1
+    row = trades.iloc[0]
+    assert row["exit_reason"] == "protected_stop"
+    assert row["exit_index"] == 5
+    assert row["gross_points"] == 0.0
+
+
+def test_progress_bracket_exits_when_trade_does_not_advance_by_deadline() -> None:
+    frame = _trade_frame()
+    frame.loc[4, ["Open", "High", "Low", "Close"]] = [101.0, 101.8, 100.8, 101.1]
+    frame.loc[5, ["Open", "High", "Low", "Close"]] = [101.1, 101.7, 100.9, 101.3]
+    feature = script.MarketFeature(
+        feature_id="synthetic_long",
+        family="ict_order_flow_shift",
+        direction_hint="long",
+        description="Synthetic long event.",
+        signal=pd.Series([index == 2 for index in range(len(frame))]),
+    )
+    template = script.StrategyTemplate(
+        name="synthetic_long_progress_bracket",
+        feature_id="synthetic_long",
+        family="ict_order_flow_shift",
+        direction=1,
+        entry_mode="next_open",
+        stop_mode="atr",
+        reward_risk=2.0,
+        horizon_minutes=5,
+        confirm_bars=1,
+        pullback_atr=0.25,
+        stop_atr_mult=2.0,
+        exit_mode="progress_bracket",
+        fast_fail_bars=2,
+        breakeven_trigger_r=0.5,
+    )
+
+    trades = script.build_template_trades(frame, feature, template, min_gap_minutes=1, min_stop_points=1.0)
+
+    assert len(trades) == 1
+    row = trades.iloc[0]
+    assert row["exit_reason"] == "no_progress_exit"
+    assert row["exit_index"] == 5
+    assert row["gross_points"] == pytest.approx(0.3)
+
+
+def test_progress_protective_bracket_keeps_trade_if_progress_happens_before_deadline() -> None:
+    frame = _trade_frame()
+    frame.loc[4, ["Open", "High", "Low", "Close"]] = [101.0, 103.2, 100.9, 102.8]
+    frame.loc[5, ["Open", "High", "Low", "Close"]] = [102.8, 102.9, 100.8, 101.4]
+    feature = script.MarketFeature(
+        feature_id="synthetic_long",
+        family="ict_order_flow_shift",
+        direction_hint="long",
+        description="Synthetic long event.",
+        signal=pd.Series([index == 2 for index in range(len(frame))]),
+    )
+    template = script.StrategyTemplate(
+        name="synthetic_long_progress_protective_bracket",
+        feature_id="synthetic_long",
+        family="ict_order_flow_shift",
+        direction=1,
+        entry_mode="next_open",
+        stop_mode="atr",
+        reward_risk=2.0,
+        horizon_minutes=5,
+        confirm_bars=1,
+        pullback_atr=0.25,
+        stop_atr_mult=2.0,
+        exit_mode="progress_protective_bracket",
+        fast_fail_bars=2,
+        breakeven_trigger_r=0.5,
+    )
+
+    trades = script.build_template_trades(frame, feature, template, min_gap_minutes=1, min_stop_points=1.0)
+
+    assert len(trades) == 1
+    row = trades.iloc[0]
+    assert row["exit_reason"] == "protected_stop"
+    assert row["exit_index"] == 5
+    assert row["gross_points"] == 0.0
+
+
 def test_adaptive_bracket_exits_when_no_progress_after_entry() -> None:
     frame = _trade_frame()
     frame.loc[4, ["Open", "High", "Low", "Close"]] = [101.0, 101.8, 100.4, 100.7]
@@ -586,7 +697,7 @@ def test_adaptive_exit_handles_rows_removed_by_stop_distance_filter() -> None:
 def test_summary_tracks_adaptive_exit_reason_rates() -> None:
     trades = pd.DataFrame(
         {
-            "net_points": [1.0, -1.0, -0.25, 0.5, 0.0, -0.5, 0.25],
+            "net_points": [1.0, -1.0, -0.25, 0.5, 0.0, -0.5, 0.25, 0.0],
             "exit_reason": [
                 "partial_breakeven",
                 "structure_invalidation",
@@ -595,19 +706,21 @@ def test_summary_tracks_adaptive_exit_reason_rates() -> None:
                 "breakeven",
                 "partial_stop_loss",
                 "partial_structure_invalidation",
+                "protected_stop",
             ],
         }
     )
 
     summary = script.summarize_trades(trades)
 
-    assert summary["structure_invalidation_exit_rate"] == pytest.approx(2 / 7)
-    assert summary["no_progress_exit_rate"] == pytest.approx(1 / 7)
-    assert summary["partial_breakeven_exit_rate"] == pytest.approx(1 / 7)
-    assert summary["breakeven_exit_rate"] == pytest.approx(1 / 7)
-    assert summary["partial_stop_loss_exit_rate"] == pytest.approx(1 / 7)
-    assert summary["partial_structure_invalidation_exit_rate"] == pytest.approx(1 / 7)
-    assert summary["stop_exit_rate"] == pytest.approx(1 / 7)
+    assert summary["structure_invalidation_exit_rate"] == pytest.approx(2 / 8)
+    assert summary["no_progress_exit_rate"] == pytest.approx(1 / 8)
+    assert summary["partial_breakeven_exit_rate"] == pytest.approx(1 / 8)
+    assert summary["breakeven_exit_rate"] == pytest.approx(1 / 8)
+    assert summary["protected_stop_exit_rate"] == pytest.approx(1 / 8)
+    assert summary["partial_stop_loss_exit_rate"] == pytest.approx(1 / 8)
+    assert summary["partial_structure_invalidation_exit_rate"] == pytest.approx(1 / 8)
+    assert summary["stop_exit_rate"] == pytest.approx(1 / 8)
 
 
 def test_reclaim_followthrough_requires_next_bar_break_after_reclaim() -> None:
@@ -829,16 +942,19 @@ def test_template_pool_only_expands_breakeven_trigger_for_relevant_exit_modes() 
         confirm_bars=[1],
         pullback_atr=[0.25],
         stop_atr_mult=[1.0],
-        exit_modes=["bracket", "breakeven_bracket"],
+        exit_modes=["bracket", "breakeven_bracket", "protective_bracket"],
         fast_fail_bars=[3],
         breakeven_trigger_r=[0.6, 0.75, 1.0],
     )
 
     bracket = [template for template in templates if template.exit_mode == "bracket"]
     breakeven = [template for template in templates if template.exit_mode == "breakeven_bracket"]
+    protective = [template for template in templates if template.exit_mode == "protective_bracket"]
     assert len(bracket) == 1
     assert len(breakeven) == 3
+    assert len(protective) == 3
     assert {template.breakeven_trigger_r for template in breakeven} == {0.6, 0.75, 1.0}
+    assert {template.breakeven_trigger_r for template in protective} == {0.6, 0.75, 1.0}
 
 
 def test_template_pool_only_expands_partial_fraction_for_light_partial() -> None:

@@ -102,13 +102,23 @@ def template_pool(
                                                 "breakeven_bracket",
                                                 "bracket_fast_fail",
                                                 "fast_fail",
+                                                "progress_bracket",
+                                                "progress_protective_bracket",
                                                 "staged",
                                                 "staged_breakeven",
                                             } and fail_bars != fast_fail_bars[0]:
                                                 continue
                                             trigger_values = (
                                                 breakeven_trigger_r
-                                                if exit_mode in {"adaptive", "breakeven_bracket", "staged_breakeven"}
+                                                if exit_mode
+                                                in {
+                                                    "adaptive",
+                                                    "breakeven_bracket",
+                                                    "progress_bracket",
+                                                    "progress_protective_bracket",
+                                                    "protective_bracket",
+                                                    "staged_breakeven",
+                                                }
                                                 else [breakeven_trigger_r[0]]
                                             )
                                             for trigger_r in trigger_values:
@@ -256,7 +266,15 @@ def build_template_trades(
     fast_fail_hits &= same_symbol
     adaptive_enabled = template.exit_mode in {"adaptive", "adaptive_bracket"}
     light_partial_enabled = template.exit_mode == "light_partial"
-    breakeven_enabled = template.exit_mode in {"adaptive", "breakeven_bracket", "staged_breakeven"}
+    protective_enabled = template.exit_mode in {"protective_bracket", "progress_protective_bracket"}
+    progress_enabled = template.exit_mode in {"progress_bracket", "progress_protective_bracket"}
+    breakeven_enabled = template.exit_mode in {
+        "adaptive",
+        "breakeven_bracket",
+        "protective_bracket",
+        "progress_protective_bracket",
+        "staged_breakeven",
+    }
     fast_fail_enabled = template.exit_mode in {"bracket_fast_fail", "fast_fail", "staged"} and template.fast_fail_bars > 0
     if fast_fail_enabled:
         fast_fail_hits[:, 0] = False
@@ -322,6 +340,20 @@ def build_template_trades(
         breakeven_stop_after_trigger.argmax(axis=1),
         no_hit,
     )
+    progress_exit_hits = np.zeros_like(target_hits, dtype=bool)
+    if progress_enabled and template.fast_fail_bars > 0:
+        trigger_distance = max(float(template.breakeven_trigger_r), 0.0) * stop_distances
+        if direction > 0:
+            progress_hits = high[window_indexes] >= entry_prices[:, None] + trigger_distance[:, None]
+        else:
+            progress_hits = low[window_indexes] <= entry_prices[:, None] - trigger_distance[:, None]
+        progress_hits &= same_symbol
+        made_progress = np.maximum.accumulate(progress_hits, axis=1)
+        deadline = min(int(template.fast_fail_bars), int(template.horizon_minutes))
+        if deadline > 0:
+            valid_deadline = same_symbol[:, deadline]
+            progress_exit_hits[:, deadline] = valid_deadline & ~made_progress[:, deadline]
+    first_progress_exit = np.where(progress_exit_hits.any(axis=1), progress_exit_hits.argmax(axis=1), no_hit)
     if template.exit_mode == "light_partial":
         partial_fraction = float(np.clip(template.partial_fraction, 0.0, 1.0))
         first_scale = np.where(first_target_hits.any(axis=1), first_target_hits.argmax(axis=1), no_hit)
@@ -457,33 +489,42 @@ def build_template_trades(
         exit_reasons[second_target_hit] = "partial_target"
     else:
         first_event = np.minimum(np.minimum(first_stop, first_target), first_early_exit)
-        if template.exit_mode == "breakeven_bracket":
+        if progress_enabled:
+            first_event = np.minimum(first_event, first_progress_exit)
+        if template.exit_mode == "breakeven_bracket" or protective_enabled:
             first_event = np.minimum(first_event, first_breakeven_stop)
         bracket_hit = first_event < no_hit
         stop_first = first_stop <= np.minimum(first_target, first_early_exit)
         target_first = first_target < np.minimum(first_stop, first_early_exit)
-        early_exit_first = first_early_exit < np.minimum(first_stop, first_target)
-        breakeven_first = first_breakeven_stop < np.minimum(np.minimum(first_stop, first_target), first_early_exit)
+        early_exit_first = first_early_exit < np.minimum(np.minimum(first_stop, first_target), first_progress_exit)
+        progress_exit_first = first_progress_exit < np.minimum(np.minimum(first_stop, first_target), first_early_exit)
+        breakeven_first = first_breakeven_stop < np.minimum(
+            np.minimum(np.minimum(first_stop, first_target), first_early_exit),
+            first_progress_exit,
+        )
         realized_offsets = np.where(bracket_hit, first_event, template.horizon_minutes)
         realized_exit_indexes = entry_indexes + realized_offsets
         exit_prices = close[max_exit]
         stop_rows = bracket_hit & stop_first
         target_rows = bracket_hit & target_first
         early_exit_rows = bracket_hit & early_exit_first
+        progress_exit_rows = bracket_hit & progress_exit_first
         breakeven_rows = bracket_hit & breakeven_first
         exit_prices = np.where(stop_rows, stop_prices, exit_prices)
         exit_prices = np.where(target_rows, target_prices, exit_prices)
         exit_prices = np.where(early_exit_rows, close[realized_exit_indexes], exit_prices)
+        exit_prices = np.where(progress_exit_rows, close[realized_exit_indexes], exit_prices)
         exit_prices = np.where(breakeven_rows, entry_prices, exit_prices)
         exit_reasons = np.full(len(event_indexes), "time", dtype=object)
         exit_reasons[stop_rows] = "stop_loss"
         exit_reasons[target_rows] = "take_profit"
+        exit_reasons[progress_exit_rows] = "no_progress_exit"
         exit_reasons[early_exit_rows] = early_exit_reasons(
             first_fast_fail[early_exit_rows],
             first_invalidation[early_exit_rows],
             first_no_progress[early_exit_rows],
         )
-        exit_reasons[breakeven_rows] = "breakeven"
+        exit_reasons[breakeven_rows] = "protected_stop" if protective_enabled else "breakeven"
         gross_points = (exit_prices - entry_prices) * direction
     net_points = gross_points - costs.round_trip_cost_points
     rows: list[dict[str, Any]] = []
@@ -761,6 +802,7 @@ def summarize_trades(trades: pd.DataFrame) -> dict[str, float]:
             "partial_time_exit_rate": 0.0,
             "partial_target_exit_rate": 0.0,
             "partial_breakeven_exit_rate": 0.0,
+            "protected_stop_exit_rate": 0.0,
             "partial_stop_loss_exit_rate": 0.0,
             "partial_structure_invalidation_exit_rate": 0.0,
             "median_points": 0.0,
@@ -800,6 +842,7 @@ def summarize_trades(trades: pd.DataFrame) -> dict[str, float]:
         "partial_time_exit_rate": float((reasons == "partial_time").mean()) if len(reasons) else 0.0,
         "partial_target_exit_rate": float((reasons == "partial_target").mean()) if len(reasons) else 0.0,
         "partial_breakeven_exit_rate": float((reasons == "partial_breakeven").mean()) if len(reasons) else 0.0,
+        "protected_stop_exit_rate": float((reasons == "protected_stop").mean()) if len(reasons) else 0.0,
         "partial_stop_loss_exit_rate": float((reasons == "partial_stop_loss").mean()) if len(reasons) else 0.0,
         "partial_structure_invalidation_exit_rate": (
             float((reasons == "partial_structure_invalidation").mean()) if len(reasons) else 0.0
