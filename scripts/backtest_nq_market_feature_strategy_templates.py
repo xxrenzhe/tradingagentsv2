@@ -43,6 +43,7 @@ class StrategyTemplate:
     exit_mode: str = "bracket"
     fast_fail_bars: int = 5
     breakeven_trigger_r: float = 0.75
+    partial_fraction: float = 0.5
 
 
 def select_feature_ids(summary: pd.DataFrame, *, explicit: list[str] | None, top_features: int) -> list[str]:
@@ -67,10 +68,12 @@ def template_pool(
     exit_modes: list[str] | None = None,
     fast_fail_bars: list[int] | None = None,
     breakeven_trigger_r: list[float] | None = None,
+    partial_fractions: list[float] | None = None,
 ) -> list[StrategyTemplate]:
     exit_modes = exit_modes or ["bracket"]
     fast_fail_bars = fast_fail_bars or [5]
     breakeven_trigger_r = breakeven_trigger_r or [0.75]
+    partial_fractions = partial_fractions or [0.25, 0.33]
     templates: list[StrategyTemplate] = []
     for feature_id in feature_ids:
         feature = market_features[feature_id]
@@ -109,29 +112,37 @@ def template_pool(
                                                 else [breakeven_trigger_r[0]]
                                             )
                                             for trigger_r in trigger_values:
-                                                name = (
-                                                    f"{feature_id}_{entry_mode}_{stop_mode}_{exit_mode}_rr{rr:g}"
-                                                    f"_h{horizon}_c{confirm}_pb{pullback:g}_atr{atr_mult:g}_ff{fail_bars}"
-                                                    f"_be{trigger_r:g}"
+                                                partial_values = (
+                                                    partial_fractions if exit_mode == "light_partial" else [0.5]
                                                 )
-                                                templates.append(
-                                                    StrategyTemplate(
-                                                        name=name,
-                                                        feature_id=feature_id,
-                                                        family=feature.family,
-                                                        direction=direction,
-                                                        entry_mode=entry_mode,
-                                                        stop_mode=stop_mode,
-                                                        reward_risk=float(rr),
-                                                        horizon_minutes=int(horizon),
-                                                        confirm_bars=int(confirm),
-                                                        pullback_atr=float(pullback),
-                                                        stop_atr_mult=float(atr_mult),
-                                                        exit_mode=str(exit_mode),
-                                                        fast_fail_bars=int(fail_bars),
-                                                        breakeven_trigger_r=float(trigger_r),
+                                                for partial_fraction in partial_values:
+                                                    partial_suffix = (
+                                                        f"_pf{partial_fraction:g}" if exit_mode == "light_partial" else ""
                                                     )
-                                                )
+                                                    name = (
+                                                        f"{feature_id}_{entry_mode}_{stop_mode}_{exit_mode}_rr{rr:g}"
+                                                        f"_h{horizon}_c{confirm}_pb{pullback:g}_atr{atr_mult:g}_ff{fail_bars}"
+                                                        f"_be{trigger_r:g}{partial_suffix}"
+                                                    )
+                                                    templates.append(
+                                                        StrategyTemplate(
+                                                            name=name,
+                                                            feature_id=feature_id,
+                                                            family=feature.family,
+                                                            direction=direction,
+                                                            entry_mode=entry_mode,
+                                                            stop_mode=stop_mode,
+                                                            reward_risk=float(rr),
+                                                            horizon_minutes=int(horizon),
+                                                            confirm_bars=int(confirm),
+                                                            pullback_atr=float(pullback),
+                                                            stop_atr_mult=float(atr_mult),
+                                                            exit_mode=str(exit_mode),
+                                                            fast_fail_bars=int(fail_bars),
+                                                            breakeven_trigger_r=float(trigger_r),
+                                                            partial_fraction=float(partial_fraction),
+                                                        )
+                                                    )
     return templates
 
 
@@ -219,6 +230,7 @@ def build_template_trades(
     event_high = high[event_indexes]
     event_low = low[event_indexes]
     event_mid = (event_high + event_low) / 2.0
+    reclaim_indexes = np.maximum(entry_indexes - 1, event_indexes)
     direction = int(template.direction)
     stop_prices = np.where(direction > 0, entry_prices - stop_distances, entry_prices + stop_distances)
     target_distances = stop_distances * float(template.reward_risk)
@@ -243,6 +255,7 @@ def build_template_trades(
     first_target_hits &= same_symbol
     fast_fail_hits &= same_symbol
     adaptive_enabled = template.exit_mode in {"adaptive", "adaptive_bracket"}
+    light_partial_enabled = template.exit_mode == "light_partial"
     breakeven_enabled = template.exit_mode in {"adaptive", "breakeven_bracket", "staged_breakeven"}
     fast_fail_enabled = template.exit_mode in {"bracket_fast_fail", "fast_fail", "staged"} and template.fast_fail_bars > 0
     if fast_fail_enabled:
@@ -278,6 +291,15 @@ def build_template_trades(
         max_adaptive_offset = min(template.fast_fail_bars, template.horizon_minutes)
         if max_adaptive_offset + 1 < no_progress_hits.shape[1]:
             no_progress_hits[:, max_adaptive_offset + 1 :] = False
+    elif light_partial_enabled:
+        if direction > 0:
+            event_structure = np.maximum(event_mid, low[reclaim_indexes])
+            invalidation_hits = close[window_indexes] < event_structure[:, None]
+        else:
+            event_structure = np.minimum(event_mid, high[reclaim_indexes])
+            invalidation_hits = close[window_indexes] > event_structure[:, None]
+        invalidation_hits &= same_symbol
+        invalidation_hits[:, 0] = False
     first_invalidation = np.where(invalidation_hits.any(axis=1), invalidation_hits.argmax(axis=1), no_hit)
     first_no_progress = np.where(no_progress_hits.any(axis=1), no_progress_hits.argmax(axis=1), no_hit)
     first_early_exit = np.minimum(first_fast_fail, np.minimum(first_invalidation, first_no_progress))
@@ -300,7 +322,77 @@ def build_template_trades(
         breakeven_stop_after_trigger.argmax(axis=1),
         no_hit,
     )
-    if template.exit_mode in {"adaptive", "staged", "staged_breakeven"}:
+    if template.exit_mode == "light_partial":
+        partial_fraction = float(np.clip(template.partial_fraction, 0.0, 1.0))
+        first_scale = np.where(first_target_hits.any(axis=1), first_target_hits.argmax(axis=1), no_hit)
+        first_event = np.minimum(np.minimum(first_stop, first_scale), first_invalidation)
+        stopped_before_scale = first_stop <= np.minimum(first_scale, first_invalidation)
+        invalidation_before_scale = first_invalidation < np.minimum(first_stop, first_scale)
+        scaled_before_exit = first_scale < np.minimum(first_stop, first_invalidation)
+        first_exit_hit = first_event < no_hit
+
+        target_after_scale = target_hits & (offsets[None, :] >= first_scale[:, None])
+        stop_after_scale = stop_hits & (offsets[None, :] > first_scale[:, None])
+        invalidation_after_scale = invalidation_hits & (offsets[None, :] > first_scale[:, None])
+        second_target = np.where(target_after_scale.any(axis=1), target_after_scale.argmax(axis=1), no_hit)
+        second_stop = np.where(stop_after_scale.any(axis=1), stop_after_scale.argmax(axis=1), no_hit)
+        second_invalidation = np.where(
+            invalidation_after_scale.any(axis=1),
+            invalidation_after_scale.argmax(axis=1),
+            no_hit,
+        )
+        second_event = np.minimum(np.minimum(second_target, second_stop), second_invalidation)
+        second_target_hit = scaled_before_exit & (second_target < no_hit) & (
+            second_target < np.minimum(second_stop, second_invalidation)
+        )
+        second_stop_hit = scaled_before_exit & (second_stop < no_hit) & (
+            second_stop <= np.minimum(second_target, second_invalidation)
+        )
+        second_invalidation_hit = scaled_before_exit & (
+            second_invalidation < no_hit
+        ) & (
+            second_invalidation < np.minimum(second_target, second_stop)
+        )
+        second_exit_hit = second_event < no_hit
+
+        realized_offsets = np.full(len(event_indexes), template.horizon_minutes, dtype=int)
+        realized_offsets = np.where(stopped_before_scale, first_stop, realized_offsets)
+        realized_offsets = np.where(invalidation_before_scale, first_invalidation, realized_offsets)
+        realized_offsets = np.where(scaled_before_exit & second_exit_hit, second_event, realized_offsets)
+        realized_exit_indexes = entry_indexes + realized_offsets
+
+        final_exit_prices = close[max_exit]
+        runner_points = (final_exit_prices - entry_prices) * direction
+        runner_points = np.where(second_target_hit, target_distances, runner_points)
+        runner_points = np.where(second_stop_hit, -stop_distances, runner_points)
+        runner_points = np.where(
+            second_invalidation_hit,
+            (close[realized_exit_indexes] - entry_prices) * direction,
+            runner_points,
+        )
+        gross_points = np.where(
+            stopped_before_scale,
+            -stop_distances,
+            np.where(
+                invalidation_before_scale,
+                (close[realized_exit_indexes] - entry_prices) * direction,
+                np.where(
+                    scaled_before_exit,
+                    partial_fraction * stop_distances + (1.0 - partial_fraction) * runner_points,
+                    (final_exit_prices - entry_prices) * direction,
+                ),
+            ),
+        )
+        gross_points = np.where(first_exit_hit | scaled_before_exit, gross_points, (final_exit_prices - entry_prices) * direction)
+        exit_prices = entry_prices + gross_points * direction
+        exit_reasons = np.full(len(event_indexes), "time", dtype=object)
+        exit_reasons[stopped_before_scale] = "stop_loss"
+        exit_reasons[invalidation_before_scale] = "structure_invalidation"
+        exit_reasons[scaled_before_exit] = "partial_time"
+        exit_reasons[second_target_hit] = "partial_target"
+        exit_reasons[second_stop_hit] = "partial_stop_loss"
+        exit_reasons[second_invalidation_hit] = "partial_structure_invalidation"
+    elif template.exit_mode in {"adaptive", "staged", "staged_breakeven"}:
         first_scale = np.where(first_target_hits.any(axis=1), first_target_hits.argmax(axis=1), no_hit)
         first_event = np.minimum(np.minimum(first_stop, first_scale), first_early_exit)
         stopped_before_scale = first_stop <= np.minimum(first_scale, first_early_exit)
@@ -409,6 +501,7 @@ def build_template_trades(
                 "stop_mode": template.stop_mode,
                 "exit_mode": template.exit_mode,
                 "breakeven_trigger_r": template.breakeven_trigger_r,
+                "partial_fraction": template.partial_fraction,
                 "reward_risk": template.reward_risk,
                 "horizon_minutes": template.horizon_minutes,
                 "direction": direction,
@@ -624,6 +717,7 @@ def empty_trades() -> pd.DataFrame:
             "stop_mode",
             "exit_mode",
             "breakeven_trigger_r",
+            "partial_fraction",
             "reward_risk",
             "horizon_minutes",
             "direction",
@@ -667,6 +761,8 @@ def summarize_trades(trades: pd.DataFrame) -> dict[str, float]:
             "partial_time_exit_rate": 0.0,
             "partial_target_exit_rate": 0.0,
             "partial_breakeven_exit_rate": 0.0,
+            "partial_stop_loss_exit_rate": 0.0,
+            "partial_structure_invalidation_exit_rate": 0.0,
             "median_points": 0.0,
         }
     wins = net[net > 0]
@@ -679,6 +775,12 @@ def summarize_trades(trades: pd.DataFrame) -> dict[str, float]:
     drawdown = equity.cummax() - equity
     reasons = trades["exit_reason"].astype(str) if "exit_reason" in trades.columns else pd.Series(dtype=str)
     target_like = reasons.isin(["take_profit", "partial_target"]) if len(reasons) else pd.Series(dtype=bool)
+    stop_like = reasons.isin(["stop_loss", "partial_stop_loss"]) if len(reasons) else pd.Series(dtype=bool)
+    structure_like = (
+        reasons.isin(["structure_invalidation", "partial_structure_invalidation"])
+        if len(reasons)
+        else pd.Series(dtype=bool)
+    )
     return {
         "trades": float(len(net)),
         "net_points": float(net.sum()),
@@ -689,15 +791,19 @@ def summarize_trades(trades: pd.DataFrame) -> dict[str, float]:
         "expectancy_points": float(net.mean()),
         "max_drawdown_points": float(drawdown.max()) if not drawdown.empty else 0.0,
         "target_exit_rate": float(target_like.mean()) if len(reasons) else 0.0,
-        "stop_exit_rate": float((reasons == "stop_loss").mean()) if len(reasons) else 0.0,
+        "stop_exit_rate": float(stop_like.mean()) if len(reasons) else 0.0,
         "time_exit_rate": float((reasons == "time").mean()) if len(reasons) else 0.0,
         "fast_fail_exit_rate": float((reasons == "fast_fail").mean()) if len(reasons) else 0.0,
         "breakeven_exit_rate": float((reasons == "breakeven").mean()) if len(reasons) else 0.0,
-        "structure_invalidation_exit_rate": float((reasons == "structure_invalidation").mean()) if len(reasons) else 0.0,
+        "structure_invalidation_exit_rate": float(structure_like.mean()) if len(reasons) else 0.0,
         "no_progress_exit_rate": float((reasons == "no_progress_exit").mean()) if len(reasons) else 0.0,
         "partial_time_exit_rate": float((reasons == "partial_time").mean()) if len(reasons) else 0.0,
         "partial_target_exit_rate": float((reasons == "partial_target").mean()) if len(reasons) else 0.0,
         "partial_breakeven_exit_rate": float((reasons == "partial_breakeven").mean()) if len(reasons) else 0.0,
+        "partial_stop_loss_exit_rate": float((reasons == "partial_stop_loss").mean()) if len(reasons) else 0.0,
+        "partial_structure_invalidation_exit_rate": (
+            float((reasons == "partial_structure_invalidation").mean()) if len(reasons) else 0.0
+        ),
         "median_points": float(net.median()),
     }
 
@@ -794,6 +900,7 @@ def walk_forward_validate(
                     "stop_mode": template.stop_mode,
                     "exit_mode": template.exit_mode,
                     "breakeven_trigger_r": template.breakeven_trigger_r,
+                    "partial_fraction": template.partial_fraction,
                     "reward_risk": template.reward_risk,
                     "horizon_minutes": template.horizon_minutes,
                     "train_start": str(train_start.date()),
@@ -837,6 +944,9 @@ def aggregate_walk_forward(folds: pd.DataFrame, selected_trades: pd.DataFrame) -
                 "exit_mode": str(group["exit_mode"].iloc[0]) if "exit_mode" in group.columns else "bracket",
                 "breakeven_trigger_r": (
                     float(group["breakeven_trigger_r"].iloc[0]) if "breakeven_trigger_r" in group.columns else 0.75
+                ),
+                "partial_fraction": (
+                    float(group["partial_fraction"].iloc[0]) if "partial_fraction" in group.columns else 0.5
                 ),
                 "reward_risk": float(group["reward_risk"].iloc[0]),
                 "horizon_minutes": int(group["horizon_minutes"].iloc[0]),
@@ -1081,6 +1191,7 @@ def main() -> int:
     parser.add_argument("--exit-modes", nargs="+", default=["bracket"])
     parser.add_argument("--fast-fail-bars", type=int, nargs="+", default=[5])
     parser.add_argument("--breakeven-trigger-r", type=float, nargs="+", default=[0.75])
+    parser.add_argument("--partial-fractions", type=float, nargs="+", default=[0.25, 0.33])
     parser.add_argument("--min-gap-minutes", type=int, default=15)
     parser.add_argument("--min-stop-points", type=float, default=4.0)
     parser.add_argument("--max-stop-points", type=float, default=100.0)
@@ -1146,6 +1257,7 @@ def main() -> int:
             exit_modes=args.exit_modes,
             fast_fail_bars=args.fast_fail_bars,
             breakeven_trigger_r=args.breakeven_trigger_r,
+            partial_fractions=args.partial_fractions,
         )
         full_sample, trades_by_template = full_sample_results(features, market_features, templates, args)
         folds, aggregate, selected_trades = walk_forward_validate(trades_by_template, templates, args)

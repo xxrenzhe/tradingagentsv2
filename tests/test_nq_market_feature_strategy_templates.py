@@ -265,6 +265,112 @@ def test_staged_exit_can_fast_fail_before_scale_out() -> None:
     assert row["exit_index"] == 4
 
 
+def test_light_partial_exit_books_configured_fraction_then_runner_target() -> None:
+    frame = _trade_frame()
+    frame.loc[5:, "High"] = 105.5
+    feature = script.MarketFeature(
+        feature_id="synthetic_long",
+        family="ict_order_flow_shift",
+        direction_hint="long",
+        description="Synthetic long event.",
+        signal=pd.Series([index == 2 for index in range(len(frame))]),
+    )
+    template = script.StrategyTemplate(
+        name="synthetic_long_light_partial",
+        feature_id="synthetic_long",
+        family="ict_order_flow_shift",
+        direction=1,
+        entry_mode="next_open",
+        stop_mode="atr",
+        reward_risk=2.0,
+        horizon_minutes=5,
+        confirm_bars=1,
+        pullback_atr=0.25,
+        stop_atr_mult=1.0,
+        exit_mode="light_partial",
+        partial_fraction=0.25,
+    )
+
+    trades = script.build_template_trades(frame, feature, template, min_gap_minutes=1, min_stop_points=1.0)
+
+    assert len(trades) == 1
+    row = trades.iloc[0]
+    assert row["exit_reason"] == "partial_target"
+    assert row["partial_fraction"] == 0.25
+    assert row["gross_points"] == pytest.approx(3.5)
+
+
+def test_light_partial_exit_uses_structure_invalidation_for_runner() -> None:
+    frame = _trade_frame()
+    frame.loc[5, ["Open", "High", "Low", "Close"]] = [103.0, 103.5, 102.75, 103.25]
+    frame.loc[6, ["Open", "High", "Low", "Close"]] = [103.25, 103.4, 100.9, 100.6]
+    feature = script.MarketFeature(
+        feature_id="synthetic_long",
+        family="ict_order_flow_shift",
+        direction_hint="long",
+        description="Synthetic long event.",
+        signal=pd.Series([index == 2 for index in range(len(frame))]),
+    )
+    template = script.StrategyTemplate(
+        name="synthetic_long_light_partial_structure",
+        feature_id="synthetic_long",
+        family="ict_order_flow_shift",
+        direction=1,
+        entry_mode="next_open",
+        stop_mode="atr",
+        reward_risk=2.0,
+        horizon_minutes=5,
+        confirm_bars=1,
+        pullback_atr=0.25,
+        stop_atr_mult=1.0,
+        exit_mode="light_partial",
+        partial_fraction=0.25,
+    )
+
+    trades = script.build_template_trades(frame, feature, template, min_gap_minutes=1, min_stop_points=1.0)
+
+    assert len(trades) == 1
+    row = trades.iloc[0]
+    assert row["exit_reason"] == "partial_structure_invalidation"
+    assert row["exit_index"] == 6
+    assert row["gross_points"] == pytest.approx(0.2)
+
+
+def test_light_partial_exits_on_structure_before_scale_out() -> None:
+    frame = _trade_frame()
+    frame.loc[4, ["Open", "High", "Low", "Close"]] = [101.0, 101.2, 100.2, 100.4]
+    feature = script.MarketFeature(
+        feature_id="synthetic_long",
+        family="ict_order_flow_shift",
+        direction_hint="long",
+        description="Synthetic long event.",
+        signal=pd.Series([index == 2 for index in range(len(frame))]),
+    )
+    template = script.StrategyTemplate(
+        name="synthetic_long_light_partial_structure_before_scale",
+        feature_id="synthetic_long",
+        family="ict_order_flow_shift",
+        direction=1,
+        entry_mode="next_open",
+        stop_mode="atr",
+        reward_risk=2.0,
+        horizon_minutes=5,
+        confirm_bars=1,
+        pullback_atr=0.25,
+        stop_atr_mult=2.0,
+        exit_mode="light_partial",
+        partial_fraction=0.25,
+    )
+
+    trades = script.build_template_trades(frame, feature, template, min_gap_minutes=1, min_stop_points=1.0)
+
+    assert len(trades) == 1
+    row = trades.iloc[0]
+    assert row["exit_reason"] == "structure_invalidation"
+    assert row["exit_index"] == 4
+    assert row["gross_points"] == pytest.approx(-0.6)
+
+
 def test_adaptive_bracket_exits_on_structure_invalidation_before_stop() -> None:
     frame = _trade_frame()
     frame.loc[4, ["Open", "High", "Low", "Close"]] = [101.0, 101.2, 99.2, 99.6]
@@ -480,17 +586,28 @@ def test_adaptive_exit_handles_rows_removed_by_stop_distance_filter() -> None:
 def test_summary_tracks_adaptive_exit_reason_rates() -> None:
     trades = pd.DataFrame(
         {
-            "net_points": [1.0, -1.0, -0.25, 0.5, 0.0],
-            "exit_reason": ["partial_breakeven", "structure_invalidation", "no_progress_exit", "partial_target", "breakeven"],
+            "net_points": [1.0, -1.0, -0.25, 0.5, 0.0, -0.5, 0.25],
+            "exit_reason": [
+                "partial_breakeven",
+                "structure_invalidation",
+                "no_progress_exit",
+                "partial_target",
+                "breakeven",
+                "partial_stop_loss",
+                "partial_structure_invalidation",
+            ],
         }
     )
 
     summary = script.summarize_trades(trades)
 
-    assert summary["structure_invalidation_exit_rate"] == 0.2
-    assert summary["no_progress_exit_rate"] == 0.2
-    assert summary["partial_breakeven_exit_rate"] == 0.2
-    assert summary["breakeven_exit_rate"] == 0.2
+    assert summary["structure_invalidation_exit_rate"] == pytest.approx(2 / 7)
+    assert summary["no_progress_exit_rate"] == pytest.approx(1 / 7)
+    assert summary["partial_breakeven_exit_rate"] == pytest.approx(1 / 7)
+    assert summary["breakeven_exit_rate"] == pytest.approx(1 / 7)
+    assert summary["partial_stop_loss_exit_rate"] == pytest.approx(1 / 7)
+    assert summary["partial_structure_invalidation_exit_rate"] == pytest.approx(1 / 7)
+    assert summary["stop_exit_rate"] == pytest.approx(1 / 7)
 
 
 def test_reclaim_followthrough_requires_next_bar_break_after_reclaim() -> None:
@@ -722,6 +839,39 @@ def test_template_pool_only_expands_breakeven_trigger_for_relevant_exit_modes() 
     assert len(bracket) == 1
     assert len(breakeven) == 3
     assert {template.breakeven_trigger_r for template in breakeven} == {0.6, 0.75, 1.0}
+
+
+def test_template_pool_only_expands_partial_fraction_for_light_partial() -> None:
+    market_features = {
+        "feature_long": script.MarketFeature(
+            feature_id="feature_long",
+            family="ict_order_flow_shift",
+            direction_hint="long",
+            description="Synthetic long feature.",
+            signal=pd.Series([False]),
+        )
+    }
+
+    templates = script.template_pool(
+        market_features,
+        ["feature_long"],
+        entry_modes=["next_open"],
+        stop_modes=["atr"],
+        reward_risks=[1.0],
+        horizons=[5],
+        confirm_bars=[1],
+        pullback_atr=[0.25],
+        stop_atr_mult=[1.0],
+        exit_modes=["bracket", "light_partial"],
+        fast_fail_bars=[3],
+        partial_fractions=[0.25, 0.33],
+    )
+
+    bracket = [template for template in templates if template.exit_mode == "bracket"]
+    light_partial = [template for template in templates if template.exit_mode == "light_partial"]
+    assert len(bracket) == 1
+    assert len(light_partial) == 2
+    assert {template.partial_fraction for template in light_partial} == {0.25, 0.33}
 
 
 def test_walk_forward_validate_selects_positive_train_template() -> None:
