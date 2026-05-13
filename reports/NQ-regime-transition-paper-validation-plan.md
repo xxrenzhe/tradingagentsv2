@@ -38,7 +38,7 @@ The promoted setup is not a generic indicator signal. It is a `compression -> di
 
 ## Adapter Gap
 
-`run_ibkr_live_paper_trader.py` now accepts `--strategy-family regime_transition` and uses IBKR historical `1 min` TRADES bars for OHLCV/volume. The remaining blocker is parity, not implementation: run dry-run for one session and compare signals against the same minute bars before enabling `--submit`.
+`run_nq_regime_transition_paper_trader.py` is the safe operator entrypoint. It wraps the lower-level `run_ibkr_live_paper_trader.py`, uses IBKR historical `1 min` TRADES bars for OHLCV/volume, and blocks `--submit` unless the parity file passes unless `--force-without-parity` is explicitly used.
 
 ## Candidate Plan
 
@@ -55,13 +55,13 @@ The promoted setup is not a generic indicator signal. It is a `compression -> di
 Dry run:
 
 ```bash
-.venv/bin/python scripts/run_ibkr_live_paper_trader.py --signal-mode strategy --strategy-family regime_transition --strategy-id optimized50_2r5_quality --selected-alias optimized50_2r5_quality --symbol MNQ --contract-month 202606 --quantity 1 --max-hold-minutes 180 --min-bars 171 --paper-validation-accrual-mode --min-paper-outcomes 30 --min-paper-net-points 0 --min-paper-win-rate 35 --max-consecutive-losses 4 --daemon --interval-seconds 30 --max-iterations 0
+.venv/bin/python scripts/run_nq_regime_transition_paper_trader.py --strategy-id optimized50_2r5_quality --selected-alias optimized50_2r5_quality --symbol MNQ --contract-month 202606 --quantity 1 --paper-validation-accrual-mode --min-paper-outcomes 30 --min-paper-net-points 0 --min-paper-win-rate 35 --max-consecutive-losses 4 --daemon --interval-seconds 30 --max-iterations 0
 ```
 
 Submit:
 
 ```bash
-.venv/bin/python scripts/run_ibkr_live_paper_trader.py --signal-mode strategy --strategy-family regime_transition --strategy-id optimized50_2r5_quality --selected-alias optimized50_2r5_quality --symbol MNQ --contract-month 202606 --quantity 1 --max-hold-minutes 180 --min-bars 171 --paper-validation-accrual-mode --min-paper-outcomes 30 --min-paper-net-points 0 --min-paper-win-rate 35 --max-consecutive-losses 4 --daemon --interval-seconds 30 --max-iterations 0 --submit
+.venv/bin/python scripts/run_nq_regime_transition_paper_trader.py --strategy-id optimized50_2r5_quality --selected-alias optimized50_2r5_quality --symbol MNQ --contract-month 202606 --quantity 1 --paper-validation-accrual-mode --min-paper-outcomes 30 --min-paper-net-points 0 --min-paper-win-rate 35 --max-consecutive-losses 4 --daemon --interval-seconds 30 --max-iterations 0 --submit
 ```
 
 ### defensive45_2r5_loweff
@@ -69,13 +69,13 @@ Submit:
 Dry run:
 
 ```bash
-.venv/bin/python scripts/run_ibkr_live_paper_trader.py --signal-mode strategy --strategy-family regime_transition --strategy-id defensive45_2r5_loweff --selected-alias defensive45_2r5_loweff --symbol MNQ --contract-month 202606 --quantity 1 --max-hold-minutes 180 --min-bars 166 --paper-validation-accrual-mode --min-paper-outcomes 30 --min-paper-net-points 0 --min-paper-win-rate 35 --max-consecutive-losses 4 --daemon --interval-seconds 30 --max-iterations 0
+.venv/bin/python scripts/run_nq_regime_transition_paper_trader.py --strategy-id defensive45_2r5_loweff --selected-alias defensive45_2r5_loweff --symbol MNQ --contract-month 202606 --quantity 1 --paper-validation-accrual-mode --min-paper-outcomes 30 --min-paper-net-points 0 --min-paper-win-rate 35 --max-consecutive-losses 4 --daemon --interval-seconds 30 --max-iterations 0
 ```
 
 Submit:
 
 ```bash
-.venv/bin/python scripts/run_ibkr_live_paper_trader.py --signal-mode strategy --strategy-family regime_transition --strategy-id defensive45_2r5_loweff --selected-alias defensive45_2r5_loweff --symbol MNQ --contract-month 202606 --quantity 1 --max-hold-minutes 180 --min-bars 166 --paper-validation-accrual-mode --min-paper-outcomes 30 --min-paper-net-points 0 --min-paper-win-rate 35 --max-consecutive-losses 4 --daemon --interval-seconds 30 --max-iterations 0 --submit
+.venv/bin/python scripts/run_nq_regime_transition_paper_trader.py --strategy-id defensive45_2r5_loweff --selected-alias defensive45_2r5_loweff --symbol MNQ --contract-month 202606 --quantity 1 --paper-validation-accrual-mode --min-paper-outcomes 30 --min-paper-net-points 0 --min-paper-win-rate 35 --max-consecutive-losses 4 --daemon --interval-seconds 30 --max-iterations 0 --submit
 ```
 
 ### short45_2r25_netdd
@@ -83,11 +83,11 @@ Submit:
 Dry run:
 
 ```bash
-.venv/bin/python scripts/run_ibkr_live_paper_trader.py --signal-mode strategy --strategy-family regime_transition --strategy-id short45_2r25_netdd --selected-alias short45_2r25_netdd --symbol MNQ --contract-month 202606 --quantity 1 --max-hold-minutes 240 --min-bars 166 --paper-validation-accrual-mode --min-paper-outcomes 30 --min-paper-net-points 0 --min-paper-win-rate 35 --max-consecutive-losses 4 --daemon --interval-seconds 30 --max-iterations 0
+.venv/bin/python scripts/run_nq_regime_transition_paper_trader.py --strategy-id short45_2r25_netdd --selected-alias short45_2r25_netdd --symbol MNQ --contract-month 202606 --quantity 1 --paper-validation-accrual-mode --min-paper-outcomes 30 --min-paper-net-points 0 --min-paper-win-rate 35 --max-consecutive-losses 4 --daemon --interval-seconds 30 --max-iterations 0
 ```
 
 Submit:
 
 ```bash
-.venv/bin/python scripts/run_ibkr_live_paper_trader.py --signal-mode strategy --strategy-family regime_transition --strategy-id short45_2r25_netdd --selected-alias short45_2r25_netdd --symbol MNQ --contract-month 202606 --quantity 1 --max-hold-minutes 240 --min-bars 166 --paper-validation-accrual-mode --min-paper-outcomes 30 --min-paper-net-points 0 --min-paper-win-rate 35 --max-consecutive-losses 4 --daemon --interval-seconds 30 --max-iterations 0 --submit
+.venv/bin/python scripts/run_nq_regime_transition_paper_trader.py --strategy-id short45_2r25_netdd --selected-alias short45_2r25_netdd --symbol MNQ --contract-month 202606 --quantity 1 --paper-validation-accrual-mode --min-paper-outcomes 30 --min-paper-net-points 0 --min-paper-win-rate 35 --max-consecutive-losses 4 --daemon --interval-seconds 30 --max-iterations 0 --submit
 ```

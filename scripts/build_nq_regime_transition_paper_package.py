@@ -169,9 +169,9 @@ def build_rows(*, symbol: str, contract_month: str, quantity: int) -> pd.DataFra
                 ),
                 "implementation_status": "live_ohlcv_adapter_ready_needs_parity_validation",
                 "adapter_gap": (
-                    "run_ibkr_live_paper_trader accepts regime_transition strategy IDs and requests IBKR historical 1m "
-                    "TRADES bars for OHLCV/volume. Before submit, run one session in dry-run and compare generated "
-                    "signals against the same minute bars exported from Databento/IBKR."
+                    "run_nq_regime_transition_paper_trader is the safe operator entrypoint. It wraps "
+                    "run_ibkr_live_paper_trader, requests IBKR historical 1m TRADES bars for OHLCV/volume, "
+                    "and blocks submit unless parity passes."
                 ),
                 "dry_run_command_after_adapter": paper_command(candidate, symbol, contract_month, quantity, submit=False),
                 "submit_command_after_adapter": paper_command(candidate, symbol, contract_month, quantity, submit=True),
@@ -214,16 +214,12 @@ def build_config(plan: pd.DataFrame) -> dict[str, Any]:
 
 def paper_command(candidate: PromotedCandidate, symbol: str, contract_month: str, quantity: int, *, submit: bool) -> str:
     parts = [
-        ".venv/bin/python scripts/run_ibkr_live_paper_trader.py",
-        "--signal-mode strategy",
-        "--strategy-family regime_transition",
+        ".venv/bin/python scripts/run_nq_regime_transition_paper_trader.py",
         f"--strategy-id {candidate.label}",
         f"--selected-alias {candidate.label}",
         f"--symbol {symbol.upper()}",
         f"--contract-month {contract_month}",
         f"--quantity {quantity}",
-        f"--max-hold-minutes {candidate.horizon_minutes}",
-        f"--min-bars {candidate.lookback + 121}",
         "--paper-validation-accrual-mode",
         "--min-paper-outcomes 30",
         "--min-paper-net-points 0",
@@ -282,7 +278,7 @@ def write_report(path: Path, plan: pd.DataFrame, args: argparse.Namespace) -> No
         "",
         "## Adapter Gap",
         "",
-        "`run_ibkr_live_paper_trader.py` now accepts `--strategy-family regime_transition` and uses IBKR historical `1 min` TRADES bars for OHLCV/volume. The remaining blocker is parity, not implementation: run dry-run for one session and compare signals against the same minute bars before enabling `--submit`.",
+        "`run_nq_regime_transition_paper_trader.py` is the safe operator entrypoint. It wraps the lower-level `run_ibkr_live_paper_trader.py`, uses IBKR historical `1 min` TRADES bars for OHLCV/volume, and blocks `--submit` unless the parity file passes unless `--force-without-parity` is explicitly used.",
         "",
         "## Candidate Plan",
         "",

@@ -1,5 +1,6 @@
 from pathlib import Path
 import importlib.util
+import json
 from dataclasses import asdict
 
 import pandas as pd
@@ -236,6 +237,133 @@ def test_paper_runner_dry_run_records_state_and_skips_duplicate(tmp_path):
     assert second["status"] == "duplicate_skipped"
     assert state_path.exists()
     assert state_path.with_suffix(".jsonl").exists()
+
+
+def test_regime_transition_parity_script_blocks_missing_file(tmp_path, monkeypatch, capsys):
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "check_nq_regime_transition_parity.py"
+    spec = importlib.util.spec_from_file_location("check_nq_regime_transition_parity", script_path)
+    script = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(script)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "check_nq_regime_transition_parity.py",
+            "--parity-file",
+            str(tmp_path / "missing.json"),
+            "--strategy-id",
+            "optimized50_2r5_quality",
+        ],
+    )
+
+    assert script.main() == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "blocked"
+    assert "parity_file_missing_or_invalid" in payload["blockers"]
+
+
+def test_regime_transition_wrapper_blocks_submit_without_parity(tmp_path, monkeypatch, capsys):
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "run_nq_regime_transition_paper_trader.py"
+    spec = importlib.util.spec_from_file_location("run_nq_regime_transition_paper_trader", script_path)
+    script = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(script)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_nq_regime_transition_paper_trader.py",
+            "--submit",
+            "--parity-file",
+            str(tmp_path / "missing.json"),
+        ],
+    )
+
+    assert script.main() == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "parity_blocked"
+    assert not payload["submitted"]
+
+
+def test_regime_transition_wrapper_calls_underlying_runner_after_parity(tmp_path, monkeypatch, capsys):
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "run_nq_regime_transition_paper_trader.py"
+    spec = importlib.util.spec_from_file_location("run_nq_regime_transition_paper_trader", script_path)
+    script = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(script)
+    parity_path = tmp_path / "parity.json"
+    parity_path.write_text(
+        json.dumps({"status": "pass", "strategy_id": "optimized50_2r5_quality", "checked_signals": 2, "mismatches": 0}),
+        encoding="utf-8",
+    )
+    calls = []
+
+    def fake_run(command, cwd, text, capture_output, check):
+        calls.append(command)
+        return type("Completed", (), {"returncode": 0, "stdout": "{\"status\":\"dry_run\"}", "stderr": ""})()
+
+    monkeypatch.setattr(script.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_nq_regime_transition_paper_trader.py",
+            "--parity-file",
+            str(parity_path),
+            "--max-iterations",
+            "1",
+        ],
+    )
+
+    assert script.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "completed"
+    assert payload["parity"]["returncode"] == 0
+    assert any("run_ibkr_live_paper_trader.py" in part for part in calls[-1])
+    assert "--strategy-family" in calls[-1]
+    assert "regime_transition" in calls[-1]
+
+
+def test_regime_transition_wrapper_defaults_selected_alias_to_strategy_id():
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "run_nq_regime_transition_paper_trader.py"
+    spec = importlib.util.spec_from_file_location("run_nq_regime_transition_paper_trader", script_path)
+    script = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(script)
+    args = type(
+        "Args",
+        (),
+        {
+            "strategy_id": "defensive45_2r5_loweff",
+            "selected_alias": None,
+            "symbol": "MNQ",
+            "contract_month": "202606",
+            "quantity": 1,
+            "live_signal": ".tmp/live.csv",
+            "state_path": ".tmp/state.json",
+            "history_path": ".tmp/history.jsonl",
+            "agent_audit": ".tmp/agent.jsonl",
+            "ibkr_audit": ".tmp/ibkr.jsonl",
+            "min_paper_outcomes": 30,
+            "min_paper_net_points": 0,
+            "min_paper_win_rate": 35,
+            "max_consecutive_losses": 4,
+            "interval_seconds": 30,
+            "max_iterations": 1,
+            "account": None,
+            "client_id": None,
+            "paper_validation_accrual_mode": False,
+            "agent_gate": False,
+            "daemon": False,
+            "record_ticks": False,
+            "allow_existing_exposure": False,
+            "submit": False,
+        },
+    )()
+
+    command = script.build_command(args)
+
+    assert command[command.index("--selected-alias") + 1] == "defensive45_2r5_loweff"
+    assert command[command.index("--max-hold-minutes") + 1] == "180"
+    assert command[command.index("--min-bars") + 1] == "166"
 
 
 def test_paper_runner_uses_dynamic_strategy_bracket_points(tmp_path):
