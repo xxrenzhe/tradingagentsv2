@@ -171,6 +171,7 @@ def test_report_generation_writes_outputs(tmp_path: Path) -> None:
     stress = tmp_path / "stress.csv"
     leakage = tmp_path / "leakage.csv"
     loss_learning = tmp_path / "loss_learning.csv"
+    reverse_diagnostic = tmp_path / "reverse_diagnostic.csv"
     plan = tmp_path / "plan.csv"
 
     _feature_trades().to_pickle(feature_path)
@@ -191,6 +192,7 @@ def test_report_generation_writes_outputs(tmp_path: Path) -> None:
             stress_output=str(stress),
             leakage_output=str(leakage),
             loss_learning_output=str(loss_learning),
+            reverse_diagnostic_output=str(reverse_diagnostic),
             paper_plan_output=str(plan),
             generated_at="2026-05-14 00:00 UTC",
         )
@@ -199,7 +201,43 @@ def test_report_generation_writes_outputs(tmp_path: Path) -> None:
     html = output.read_text(encoding="utf-8")
     assert "纸盘准备度结论" in html
     assert "亏损交易学习" in html
+    assert "反手做空诊断" in html
     assert "泄漏审计" in html
     assert result["readiness"]["status"] == "blocked"
-    for path in (markdown, summary, wf, wf_trades, stress, leakage, loss_learning, plan):
+    assert result["reverse_trade_verdict"] in {"reverse_not_selected", "reverse_not_proven", "reverse_positive_candidate"}
+    for path in (markdown, summary, wf, wf_trades, stress, leakage, loss_learning, reverse_diagnostic, plan):
         assert path.exists()
+
+
+def test_reverse_trade_diagnostic_requires_train_selected_oos_proof() -> None:
+    bars = _bars("2020-01-01 00:00", periods=7000)
+    trades = _composite_trades()
+    result = paper_script.run_reverse_trade_diagnostic(trades, bars, thresholds=(50.0,))
+
+    assert "reverse_trade_verdict" in result.columns
+    assert result["reverse_trade_verdict"].iloc[0] in {
+        "reverse_not_selected",
+        "reverse_not_proven",
+        "reverse_positive_candidate",
+    }
+
+
+def test_apply_reverse_turns_losing_long_into_short_with_cost() -> None:
+    trades = pd.DataFrame(
+        [
+            {
+                "entry_ts": pd.Timestamp("2022-01-03 16:00", tz="UTC"),
+                "exit_ts": pd.Timestamp("2022-01-03 16:30", tz="UTC"),
+                "strategy_source": paper_script.TIMECELL_SOURCE,
+                "strategy_label": paper_script.TIMECELL_LABEL,
+                "direction": 1,
+                "gross_points": -10.0,
+                "net_points": -10.625,
+                "risk_weight": 0.05,
+            }
+        ]
+    )
+    reversed_trades = paper_script.apply_skip_or_reverse(trades, pd.Series([True]), mode="reverse")
+
+    assert int(reversed_trades.iloc[0]["direction"]) == -1
+    assert reversed_trades.iloc[0]["net_points"] == 10.0 - paper_script.ROUND_TRIP_COST_POINTS

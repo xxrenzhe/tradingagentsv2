@@ -43,6 +43,7 @@ DEFAULT_WALK_FORWARD = ".tmp/nq-lightglow-composite-paper-readiness-walkforward.
 DEFAULT_STRESS = ".tmp/nq-lightglow-composite-paper-readiness-stress.csv"
 DEFAULT_LEAKAGE = ".tmp/nq-lightglow-composite-paper-readiness-leakage.csv"
 DEFAULT_LOSS_LEARNING = ".tmp/nq-lightglow-composite-paper-readiness-loss-learning.csv"
+DEFAULT_REVERSE_DIAGNOSTIC = ".tmp/nq-lightglow-composite-paper-readiness-reverse-diagnostic.csv"
 DEFAULT_PAPER_PLAN = "reports/NQ-lightglow-composite-paper-validation-plan.csv"
 
 ROUND_TRIP_COST_POINTS = 0.625
@@ -170,6 +171,8 @@ def full_metric_row(trades: pd.DataFrame, *, label: str) -> dict[str, Any]:
             "net_points": 0.0,
             "profit_factor": 0.0,
             "win_rate": 0.0,
+            "best_trade_points": 0.0,
+            "worst_trade_points": 0.0,
             "max_drawdown_points": 0.0,
             "worst_month_points": 0.0,
             "worst_90d_points": 0.0,
@@ -187,6 +190,8 @@ def full_metric_row(trades: pd.DataFrame, *, label: str) -> dict[str, Any]:
         "net_points": float(points.sum()),
         "profit_factor": profit_factor(points),
         "win_rate": float((points > 0).mean()),
+        "best_trade_points": float(points.max()),
+        "worst_trade_points": float(points.min()),
         "max_drawdown_points": max_drawdown(points),
         "worst_month_points": float(monthly.min()) if not monthly.empty else 0.0,
         "worst_90d_points": float(rolling_90d.min()) if not rolling_90d.empty else 0.0,
@@ -371,6 +376,112 @@ def run_loss_learning_walk_forward(
     else:
         verdict = "not_selected"
     result["loss_learning_verdict"] = verdict
+    return result
+
+
+def reverse_trade_points(trades: pd.DataFrame, *, extra_cost_points: float = ROUND_TRIP_COST_POINTS) -> pd.Series:
+    gross = pd.to_numeric(trades["gross_points"], errors="coerce").fillna(0.0)
+    return -gross - extra_cost_points
+
+
+def apply_skip_or_reverse(
+    trades_with_context: pd.DataFrame,
+    mask: pd.Series,
+    *,
+    mode: str,
+) -> pd.DataFrame:
+    mask = mask.reindex(trades_with_context.index).fillna(False).astype(bool)
+    frame = trades_with_context.copy()
+    if mode == "baseline":
+        return frame
+    if mode == "skip":
+        return frame.loc[~mask].copy()
+    if mode == "reverse":
+        frame.loc[mask, "direction"] = -frame.loc[mask, "direction"].astype(int)
+        frame.loc[mask, "net_points"] = reverse_trade_points(frame.loc[mask])
+        frame.loc[mask, "strategy_label"] = frame.loc[mask, "strategy_label"].astype(str) + " reverse_extreme_trend"
+        return frame
+    raise ValueError(f"Unknown adjustment mode: {mode}")
+
+
+def run_reverse_trade_diagnostic(
+    composite_trades: pd.DataFrame,
+    bars: pd.DataFrame,
+    *,
+    thresholds: tuple[float, ...] = (50.0, 75.0, 100.0, 125.0),
+) -> pd.DataFrame:
+    context = add_prior_trend_context(composite_trades, bars).sort_values(["entry_ts", "exit_ts"]).reset_index(drop=True)
+    rows: list[dict[str, Any]] = []
+    for window in WALK_FORWARD_WINDOWS:
+        train = context[context["entry_ts"].dt.year.isin(window.train_years)].copy()
+        test = context[context["entry_ts"].dt.year.eq(window.test_year)].copy()
+        selected_rows: list[dict[str, Any]] = []
+        for threshold in thresholds:
+            candidate = f"timecell_reverse_extreme_trend_{threshold:g}"
+            train_mask = timecell_trend_veto_mask(train, momentum_threshold=threshold)
+            test_mask = timecell_trend_veto_mask(test, momentum_threshold=threshold)
+            train_baseline = full_metric_row(train, label="train_baseline")
+            train_skip = full_metric_row(apply_skip_or_reverse(train, train_mask, mode="skip"), label="train_skip")
+            train_reverse = full_metric_row(apply_skip_or_reverse(train, train_mask, mode="reverse"), label="train_reverse")
+            test_baseline = full_metric_row(test, label="test_baseline")
+            test_skip = full_metric_row(apply_skip_or_reverse(test, test_mask, mode="skip"), label="test_skip")
+            test_reverse = full_metric_row(apply_skip_or_reverse(test, test_mask, mode="reverse"), label="test_reverse")
+            selected = (
+                int(train_mask.sum()) >= 5
+                and train_reverse["net_points"] > train_baseline["net_points"]
+                and train_reverse["net_points"] > train_skip["net_points"]
+                and train_reverse["profit_factor"] >= train_baseline["profit_factor"]
+            )
+            row = {
+                "window": window.label,
+                "candidate": candidate,
+                "selected_by_train_reverse": selected,
+                "threshold_points": threshold,
+                "train_signal_trades": int(train_mask.sum()),
+                "train_baseline_net_points": train_baseline["net_points"],
+                "train_skip_net_points": train_skip["net_points"],
+                "train_reverse_net_points": train_reverse["net_points"],
+                "train_reverse_delta_vs_baseline": train_reverse["net_points"] - train_baseline["net_points"],
+                "train_reverse_delta_vs_skip": train_reverse["net_points"] - train_skip["net_points"],
+                "train_baseline_profit_factor": train_baseline["profit_factor"],
+                "train_reverse_profit_factor": train_reverse["profit_factor"],
+                "test_signal_trades": int(test_mask.sum()),
+                "test_baseline_net_points": test_baseline["net_points"],
+                "test_skip_net_points": test_skip["net_points"],
+                "test_reverse_net_points": test_reverse["net_points"],
+                "test_reverse_delta_vs_baseline": test_reverse["net_points"] - test_baseline["net_points"],
+                "test_reverse_delta_vs_skip": test_reverse["net_points"] - test_skip["net_points"],
+                "test_baseline_profit_factor": test_baseline["profit_factor"],
+                "test_reverse_profit_factor": test_reverse["profit_factor"],
+                "test_reverse_worst_trade_points": test_reverse["worst_trade_points"],
+            }
+            rows.append(row)
+            if selected:
+                selected_rows.append(row)
+        if selected_rows:
+            best = max(
+                selected_rows,
+                key=lambda item: (item["train_reverse_delta_vs_baseline"], item["train_reverse_profit_factor"]),
+            )
+            rows.append(
+                {
+                    **best,
+                    "candidate": f"SELECTED::{best['candidate']}",
+                    "selection_note": "reverse_rule_selected_on_train_only_and_applied_to_future_test_year",
+                }
+            )
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+    selected = result["candidate"].astype(str).str.startswith("SELECTED::")
+    if selected.any():
+        positive_rate = float((result.loc[selected, "test_reverse_delta_vs_baseline"] > 0.0).mean())
+        total_delta = float(result.loc[selected, "test_reverse_delta_vs_baseline"].sum())
+        verdict = "reverse_positive_candidate" if positive_rate >= 0.75 and total_delta > 0 else "reverse_not_proven"
+    else:
+        verdict = "reverse_not_selected"
+    result["reverse_trade_verdict"] = verdict
+    result["is_reverse_positive_oos"] = result["test_reverse_delta_vs_baseline"] > 0.0
     return result
 
 
@@ -771,6 +882,11 @@ This report does not approve live trading. It audits whether the research combo 
 
 - Verdict: `{summary.get('loss_learning_verdict', 'not_run')}`
 - Selected OOS delta points: `{summary.get('loss_learning_selected_oos_delta_points', 0.0):.2f}`
+
+## Reverse Diagnostic
+
+- Verdict: `{summary.get('reverse_trade_verdict', 'not_run')}`
+- Selected OOS delta vs baseline: `{summary.get('reverse_selected_oos_delta_points', 0.0):.2f}`
 """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
@@ -783,6 +899,7 @@ def build_html_report(
     leakage: pd.DataFrame,
     stress: pd.DataFrame,
     loss_learning: pd.DataFrame,
+    reverse_diagnostic: pd.DataFrame,
     bars: pd.DataFrame,
     readiness: dict[str, Any],
     risk_mapping: pd.DataFrame,
@@ -798,6 +915,11 @@ def build_html_report(
     selected_loss_learning = (
         loss_learning[loss_learning["candidate"].astype(str).str.startswith("SELECTED::")].copy()
         if not loss_learning.empty
+        else pd.DataFrame()
+    )
+    selected_reverse = (
+        reverse_diagnostic[reverse_diagnostic["candidate"].astype(str).str.startswith("SELECTED::")].copy()
+        if not reverse_diagnostic.empty
         else pd.DataFrame()
     )
     cards = "".join(
@@ -894,6 +1016,18 @@ def build_html_report(
       {html_table(loss_learning, [("window", "窗口"), ("candidate", "候选"), ("selected_by_train_loss", "训练选中"), ("train_removed_trades", "训练过滤"), ("train_delta_net_points", "训练提升"), ("test_removed_trades", "测试过滤"), ("test_delta_net_points", "测试提升"), ("is_positive_oos", "OOS正向")], limit=80)}
     </section>
     <section>
+      <h2>反手做空诊断</h2>
+      <div class="note warn">
+        <p><strong>问题：</strong>最差交易是在急跌趋势里做多。系统可以识别这种“统计时段信号逆强趋势”结构，但是否应该反手做空必须单独验证。</p>
+        <p><strong>方法：</strong>对同一批极端逆趋势 timecell 信号分别测试 baseline、skip、reverse。reverse 使用原交易入场/出场价格反向计算，并额外扣一轮交易成本；规则只允许训练期选择，未来测试年只验证。</p>
+        <p><strong>判定：</strong><code>{esc(summary_reverse_trade_verdict(reverse_diagnostic))}</code>。只有 SELECTED 行在未来测试年稳定优于 baseline 和 skip，才能把“避免做多”升级为“主动做空”。</p>
+      </div>
+      <h3>训练选中的反手规则</h3>
+      {html_table(selected_reverse, [("window", "窗口"), ("candidate", "训练选中规则"), ("train_signal_trades", "训练信号数"), ("train_reverse_delta_vs_baseline", "训练反手vs原始"), ("train_reverse_delta_vs_skip", "训练反手vs跳过"), ("test_signal_trades", "测试信号数"), ("test_reverse_delta_vs_baseline", "测试反手vs原始"), ("test_reverse_delta_vs_skip", "测试反手vs跳过"), ("test_reverse_profit_factor", "测试反手PF"), ("test_reverse_worst_trade_points", "测试最差单笔"), ("is_reverse_positive_oos", "OOS正向")])}
+      <h3>全部反手候选扫描</h3>
+      {html_table(reverse_diagnostic, [("window", "窗口"), ("candidate", "候选"), ("selected_by_train_reverse", "训练选中"), ("threshold_points", "阈值"), ("train_signal_trades", "训练信号数"), ("train_reverse_delta_vs_baseline", "训练反手vs原始"), ("train_reverse_delta_vs_skip", "训练反手vs跳过"), ("test_signal_trades", "测试信号数"), ("test_reverse_delta_vs_baseline", "测试反手vs原始"), ("test_reverse_delta_vs_skip", "测试反手vs跳过"), ("is_reverse_positive_oos", "OOS正向")], limit=80)}
+    </section>
+    <section>
       <h2>成本/延迟/滑点压力</h2>
       {html_table(stress, [("stress_type", "类型"), ("parameter", "参数"), ("trades", "交易数"), ("net_points", "净点"), ("profit_factor", "PF"), ("win_rate", "胜率"), ("max_drawdown_points", "最大DD"), ("worst_month_points", "最差月"), ("worst_90d_points", "最差90日"), ("positive_90d_rate", "正90日率")])}
     </section>
@@ -935,6 +1069,8 @@ def build_html_report(
         "leakage_passed": bool(not leakage["severity"].eq("fail").any()),
         "loss_learning_verdict": summary_loss_learning_verdict(loss_learning),
         "loss_learning_selected_oos_delta_points": selected_loss_learning_delta(loss_learning),
+        "reverse_trade_verdict": summary_reverse_trade_verdict(reverse_diagnostic),
+        "reverse_selected_oos_delta_points": selected_reverse_trade_delta(reverse_diagnostic),
     }
     return html_doc, summary
 
@@ -953,6 +1089,26 @@ def selected_loss_learning_delta(loss_learning: pd.DataFrame) -> float:
     if not selected.any():
         return 0.0
     return float(pd.to_numeric(loss_learning.loc[selected, "test_delta_net_points"], errors="coerce").fillna(0.0).sum())
+
+
+def summary_reverse_trade_verdict(reverse_diagnostic: pd.DataFrame) -> str:
+    if reverse_diagnostic.empty:
+        return "not_run"
+    value = reverse_diagnostic["reverse_trade_verdict"].dropna().astype(str)
+    return value.iloc[0] if not value.empty else "not_run"
+
+
+def selected_reverse_trade_delta(reverse_diagnostic: pd.DataFrame) -> float:
+    if reverse_diagnostic.empty:
+        return 0.0
+    selected = reverse_diagnostic["candidate"].astype(str).str.startswith("SELECTED::")
+    if not selected.any():
+        return 0.0
+    return float(
+        pd.to_numeric(reverse_diagnostic.loc[selected, "test_reverse_delta_vs_baseline"], errors="coerce")
+        .fillna(0.0)
+        .sum()
+    )
 
 
 def metric(label: str, value: str, note: str) -> str:
@@ -1006,6 +1162,7 @@ def write_report(args: argparse.Namespace) -> dict[str, Any]:
     leakage = leakage_audit_table(composite_trades, bars)
     stress = stress_tables(composite_trades, bars)
     loss_learning = run_loss_learning_walk_forward(composite_trades, bars)
+    reverse_diagnostic = run_reverse_trade_diagnostic(composite_trades, bars)
     risk_mapping = risk_budget_mapping()
     paper_plan = paper_validation_plan()
     paper_interface = paper_interface_readiness_table()
@@ -1017,6 +1174,7 @@ def write_report(args: argparse.Namespace) -> dict[str, Any]:
         leakage=leakage,
         stress=stress,
         loss_learning=loss_learning,
+        reverse_diagnostic=reverse_diagnostic,
         bars=bars,
         readiness=readiness,
         risk_mapping=risk_mapping,
@@ -1034,12 +1192,14 @@ def write_report(args: argparse.Namespace) -> dict[str, Any]:
     Path(args.stress_output).parent.mkdir(parents=True, exist_ok=True)
     Path(args.leakage_output).parent.mkdir(parents=True, exist_ok=True)
     Path(args.loss_learning_output).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.reverse_diagnostic_output).parent.mkdir(parents=True, exist_ok=True)
     Path(args.paper_plan_output).parent.mkdir(parents=True, exist_ok=True)
     walk_forward.to_csv(args.walk_forward_output, index=False)
     wf_trades.to_csv(args.walk_forward_trades_output, index=False)
     stress.to_csv(args.stress_output, index=False)
     leakage.to_csv(args.leakage_output, index=False)
     loss_learning.to_csv(args.loss_learning_output, index=False)
+    reverse_diagnostic.to_csv(args.reverse_diagnostic_output, index=False)
     paper_plan.to_csv(args.paper_plan_output, index=False)
     return {
         "output": args.output,
@@ -1049,6 +1209,7 @@ def write_report(args: argparse.Namespace) -> dict[str, Any]:
         "stress_output": args.stress_output,
         "leakage_output": args.leakage_output,
         "loss_learning_output": args.loss_learning_output,
+        "reverse_diagnostic_output": args.reverse_diagnostic_output,
         "paper_plan_output": args.paper_plan_output,
         **summary,
     }
@@ -1068,6 +1229,7 @@ def main() -> int:
     parser.add_argument("--stress-output", default=DEFAULT_STRESS)
     parser.add_argument("--leakage-output", default=DEFAULT_LEAKAGE)
     parser.add_argument("--loss-learning-output", default=DEFAULT_LOSS_LEARNING)
+    parser.add_argument("--reverse-diagnostic-output", default=DEFAULT_REVERSE_DIAGNOSTIC)
     parser.add_argument("--paper-plan-output", default=DEFAULT_PAPER_PLAN)
     parser.add_argument("--generated-at", default="")
     args = parser.parse_args()

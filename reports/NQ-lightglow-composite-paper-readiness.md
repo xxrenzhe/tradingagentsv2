@@ -27,3 +27,8 @@ implement adapter and run paper validation
 
 - Verdict: `not_selected`
 - Selected OOS delta points: `0.00`
+
+## Reverse Diagnostic
+
+- Verdict: `reverse_not_proven`
+- Selected OOS delta vs baseline: `0.00`
