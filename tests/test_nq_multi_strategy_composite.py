@@ -628,6 +628,166 @@ def test_quality_gate_reports_no_pass_for_low_pf_high_frequency_candidate(tmp_pa
     assert "未通过原因" in html
 
 
+def test_rollstable_timecell_budget_cap_reallocates_to_core() -> None:
+    audit = pd.DataFrame(
+        [
+            {
+                "strategy_label": "core",
+                "deployment_tier": module.CORE_TIER,
+                "feature_family": "range_compression_displacement_breakout",
+                "priority_score": 100.0,
+            },
+            {
+                "strategy_label": "rollstable",
+                "deployment_tier": module.RESEARCH_TIER,
+                "feature_family": module.ROLLSTABLE_TIMECELL_FAMILY,
+                "priority_score": 50.0,
+            },
+        ]
+    )
+
+    budgets = module.risk_budget_map(
+        audit,
+        ("core", "rollstable"),
+        family_caps={module.ROLLSTABLE_TIMECELL_FAMILY: 0.10},
+    )
+
+    assert budgets["rollstable"] == 0.10
+    assert round(budgets["core"], 6) == 0.9
+    assert round(sum(budgets.values()), 6) == 1.0
+
+
+def test_risk_budget_quality_gate_uses_budgeted_metrics() -> None:
+    metrics = {
+        "annual_trade_floor_pass": 1.0,
+        "profit_factor": 1.10,
+        "net_points": 100.0,
+        "net_to_drawdown": 2.0,
+        "positive_full_year_net_rate": 1.0,
+        "risk_budgeted_profit_factor": 1.30,
+        "risk_budgeted_net_points": 80.0,
+        "risk_budgeted_net_to_drawdown": 6.0,
+        "risk_budgeted_positive_full_year_net_rate": 1.0,
+    }
+    args = Namespace(
+        quality_gate_uses_risk_budget=True,
+        min_profit_factor=1.25,
+        min_net_points=50.0,
+        min_net_to_drawdown=5.0,
+        min_positive_full_year_net_rate=1.0,
+    )
+
+    assert module.quality_gate_pass(metrics, args) is True
+    args.quality_gate_uses_risk_budget = False
+    assert module.quality_gate_pass(metrics, args) is False
+
+
+def test_fast_coverage_combos_greedily_adds_quality_core() -> None:
+    candidates = pd.DataFrame(
+        [
+            {
+                "strategy_label": "rollstable",
+                "eligible_for_composite": True,
+                "has_trade_coverage": True,
+                "deployment_tier": module.RESEARCH_TIER,
+                "feature_family": module.ROLLSTABLE_TIMECELL_FAMILY,
+                "trade_rows": 8,
+                "priority_score": 10.0,
+                "coverage_candidate": False,
+            },
+            {
+                "strategy_label": "core_a",
+                "eligible_for_composite": True,
+                "has_trade_coverage": True,
+                "deployment_tier": module.CORE_TIER,
+                "feature_family": "range_compression_displacement_breakout",
+                "trade_rows": 2,
+                "priority_score": 100.0,
+                "coverage_candidate": False,
+            },
+        ]
+    )
+    audit = candidates.copy()
+    audit["strategy_source"] = ["rollstable_timecell_oos", "regime_transition"]
+    trades = pd.DataFrame(
+        [
+            *[
+                {
+                    "strategy_label": "rollstable",
+                    "entry_ts": pd.Timestamp(f"2020-01-01 10:{index:02d}:00", tz="UTC"),
+                    "exit_ts": pd.Timestamp(f"2020-01-01 10:{index + 1:02d}:00", tz="UTC"),
+                    "net_points": 1.0,
+                    "gross_points": 1.0,
+                    "direction": 1,
+                    "priority_score": 10.0,
+                    "strategy_source": "rollstable_timecell_oos",
+                    "feature_family": module.ROLLSTABLE_TIMECELL_FAMILY,
+                }
+                for index in range(4)
+            ],
+            *[
+                {
+                    "strategy_label": "rollstable",
+                    "entry_ts": pd.Timestamp(f"2021-01-01 10:{index:02d}:00", tz="UTC"),
+                    "exit_ts": pd.Timestamp(f"2021-01-01 10:{index + 1:02d}:00", tz="UTC"),
+                    "net_points": 1.0,
+                    "gross_points": 1.0,
+                    "direction": 1,
+                    "priority_score": 10.0,
+                    "strategy_source": "rollstable_timecell_oos",
+                    "feature_family": module.ROLLSTABLE_TIMECELL_FAMILY,
+                }
+                for index in range(4)
+            ],
+            {
+                "strategy_label": "core_a",
+                "entry_ts": pd.Timestamp("2020-01-02 10:00:00", tz="UTC"),
+                "exit_ts": pd.Timestamp("2020-01-02 10:01:00", tz="UTC"),
+                "net_points": 100.0,
+                "gross_points": 100.0,
+                "direction": 1,
+                "priority_score": 100.0,
+                "strategy_source": "regime_transition",
+                "feature_family": "range_compression_displacement_breakout",
+            },
+            {
+                "strategy_label": "core_a",
+                "entry_ts": pd.Timestamp("2021-01-02 10:00:00", tz="UTC"),
+                "exit_ts": pd.Timestamp("2021-01-02 10:01:00", tz="UTC"),
+                "net_points": 100.0,
+                "gross_points": 100.0,
+                "direction": 1,
+                "priority_score": 100.0,
+                "strategy_source": "regime_transition",
+                "feature_family": "range_compression_displacement_breakout",
+            },
+        ]
+    )
+    trades["same_bar_exit"] = False
+    args = Namespace(
+        rank_on_common_window=False,
+        full_years=(2020, 2021),
+        min_full_year_trades=4,
+        coverage_objective=True,
+        include_coverage_candidates=True,
+        max_combo_size=2,
+        max_per_family=1,
+        coverage_max_per_family=2,
+        max_coverage_candidates=0,
+        min_profit_factor=0.0,
+        min_net_points=0.0,
+        min_net_to_drawdown=0.0,
+        min_positive_full_year_net_rate=0.0,
+        quality_gate_uses_risk_budget=True,
+        rollstable_timecell_max_risk_budget=0.10,
+    )
+
+    combos = module.fast_coverage_combos(trades, candidates, audit, args)
+
+    assert ("rollstable",) in combos
+    assert ("rollstable", "core_a") in combos
+
+
 def test_svg_line_downsamples_large_equity_curve() -> None:
     points = pd.DataFrame({"x": range(5000), "equity": range(5000)})
 

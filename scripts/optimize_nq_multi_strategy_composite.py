@@ -19,6 +19,7 @@ REJECT_TIER = "reject"
 DEFAULT_MIN_FULL_YEAR_TRADES = 1001
 ROLLSTABLE_TIMECELL_SOURCE = "rollstable_timecell_oos"
 ROLLSTABLE_TIMECELL_LABEL = "rollstable_oos_2010_2019_timecell_month_hour"
+ROLLSTABLE_TIMECELL_FAMILY = "rollstable_timecell_direction_map"
 
 
 @dataclass(frozen=True)
@@ -160,7 +161,7 @@ def augment_audit_with_rollstable_timecell(audit: pd.DataFrame, args: argparse.N
             "production_ready": False,
             "readiness_tier": "continue_research",
             "deployment_tier": RESEARCH_TIER,
-            "feature_family": "rollstable_timecell_direction_map",
+            "feature_family": ROLLSTABLE_TIMECELL_FAMILY,
             "eligible_for_composite": True,
             "coverage_candidate": False,
             "cost_3_125_net_points": summary["net_points"],
@@ -203,7 +204,7 @@ def feature_family(row: pd.Series) -> str:
         if "bos" in text:
             return "smc_bos_continuation"
     if source == ROLLSTABLE_TIMECELL_SOURCE:
-        return "rollstable_timecell_direction_map"
+        return ROLLSTABLE_TIMECELL_FAMILY
     return source or "unknown"
 
 
@@ -455,6 +456,7 @@ def fast_coverage_combos(
             full_years=getattr(args, "full_years", tuple()),
             annual_trade_floor=getattr(args, "min_full_year_trades", 0),
             coverage_objective=getattr(args, "coverage_objective", False),
+            family_budget_caps=family_budget_caps_from_args(args),
         )
         for label in seed_labels
     ]
@@ -462,26 +464,45 @@ def fast_coverage_combos(
     best_seed = max(quality_seed_results or seed_results, key=lambda item: item.objective_score)
     labels = list(best_seed.labels)
     combos = [tuple(labels)]
-    core_labels = [
-        label
-        for label in candidates[
-            candidates["deployment_tier"].eq(CORE_TIER) & candidates["has_trade_coverage"]
-        ]["strategy_label"].astype(str).tolist()
-        if label not in labels
-    ]
-    for label in core_labels:
-        if len(labels) + 1 > args.max_combo_size:
+    core_pool = candidates[
+        candidates["deployment_tier"].eq(CORE_TIER) & candidates["has_trade_coverage"]
+    ].sort_values(["priority_score", "trade_rows"], ascending=[False, False])
+    core_labels = [label for label in core_pool["strategy_label"].astype(str).tolist() if label not in labels]
+    current = best_seed
+    family_by_label = dict(zip(candidates["strategy_label"].astype(str), candidates["feature_family"].astype(str), strict=False))
+    family_limit = getattr(args, "coverage_max_per_family", None) or args.max_per_family
+    remaining_core = list(core_labels)
+    while remaining_core and len(labels) < args.max_combo_size:
+        best_add: tuple[float, str, ComboResult] | None = None
+        for label in remaining_core:
+            proposed = tuple(labels + [label])
+            family_counts = pd.Series([family_by_label.get(item, "") for item in proposed]).value_counts()
+            if int(family_counts.max()) > family_limit:
+                continue
+            result = evaluate_combo(
+                trades,
+                audit,
+                proposed,
+                require_common_window=args.rank_on_common_window,
+                full_years=getattr(args, "full_years", tuple()),
+                annual_trade_floor=getattr(args, "min_full_year_trades", 0),
+                coverage_objective=getattr(args, "coverage_objective", False),
+                family_budget_caps=family_budget_caps_from_args(args),
+            )
+            if best_add is None or result.objective_score > best_add[0]:
+                best_add = (result.objective_score, label, result)
+        if best_add is None or best_add[0] <= current.objective_score:
             break
-        combos.append(tuple(labels + [label]))
+        labels.append(best_add[1])
+        remaining_core.remove(best_add[1])
+        current = best_add[2]
+        combos.append(tuple(labels))
     coverage_pool = candidates[candidates["coverage_candidate"] & candidates["has_trade_coverage"]].copy()
     coverage_pool = coverage_pool.sort_values(["trade_rows", "priority_score"], ascending=[False, False]).head(
         getattr(args, "max_coverage_candidates", 0)
     )
     remaining = coverage_pool["strategy_label"].astype(str).tolist()
-    family_by_label = dict(zip(candidates["strategy_label"].astype(str), candidates["feature_family"].astype(str), strict=False))
-    family_limit = getattr(args, "coverage_max_per_family", None) or args.max_per_family
 
-    current = best_seed
     while remaining and len(labels) < args.max_combo_size and current.metrics.get("annual_trade_floor_pass", 0.0) < 1.0:
         current_deficit = current.metrics.get("annual_trade_floor_deficit", 0.0)
         best_add: tuple[tuple[float, float, float], str, ComboResult] | None = None
@@ -498,6 +519,7 @@ def fast_coverage_combos(
                 full_years=getattr(args, "full_years", tuple()),
                 annual_trade_floor=getattr(args, "min_full_year_trades", 0),
                 coverage_objective=getattr(args, "coverage_objective", False),
+                family_budget_caps=family_budget_caps_from_args(args),
             )
             deficit_reduction = current_deficit - result.metrics.get("annual_trade_floor_deficit", 0.0)
             key = (
@@ -558,7 +580,23 @@ def resolve_conflicts(trades: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]
     return selected, dropped
 
 
-def risk_budget_map(audit: pd.DataFrame, labels: tuple[str, ...]) -> dict[str, float]:
+def normalize_budget_caps(caps: dict[str, float]) -> dict[str, float]:
+    return {str(key): float(max(value, 0.0)) for key, value in caps.items()}
+
+
+def family_budget_caps_from_args(args: argparse.Namespace) -> dict[str, float]:
+    cap = float(getattr(args, "rollstable_timecell_max_risk_budget", 0.10))
+    if cap <= 0.0:
+        return {}
+    return {ROLLSTABLE_TIMECELL_FAMILY: cap}
+
+
+def risk_budget_map(
+    audit: pd.DataFrame,
+    labels: tuple[str, ...],
+    *,
+    family_caps: dict[str, float] | None = None,
+) -> dict[str, float]:
     meta = audit[audit["strategy_label"].isin(labels)].copy()
     if meta.empty:
         return {}
@@ -593,6 +631,44 @@ def risk_budget_map(audit: pd.DataFrame, labels: tuple[str, ...]) -> dict[str, f
     allocate(core, core_budget)
     allocate(research, research_budget)
     allocate(coverage, coverage_budget)
+    caps = normalize_budget_caps(family_caps or {})
+    if caps:
+        meta_by_label = meta.set_index("strategy_label")
+        excess = 0.0
+        capped: dict[str, float] = {}
+        uncapped_labels: list[str] = []
+        for label, budget in budgets.items():
+            family = str(meta_by_label.loc[label, "feature_family"]) if label in meta_by_label.index else ""
+            cap = caps.get(family)
+            if cap is not None and budget > cap:
+                capped[label] = cap
+                excess += budget - cap
+            else:
+                capped[label] = budget
+                uncapped_labels.append(label)
+        if excess > 0.0:
+            if uncapped_labels:
+                scores = pd.Series(
+                    {
+                        label: max(as_float(meta_by_label.loc[label, "priority_score"]), 0.0)
+                        for label in uncapped_labels
+                        if label in meta_by_label.index
+                    },
+                    dtype="float64",
+                )
+                weights = scores / float(scores.sum()) if float(scores.sum()) > 0.0 else pd.Series(
+                    1.0 / len(uncapped_labels),
+                    index=uncapped_labels,
+                    dtype="float64",
+                )
+                for label, weight in weights.items():
+                    capped[str(label)] = float(capped.get(str(label), 0.0) + excess * float(weight))
+                budgets = capped
+            else:
+                total = float(sum(budgets.values()))
+                budgets = {label: float(budget / total) for label, budget in budgets.items()} if total else budgets
+        else:
+            budgets = capped
     return budgets
 
 
@@ -639,6 +715,24 @@ def annual_net_quality_metrics(trades: pd.DataFrame, years: tuple[int, ...]) -> 
     }
 
 
+def annual_net_quality_from_series(
+    trades: pd.DataFrame,
+    net: pd.Series,
+    years: tuple[int, ...],
+    *,
+    prefix: str,
+) -> dict[str, float]:
+    if not years:
+        return {f"{prefix}min_full_year_net_points": 0.0, f"{prefix}positive_full_year_net_rate": 0.0}
+    if trades.empty or "entry_ts" not in trades:
+        return {f"{prefix}min_full_year_net_points": 0.0, f"{prefix}positive_full_year_net_rate": 0.0}
+    yearly = net.groupby(trades["entry_ts"].dt.year).sum().reindex(years, fill_value=0.0)
+    return {
+        f"{prefix}min_full_year_net_points": float(yearly.min()) if not yearly.empty else 0.0,
+        f"{prefix}positive_full_year_net_rate": float((yearly > 0).mean()) if not yearly.empty else 0.0,
+    }
+
+
 def summarize_trades(
     trades: pd.DataFrame,
     dropped: pd.DataFrame | None = None,
@@ -664,7 +758,10 @@ def summarize_trades(
             "conflict_dropped": float(len(dropped)) if dropped is not None else 0.0,
             "risk_budgeted_net_points": 0.0,
             "risk_budgeted_max_drawdown_points": 0.0,
+            "risk_budgeted_net_to_drawdown": 0.0,
             "risk_budgeted_profit_factor": 0.0,
+            "risk_budgeted_min_full_year_net_points": 0.0,
+            "risk_budgeted_positive_full_year_net_rate": 0.0,
             **annual_trade_floor_metrics(trades, full_years, annual_trade_floor),
             **annual_net_quality_metrics(trades, full_years),
         }
@@ -704,17 +801,33 @@ def summarize_trades(
         weighted_equity = weighted_net.cumsum()
         weighted_drawdown = weighted_equity.cummax() - weighted_equity
         weighted_gross_loss = float(-weighted_losses.sum())
+        weighted_max_dd = float(weighted_drawdown.max()) if not weighted_drawdown.empty else 0.0
         metrics["risk_budgeted_net_points"] = float(weighted_net.sum())
-        metrics["risk_budgeted_max_drawdown_points"] = float(weighted_drawdown.max()) if not weighted_drawdown.empty else 0.0
+        metrics["risk_budgeted_max_drawdown_points"] = weighted_max_dd
+        metrics["risk_budgeted_net_to_drawdown"] = (
+            float(weighted_net.sum() / weighted_max_dd)
+            if weighted_max_dd
+            else (999.0 if float(weighted_net.sum()) > 0.0 else 0.0)
+        )
         metrics["risk_budgeted_profit_factor"] = (
             float(weighted_wins.sum() / weighted_gross_loss)
             if weighted_gross_loss
             else (999.0 if float(weighted_wins.sum()) > 0.0 else 0.0)
         )
+        metrics.update(
+            annual_net_quality_from_series(
+                frame,
+                weighted_net,
+                full_years,
+                prefix="risk_budgeted_",
+            )
+        )
     else:
         metrics["risk_budgeted_net_points"] = metrics["net_points"]
         metrics["risk_budgeted_max_drawdown_points"] = metrics["max_drawdown_points"]
+        metrics["risk_budgeted_net_to_drawdown"] = metrics["net_to_drawdown"]
         metrics["risk_budgeted_profit_factor"] = metrics["profit_factor"]
+        metrics.update(annual_net_quality_from_series(frame, net, full_years, prefix="risk_budgeted_"))
     metrics.update(annual_trade_floor_metrics(frame, full_years, annual_trade_floor))
     metrics.update(annual_net_quality_metrics(frame, full_years))
     return metrics
@@ -752,23 +865,44 @@ def coverage_objective_score(
     if deficit > 0:
         return float(-1_000_000.0 - deficit * 1000.0 + min_trades + base * 0.01)
     quality_bonus = (
-        max(metrics.get("profit_factor", 0.0) - 1.0, 0.0) * 25000.0
-        + max(metrics.get("net_to_drawdown", 0.0), 0.0) * 1000.0
-        + max(metrics.get("min_full_year_net_points", 0.0), 0.0) * 2.0
+        max(metrics.get("risk_budgeted_profit_factor", metrics.get("profit_factor", 0.0)) - 1.0, 0.0) * 25000.0
+        + max(metrics.get("risk_budgeted_net_to_drawdown", metrics.get("net_to_drawdown", 0.0)), 0.0) * 1000.0
+        + max(
+            metrics.get("risk_budgeted_min_full_year_net_points", metrics.get("min_full_year_net_points", 0.0)),
+            0.0,
+        )
+        * 2.0
     )
     return float(1_000_000.0 + quality_bonus + min_trades * 10.0 + base * coverage_penalty)
+
+
+def quality_metric_key(args: argparse.Namespace, key: str) -> str:
+    if getattr(args, "quality_gate_uses_risk_budget", False):
+        mapping = {
+            "profit_factor": "risk_budgeted_profit_factor",
+            "net_points": "risk_budgeted_net_points",
+            "net_to_drawdown": "risk_budgeted_net_to_drawdown",
+            "min_full_year_net_points": "risk_budgeted_min_full_year_net_points",
+            "positive_full_year_net_rate": "risk_budgeted_positive_full_year_net_rate",
+        }
+        return mapping.get(key, key)
+    return key
+
+
+def quality_value(metrics: dict[str, float], args: argparse.Namespace, key: str) -> float:
+    return metrics.get(quality_metric_key(args, key), 0.0)
 
 
 def quality_gate_pass(metrics: dict[str, float], args: argparse.Namespace) -> bool:
     if metrics.get("annual_trade_floor_pass", 0.0) < 1.0:
         return False
-    if metrics.get("profit_factor", 0.0) < getattr(args, "min_profit_factor", 0.0):
+    if quality_value(metrics, args, "profit_factor") < getattr(args, "min_profit_factor", 0.0):
         return False
-    if metrics.get("net_points", 0.0) < getattr(args, "min_net_points", 0.0):
+    if quality_value(metrics, args, "net_points") < getattr(args, "min_net_points", 0.0):
         return False
-    if metrics.get("net_to_drawdown", 0.0) < getattr(args, "min_net_to_drawdown", 0.0):
+    if quality_value(metrics, args, "net_to_drawdown") < getattr(args, "min_net_to_drawdown", 0.0):
         return False
-    if metrics.get("positive_full_year_net_rate", 0.0) < getattr(args, "min_positive_full_year_net_rate", 0.0):
+    if quality_value(metrics, args, "positive_full_year_net_rate") < getattr(args, "min_positive_full_year_net_rate", 0.0):
         return False
     return True
 
@@ -780,24 +914,24 @@ def quality_gate_reasons(metrics: dict[str, float], args: argparse.Namespace) ->
             f"完整年份最低交易数 {fmt_metric('min_full_year_trades', metrics.get('min_full_year_trades', 0.0))} "
             f"< {fmt_metric('trades', getattr(args, 'min_full_year_trades', 0))}"
         )
-    if metrics.get("profit_factor", 0.0) < getattr(args, "min_profit_factor", 0.0):
+    if quality_value(metrics, args, "profit_factor") < getattr(args, "min_profit_factor", 0.0):
         reasons.append(
-            f"PF {fmt_metric('profit_factor', metrics.get('profit_factor', 0.0))} "
+            f"PF {fmt_metric('profit_factor', quality_value(metrics, args, 'profit_factor'))} "
             f"< {fmt_metric('profit_factor', getattr(args, 'min_profit_factor', 0.0))}"
         )
-    if metrics.get("net_points", 0.0) < getattr(args, "min_net_points", 0.0):
+    if quality_value(metrics, args, "net_points") < getattr(args, "min_net_points", 0.0):
         reasons.append(
-            f"净点 {fmt_metric('net_points', metrics.get('net_points', 0.0))} "
+            f"净点 {fmt_metric('net_points', quality_value(metrics, args, 'net_points'))} "
             f"< {fmt_metric('net_points', getattr(args, 'min_net_points', 0.0))}"
         )
-    if metrics.get("net_to_drawdown", 0.0) < getattr(args, "min_net_to_drawdown", 0.0):
+    if quality_value(metrics, args, "net_to_drawdown") < getattr(args, "min_net_to_drawdown", 0.0):
         reasons.append(
-            f"净值/回撤 {fmt_metric('net_to_drawdown', metrics.get('net_to_drawdown', 0.0))} "
+            f"净值/回撤 {fmt_metric('net_to_drawdown', quality_value(metrics, args, 'net_to_drawdown'))} "
             f"< {fmt_metric('net_to_drawdown', getattr(args, 'min_net_to_drawdown', 0.0))}"
         )
-    if metrics.get("positive_full_year_net_rate", 0.0) < getattr(args, "min_positive_full_year_net_rate", 0.0):
+    if quality_value(metrics, args, "positive_full_year_net_rate") < getattr(args, "min_positive_full_year_net_rate", 0.0):
         reasons.append(
-            f"完整年份正收益率 {fmt_metric('positive_full_year_net_rate', metrics.get('positive_full_year_net_rate', 0.0))} "
+            f"完整年份正收益率 {fmt_metric('positive_full_year_net_rate', quality_value(metrics, args, 'positive_full_year_net_rate'))} "
             f"< {fmt_metric('positive_full_year_net_rate', getattr(args, 'min_positive_full_year_net_rate', 0.0))}"
         )
     return reasons
@@ -812,6 +946,7 @@ def evaluate_combo(
     full_years: tuple[int, ...] = tuple(),
     annual_trade_floor: int = 0,
     coverage_objective: bool = False,
+    family_budget_caps: dict[str, float] | None = None,
 ) -> ComboResult:
     selected = trades[trades["strategy_label"].isin(labels)].copy()
     start: pd.Timestamp | None = None
@@ -822,7 +957,9 @@ def evaluate_combo(
             selected = selected.iloc[0:0]
         else:
             selected = selected[(selected["entry_ts"] >= start) & (selected["entry_ts"] <= end)]
-    selected["risk_weight"] = selected["strategy_label"].map(risk_budget_map(audit, labels)).fillna(1.0)
+    selected["risk_weight"] = selected["strategy_label"].map(
+        risk_budget_map(audit, labels, family_caps=family_budget_caps)
+    ).fillna(1.0)
     resolved, dropped = resolve_conflicts(selected)
     metrics = summarize_trades(
         resolved,
@@ -881,6 +1018,7 @@ def evaluate_combinations(
             full_years=getattr(args, "full_years", tuple()),
             annual_trade_floor=getattr(args, "min_full_year_trades", 0),
             coverage_objective=getattr(args, "coverage_objective", False),
+            family_budget_caps=family_budget_caps_from_args(args),
         )
         for combo in combos
     ]
@@ -903,6 +1041,7 @@ def evaluate_combinations(
                 full_years=getattr(args, "full_years", tuple()),
                 annual_trade_floor=getattr(args, "min_full_year_trades", 0),
                 coverage_objective=getattr(args, "coverage_objective", False),
+                family_budget_caps=family_budget_caps_from_args(args),
             )
             for combo in coverage_combos
         ]
@@ -969,12 +1108,20 @@ def walk_forward_years(
             full_years=tuple(),
             min_full_year_trades=0,
             coverage_objective=False,
+            quality_gate_uses_risk_budget=getattr(args, "quality_gate_uses_risk_budget", True),
+            rollstable_timecell_max_risk_budget=getattr(args, "rollstable_timecell_max_risk_budget", 0.10),
         )
         train_results = evaluate_combinations(train, covered, audit, train_args)
         if not train_results:
             continue
         selected = select_best(train_results, train_args)
-        test_result = evaluate_combo(test, audit, selected.labels, require_common_window=False)
+        test_result = evaluate_combo(
+            test,
+            audit,
+            selected.labels,
+            require_common_window=False,
+            family_budget_caps=family_budget_caps_from_args(args),
+        )
         rows.append(
             {
                 "year": int(year),
@@ -1111,6 +1258,10 @@ def fmt_metric(key: str, value: object) -> str:
     return safe_text(value)
 
 
+def quality_gate_scope(args: argparse.Namespace) -> str:
+    return "风险预算后" if getattr(args, "quality_gate_uses_risk_budget", False) else "原始信号"
+
+
 def html_table(frame: pd.DataFrame, columns: list[tuple[str, str]], limit: int | None = None) -> str:
     if frame.empty:
         return "<p class=\"empty\">无记录。</p>"
@@ -1159,10 +1310,10 @@ def build_html(
         ("最大回撤", "max_drawdown_points"),
         ("PF", "profit_factor"),
         ("预算净点", "risk_budgeted_net_points"),
+        ("预算PF", "risk_budgeted_profit_factor"),
+        ("预算净值/回撤", "risk_budgeted_net_to_drawdown"),
         ("胜率", "win_rate"),
         ("完整年份最少交易", "min_full_year_trades"),
-        ("正年份率", "positive_year_rate"),
-        ("冲突丢弃", "conflict_dropped"),
         ("同K进出率", "same_bar_exit_rate"),
     ]
     card_html = "".join(
@@ -1261,14 +1412,14 @@ def build_html(
         </div>
         <div class="{coverage_note_class}">
           <p><strong>年度交易次数约束：</strong>{floor_status}；检查年份：{safe_text(', '.join(str(year) for year in full_years) if full_years else 'N/A')}；完整年份最少交易数：{fmt_metric("min_full_year_trades", metrics.get("min_full_year_trades", 0.0))}。</p>
-          <p><strong>收益质量：</strong>{quality_status}；完整年份最低净点：{fmt_metric("min_full_year_net_points", metrics.get("min_full_year_net_points", 0.0))}；完整年份正收益率：{fmt_metric("positive_full_year_net_rate", metrics.get("positive_full_year_net_rate", 0.0))}。</p>
+          <p><strong>收益质量：</strong>{quality_status}；质量口径：{quality_gate_scope(quality_args)}；完整年份最低净点：{fmt_metric("min_full_year_net_points", quality_value(metrics, quality_args, "min_full_year_net_points"))}；完整年份正收益率：{fmt_metric("positive_full_year_net_rate", quality_value(metrics, quality_args, "positive_full_year_net_rate"))}。</p>
           <p><strong>质量门槛：</strong>PF ≥ {fmt_metric("profit_factor", getattr(quality_args, "min_profit_factor", 0.0))}；净点 ≥ {fmt_metric("net_points", getattr(quality_args, "min_net_points", 0.0))}；净值/回撤 ≥ {fmt_metric("net_to_drawdown", getattr(quality_args, "min_net_to_drawdown", 0.0))}；完整年份正收益率 ≥ {fmt_metric("positive_full_year_net_rate", getattr(quality_args, "min_positive_full_year_net_rate", 0.0))}。</p>
           <p><strong>未通过原因：</strong>{safe_text(quality_reason_text)}</p>
           <p><strong>约束解释：</strong>只检查完整日历年，当前样本中的未完整年份不会用于年度下限判断。PF/收益质量优先于单纯凑交易次数。</p>
         </div>
         <div class="note warn">
           <p><strong>冲突处理：</strong>同一时间只允许一笔持仓；若交易重叠，按进场时间和候选优先级保留先触发/高优先级交易，其他信号记录为 conflict_dropped。</p>
-          <p><strong>关键限制：</strong>OFS/SMC/timecell 候选目前仍是研究层级。timecell 候选使用 roll-stable 日主力合约和下一根 bar 入场，但仍需要 walk-forward、纸盘和更高滑点压力测试。</p>
+          <p><strong>关键限制：</strong>OFS/SMC/timecell 候选目前仍是研究层级。timecell 候选使用 roll-stable 日主力合约和下一根 bar 入场，但 PF 边缘偏薄，默认风险预算上限为 {fmt_metric("risk_weight", getattr(quality_args, "rollstable_timecell_max_risk_budget", 0.10))}；仍需要 walk-forward、纸盘和更高滑点压力测试。</p>
         </div>
       </div>
     </section>
@@ -1331,11 +1482,15 @@ def build_html(
           ("max_drawdown_points", "最大回撤"),
           ("profit_factor", "PF"),
           ("risk_budgeted_net_points", "预算净点"),
+          ("risk_budgeted_profit_factor", "预算PF"),
+          ("risk_budgeted_net_to_drawdown", "预算净值/回撤"),
           ("min_full_year_trades", "完整年最少交易"),
           ("annual_trade_floor_pass", "年度交易达标"),
           ("annual_trade_floor_deficit", "交易缺口"),
           ("min_full_year_net_points", "完整年最低净点"),
+          ("risk_budgeted_min_full_year_net_points", "预算完整年最低净点"),
           ("positive_full_year_net_rate", "完整年正收益"),
+          ("risk_budgeted_positive_full_year_net_rate", "预算完整年正收益"),
           ("positive_year_rate", "正年份率"),
           ("same_bar_exit_rate", "同K进出"),
           ("conflict_dropped", "冲突丢弃"),
@@ -1387,6 +1542,10 @@ def write_outputs(args: argparse.Namespace) -> dict[str, object]:
     args.full_years = full_years
     args.min_full_year_trades = min_full_year_trades
     args.max_walkforward_years = max_walkforward_years
+    if not hasattr(args, "quality_gate_uses_risk_budget"):
+        args.quality_gate_uses_risk_budget = True
+    if not hasattr(args, "rollstable_timecell_max_risk_budget"):
+        args.rollstable_timecell_max_risk_budget = 0.10
     args.coverage_objective = min_full_year_trades > 0
     candidates = candidate_rows(audit, trades)
     results = evaluate_combinations(trades, candidates, audit, args)
@@ -1438,6 +1597,7 @@ def write_outputs(args: argparse.Namespace) -> dict[str, object]:
         "full_years_checked": list(full_years),
         "annual_trade_floor": min_full_year_trades,
         "annual_trade_floor_pass": bool(best.metrics.get("annual_trade_floor_pass", 0.0)),
+        "quality_gate_scope": quality_gate_scope(args),
         "quality_gate_pass": quality_gate_pass(best.metrics, args),
         "quality_gate_reasons": quality_gate_reasons(best.metrics, args),
         "combo_count": int(len(results)),
@@ -1471,6 +1631,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-net-points", type=float, default=10_000.0)
     parser.add_argument("--min-net-to-drawdown", type=float, default=5.0)
     parser.add_argument("--min-positive-full-year-net-rate", type=float, default=1.0)
+    parser.add_argument("--quality-gate-uses-risk-budget", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--rollstable-timecell-max-risk-budget", type=float, default=0.10)
     parser.add_argument("--full-year-start", type=int, default=2020)
     parser.add_argument("--full-year-end", type=int, default=0)
     parser.add_argument("--min-train-years", type=int, default=3)
