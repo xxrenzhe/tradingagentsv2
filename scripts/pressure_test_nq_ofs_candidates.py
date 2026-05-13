@@ -69,13 +69,14 @@ def load_features(path: Path) -> pd.DataFrame:
     return out
 
 
-def evaluate_candidates(features: pd.DataFrame, args: argparse.Namespace) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def evaluate_candidates(features: pd.DataFrame, args: argparse.Namespace) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     market_features = {feature.feature_id: feature for feature in build_market_features(features)}
     templates = candidate_specs()
     costs = BacktestCosts()
     rows: list[dict[str, Any]] = []
     yearly_rows: list[dict[str, Any]] = []
     rolling_rows: list[dict[str, Any]] = []
+    trade_frames: list[pd.DataFrame] = []
 
     for template in templates:
         feature = market_features[template.feature_id]
@@ -94,6 +95,7 @@ def evaluate_candidates(features: pd.DataFrame, args: argparse.Namespace) -> tup
             rows.append({"template": template.name, **template.__dict__, **summarize_trades(trades)})
             continue
         trades["entry_ts"] = pd.to_datetime(trades["entry_ts"], utc=True)
+        trade_frames.append(trades)
         summary = summarize_trades(trades)
         stress = cost_stress_summary(trades, costs, args.cost_multipliers)
         year_frame = yearly_summary(template, trades, args.cost_multipliers, costs)
@@ -124,7 +126,8 @@ def evaluate_candidates(features: pd.DataFrame, args: argparse.Namespace) -> tup
         ["pressure_score", "profit_factor", "net_points"],
         ascending=[False, False, False],
     )
-    return full, pd.DataFrame(yearly_rows), pd.DataFrame(rolling_rows)
+    trades_all = pd.concat(trade_frames, ignore_index=True, sort=False) if trade_frames else pd.DataFrame()
+    return full, pd.DataFrame(yearly_rows), pd.DataFrame(rolling_rows), trades_all
 
 
 def cost_stress_summary(trades: pd.DataFrame, base_costs: BacktestCosts, multipliers: list[float]) -> dict[str, float]:
@@ -289,6 +292,7 @@ def main() -> int:
     parser.add_argument("--full-output", default=".tmp/nq-ofs-candidate-pressure-full.csv")
     parser.add_argument("--yearly-output", default=".tmp/nq-ofs-candidate-pressure-yearly.csv")
     parser.add_argument("--rolling-output", default=".tmp/nq-ofs-candidate-pressure-rolling.csv")
+    parser.add_argument("--trades-output", default=".tmp/nq-ofs-candidate-pressure-trades.csv")
     parser.add_argument("--report", default="reports/NQ-ofs-candidate-pressure-test-2020.html")
     parser.add_argument("--cost-multipliers", type=float, nargs="+", default=[1.0, 2.0, 3.0])
     parser.add_argument("--rolling-days", type=int, default=180)
@@ -301,11 +305,12 @@ def main() -> int:
     args = parser.parse_args()
 
     features = load_features(Path(args.features_cache))
-    full, yearly, rolling = evaluate_candidates(features, args)
+    full, yearly, rolling, trades = evaluate_candidates(features, args)
     for path, frame in [
         (Path(args.full_output), full),
         (Path(args.yearly_output), yearly),
         (Path(args.rolling_output), rolling),
+        (Path(args.trades_output), trades),
     ]:
         path.parent.mkdir(parents=True, exist_ok=True)
         frame.to_csv(path, index=False)
@@ -319,6 +324,7 @@ def main() -> int:
                 "full_output": args.full_output,
                 "yearly_output": args.yearly_output,
                 "rolling_output": args.rolling_output,
+                "trades_output": args.trades_output,
                 "report": args.report,
                 "top": full.iloc[0].to_dict() if not full.empty else None,
             },
