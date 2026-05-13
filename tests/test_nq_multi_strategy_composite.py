@@ -775,6 +775,149 @@ def test_bar_best_walkforward_trades_are_promoted_into_research_pool(tmp_path: P
     )
 
 
+def test_lightglow_research_trades_are_filtered_after_train_cutoff(tmp_path: Path) -> None:
+    audit = tmp_path / "audit.csv"
+    regime = tmp_path / "regime.csv"
+    ofs = tmp_path / "ofs.csv"
+    screenshot = tmp_path / "screenshot.csv"
+    lightglow = tmp_path / "lightglow.csv"
+    report = tmp_path / "report.html"
+    selected = tmp_path / "selected.csv"
+    dropped = tmp_path / "dropped.csv"
+    ranking = tmp_path / "ranking.csv"
+    components = tmp_path / "components.csv"
+    walkforward = tmp_path / "walkforward.csv"
+
+    pd.DataFrame(
+        [
+            {
+                "strategy_source": "regime_transition",
+                "strategy_label": "core_breakout",
+                "candidate": "core_breakout",
+                "long_term_research_pass": True,
+                "readiness_tier": "promote_to_paper_validation",
+                "net_points": 80.0,
+                "profit_factor": 1.5,
+                "net_to_drawdown": 3.0,
+                "positive_year_rate": 1.0,
+                "positive_180d_rate": 1.0,
+                "cost_3_125_net_points": 60.0,
+            }
+        ]
+    ).to_csv(audit, index=False)
+    pd.DataFrame(
+        [
+            {
+                "audit_label": "core_breakout",
+                "candidate": "core_breakout",
+                "entry_ts": "2022-01-03 14:00:00+00:00",
+                "exit_ts": "2022-01-03 14:05:00+00:00",
+                "direction": 1,
+                "net_points": 30.0,
+                "gross_points": 30.0,
+            },
+            {
+                "audit_label": "core_breakout",
+                "candidate": "core_breakout",
+                "entry_ts": "2022-01-04 14:00:00+00:00",
+                "exit_ts": "2022-01-04 14:05:00+00:00",
+                "direction": 1,
+                "net_points": 30.0,
+                "gross_points": 30.0,
+            },
+        ]
+    ).to_csv(regime, index=False)
+    pd.DataFrame(columns=["template", "entry_ts", "exit_ts", "direction", "net_points", "gross_points"]).to_csv(
+        ofs, index=False
+    )
+    pd.DataFrame(columns=["template", "entry_ts", "exit_ts", "direction", "net_points", "gross_points"]).to_csv(
+        screenshot, index=False
+    )
+    pd.DataFrame(
+        [
+            {
+                "candidate": "lightglow_premium_discount_reversal_1m_all_hold2m_reverse_time",
+                "entry_ts": "2021-12-30 15:00:00+00:00",
+                "exit_ts": "2021-12-30 15:02:00+00:00",
+                "direction": 1,
+                "net_points": 500.0,
+                "gross_points": 500.5,
+                "entry_index": 10,
+                "exit_index": 12,
+            },
+            {
+                "candidate": "lightglow_premium_discount_reversal_1m_all_hold2m_reverse_time",
+                "entry_ts": "2022-02-01 15:00:00+00:00",
+                "exit_ts": "2022-02-01 15:02:00+00:00",
+                "direction": 1,
+                "net_points": 120.0,
+                "gross_points": 120.5,
+                "entry_index": 20,
+                "exit_index": 22,
+            },
+            {
+                "candidate": "lightglow_premium_discount_reversal_1m_all_hold2m_reverse_time",
+                "entry_ts": "2022-03-01 15:00:00+00:00",
+                "exit_ts": "2022-03-01 15:02:00+00:00",
+                "direction": 1,
+                "net_points": 120.0,
+                "gross_points": 120.5,
+                "entry_index": 30,
+                "exit_index": 32,
+            },
+        ]
+    ).to_csv(lightglow, index=False)
+
+    args = Namespace(
+        audit=str(audit),
+        regime_trades=str(regime),
+        ofs_trades=str(ofs),
+        screenshot_trades=str(screenshot),
+        lightglow_trades=str(lightglow),
+        lightglow_train_end="2022-01-01",
+        report=str(report),
+        selected_trades_output=str(selected),
+        dropped_trades_output=str(dropped),
+        ranking_output=str(ranking),
+        components_output=str(components),
+        walkforward_output=str(walkforward),
+        max_combo_size=2,
+        max_per_family=1,
+        include_coverage_candidates=False,
+        coverage_max_per_family=1,
+        max_coverage_candidates=0,
+        min_full_year_trades=0,
+        min_profit_factor=0.0,
+        min_net_points=0.0,
+        min_net_to_drawdown=0.0,
+        min_positive_full_year_net_rate=0.0,
+        full_year_start=2020,
+        full_year_end=2022,
+        min_train_years=1,
+        min_train_trades=1,
+        max_walkforward_years=0,
+        skip_walkforward=True,
+        rank_on_common_window=False,
+        generated_at="2026-05-13 00:00 UTC",
+    )
+
+    result = module.write_outputs(args)
+
+    assert result["best_labels"] == [
+        "core_breakout",
+        "lightglow_premium_discount_reversal_1m_all_hold2m_reverse_time",
+    ]
+    selected_frame = pd.read_csv(selected)
+    lightglow_rows = selected_frame[selected_frame["strategy_source"].eq(module.LIGHTGLOW_SOURCE)]
+    assert len(lightglow_rows) == 2
+    assert set(lightglow_rows["entry_ts"].str[:4]) == {"2022"}
+    assert lightglow_rows["net_points"].sum() == 240.0
+    components_frame = pd.read_csv(components)
+    row = components_frame[components_frame["strategy_source"].eq(module.LIGHTGLOW_SOURCE)].iloc[0]
+    assert row["feature_family"] == "lightglow_premium_discount_reversal"
+    assert row["net_points"] == 240.0
+
+
 def test_rollstable_timecell_budget_cap_reallocates_to_core() -> None:
     audit = pd.DataFrame(
         [

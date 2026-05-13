@@ -21,6 +21,7 @@ ROLLSTABLE_TIMECELL_SOURCE = "rollstable_timecell_oos"
 ROLLSTABLE_TIMECELL_LABEL = "rollstable_oos_2010_2019_timecell_month_hour"
 ROLLSTABLE_TIMECELL_FAMILY = "rollstable_timecell_direction_map"
 BAR_BEST_SOURCE = "bar_best_walkforward"
+LIGHTGLOW_SOURCE = "lightglow_research"
 
 
 @dataclass(frozen=True)
@@ -239,6 +240,80 @@ def augment_audit_with_bar_best(audit: pd.DataFrame, args: argparse.Namespace) -
     return pd.concat([existing, pd.DataFrame(rows)], ignore_index=True, sort=False)
 
 
+def lightglow_label_column(trades: pd.DataFrame) -> str:
+    for column in ["strategy_label", "candidate", "portfolio_rule", "strategy_name", "selected_alias"]:
+        if column in trades.columns:
+            return column
+    return ""
+
+
+def filter_lightglow_research_window(trades: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
+    frame = trades.copy()
+    frame["entry_ts"] = pd.to_datetime(frame["entry_ts"], utc=True, errors="coerce")
+    frame = frame[frame["entry_ts"].notna()].copy()
+    train_end = str(getattr(args, "lightglow_train_end", "") or "")
+    if train_end:
+        train_end_ts = pd.Timestamp(train_end, tz="UTC")
+        frame = frame[frame["entry_ts"] >= train_end_ts].copy()
+    return frame.reset_index(drop=True)
+
+
+def augment_audit_with_lightglow(audit: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
+    path_value = str(getattr(args, "lightglow_trades", "") or "")
+    if not path_value:
+        return audit
+    path = Path(path_value)
+    if not path.exists() or not path.is_file():
+        return audit
+    trades = read_csv(path)
+    if trades.empty or not {"entry_ts", "exit_ts", "net_points", "direction"}.issubset(trades.columns):
+        return audit
+    label_column = lightglow_label_column(trades)
+    if not label_column:
+        return audit
+    trades = filter_lightglow_research_window(trades, args)
+    if trades.empty:
+        return audit
+
+    rows: list[dict[str, Any]] = []
+    for label, group in trades.groupby(trades[label_column].astype(str)):
+        summary = summarize_for_audit(group)
+        if summary["net_points"] <= 0.0:
+            continue
+        row = {column: np.nan for column in audit.columns}
+        row.update(
+            {
+                "strategy_source": LIGHTGLOW_SOURCE,
+                "strategy_label": str(label),
+                "candidate": f"Lightglow research candidate after train cutoff: {label}",
+                "candidate_key": str(label),
+                "family": "lightglow_premium_discount_reversal",
+                "sample_start_year": int(group["entry_ts"].dt.year.min()),
+                "sample_end_year": int(group["entry_ts"].dt.year.max()),
+                "sample_years": float(group["entry_ts"].dt.year.nunique()),
+                "long_term_research_pass": False,
+                "paper_validation_pass": False,
+                "execution_validation_pass": False,
+                "live_risk_limits_pass": False,
+                "production_ready": False,
+                "readiness_tier": "continue_research",
+                "deployment_tier": RESEARCH_TIER,
+                "feature_family": "lightglow_premium_discount_reversal",
+                "eligible_for_composite": True,
+                "coverage_candidate": False,
+                "cost_3_125_net_points": summary["net_points"],
+                **summary,
+            }
+        )
+        row["priority_score"] = priority_score(pd.Series(row))
+        rows.append(row)
+    if not rows:
+        return audit
+    labels = {str(row["strategy_label"]) for row in rows}
+    existing = audit[~audit["strategy_label"].astype(str).isin(labels)].copy()
+    return pd.concat([existing, pd.DataFrame(rows)], ignore_index=True, sort=False)
+
+
 def deployment_tier(row: pd.Series) -> str:
     if as_bool(row.get("long_term_research_pass")):
         return CORE_TIER
@@ -273,6 +348,8 @@ def feature_family(row: pd.Series) -> str:
         return ROLLSTABLE_TIMECELL_FAMILY
     if source == BAR_BEST_SOURCE:
         return bar_best_family(label)
+    if source == LIGHTGLOW_SOURCE:
+        return "lightglow_premium_discount_reversal"
     return source or "unknown"
 
 
@@ -340,6 +417,25 @@ def normalize_bar_best_trades(path: str | Path, audit: pd.DataFrame) -> pd.DataF
     return normalize_trade_columns(frame, audit)
 
 
+def normalize_lightglow_trades(path: str | Path, audit: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
+    if not str(path):
+        return pd.DataFrame()
+    trades = read_csv(path)
+    if trades.empty:
+        return pd.DataFrame()
+    label_column = lightglow_label_column(trades)
+    if not label_column:
+        return pd.DataFrame()
+    frame = filter_lightglow_research_window(trades, args)
+    if frame.empty:
+        return pd.DataFrame()
+    frame["strategy_source"] = LIGHTGLOW_SOURCE
+    frame["strategy_label"] = frame[label_column].astype(str)
+    if "gross_points" not in frame:
+        frame["gross_points"] = frame["net_points"]
+    return normalize_trade_columns(frame, audit)
+
+
 def normalize_trade_columns(trades: pd.DataFrame, audit: pd.DataFrame) -> pd.DataFrame:
     if trades.empty:
         return pd.DataFrame()
@@ -392,6 +488,7 @@ def load_trade_pool(args: argparse.Namespace, audit: pd.DataFrame) -> pd.DataFra
             str(getattr(args, "rollstable_timecell_label", ROLLSTABLE_TIMECELL_LABEL)),
         ),
         normalize_bar_best_trades(getattr(args, "bar_best_trades", ""), audit),
+        normalize_lightglow_trades(getattr(args, "lightglow_trades", ""), audit, args),
     ]
     frames = [frame for frame in frames if not frame.empty]
     if not frames:
@@ -1650,6 +1747,7 @@ def write_outputs(args: argparse.Namespace) -> dict[str, object]:
     audit = load_audit_metadata(args.audit)
     audit = augment_audit_with_rollstable_timecell(audit, args)
     audit = augment_audit_with_bar_best(audit, args)
+    audit = augment_audit_with_lightglow(audit, args)
     trades = load_trade_pool(args, audit)
     min_full_year_trades = int(getattr(args, "min_full_year_trades", 0))
     max_walkforward_years = int(getattr(args, "max_walkforward_years", 0))
@@ -1679,6 +1777,8 @@ def write_outputs(args: argparse.Namespace) -> dict[str, object]:
         "screenshot_trades": args.screenshot_trades,
         "rollstable_timecell_trades": getattr(args, "rollstable_timecell_trades", ""),
         "bar_best_trades": getattr(args, "bar_best_trades", ""),
+        "lightglow_trades": getattr(args, "lightglow_trades", ""),
+        "lightglow_train_end": getattr(args, "lightglow_train_end", ""),
     }
     html_text = build_html(
         best=best,
@@ -1735,6 +1835,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rollstable-timecell-trades", default=".tmp/nq-2010train-2020test-timecell-best-trades.csv")
     parser.add_argument("--rollstable-timecell-label", default=ROLLSTABLE_TIMECELL_LABEL)
     parser.add_argument("--bar-best-trades", default="")
+    parser.add_argument("--lightglow-trades", default="")
+    parser.add_argument("--lightglow-train-end", default="2022-01-01")
     parser.add_argument("--report", default="reports/NQ-multi-strategy-composite-optimizer.html")
     parser.add_argument("--selected-trades-output", default=".tmp/nq-multi-strategy-composite-selected-trades.csv")
     parser.add_argument("--dropped-trades-output", default=".tmp/nq-multi-strategy-composite-dropped-trades.csv")
