@@ -847,6 +847,8 @@ def paper_validation_plan() -> pd.DataFrame:
                 "duration": "5 trading days",
                 "minimum_samples": 50,
                 "pass_gate": "no stale signals, no same-bar exits, no unsupported adapter path",
+                "log_fields": "strategy_id, signal_ts, confirmed_ts, side, planned_entry, adapter_status, reject_reason",
+                "exception_handling": "block order emission on stale, unsupported, or same-bar signals; page operator",
                 "failure_action": "blocked until signal adapter is fixed",
             },
             {
@@ -854,6 +856,8 @@ def paper_validation_plan() -> pd.DataFrame:
                 "duration": "4 weeks",
                 "minimum_samples": 200,
                 "pass_gate": "timecell remains positive on shadow basis and does not increase drawdown tail",
+                "log_fields": "signal_ts, cell_key, side, hypothetical_entry, hypothetical_exit, net_points, veto_reason",
+                "exception_handling": "record only; never place orders while 0.05 NQ cannot map to integer contracts",
                 "failure_action": "keep timecell out of executable portfolio",
             },
             {
@@ -861,6 +865,8 @@ def paper_validation_plan() -> pd.DataFrame:
                 "duration": "4-8 weeks",
                 "minimum_samples": 300,
                 "pass_gate": "net points > 0, PF >= 1.20, max consecutive losses <= 4, no daily risk breach",
+                "log_fields": "signal_ts, order_id, fill_ts, fill_price, slippage_points, exit_reason, pnl_points, risk_state",
+                "exception_handling": "halt on daily loss, reject burst, data gap, abnormal spread/volatility, or drawdown trigger",
                 "failure_action": "research-only; retrain is not allowed until new evaluation split is defined",
             },
         ]
@@ -930,6 +936,18 @@ Status: `{readiness['status']}`
 
 This report does not approve live trading. It audits whether the research combo can enter guarded paper validation.
 
+## Strategy Principle And Market Features
+
+- Lightglow uses Premium/Discount location, swing zones, EMA context, volume-price pressure, and range position; action maps are selected only from train windows.
+- Timecell uses a 2010-2019 trained month/hour directional map at `0.05` risk weight; current conclusion keeps it shadow-only because the contract granularity is not executable.
+- Extreme Timecell long-against-downtrend cases can be detected, but reverse-short validation is `reverse_not_proven`; use it as avoid-long risk control only.
+
+## Frozen Configuration
+
+- Walk-forward windows: `2020-2021 -> 2022`, `2020-2022 -> 2023`, `2021-2023 -> 2024`, `2022-2024 -> 2025`.
+- Lightglow paper action: MNQ validation only, starting smaller than one NQ.
+- Timecell paper action: shadow-record unless a separate integer-contract rule is approved.
+
 ## Headline
 
 - Raw trades: `{int(summary['raw_summary']['trades']):,}`
@@ -937,6 +955,20 @@ This report does not approve live trading. It audits whether the research combo 
 - Raw PF: `{summary['raw_summary']['profit_factor']:.3f}`
 - Risk-budgeted net points: `{summary['budgeted_summary']['net_points']:.2f}`
 - Risk-budgeted PF: `{summary['budgeted_summary']['profit_factor']:.3f}`
+- Leakage passed: `{summary.get('leakage_passed', False)}`
+- Walk-forward rows: `{summary.get('walk_forward_rows', 0)}`
+
+## Leakage, Walk-Forward, And Stress
+
+- Future perturbation audit hashes pre-cutoff OHLCV features, Lightglow signal columns, and executable trade signatures.
+- Same-bar exits and entry-before-signal violations are checked in the leakage table.
+- Stress coverage includes extra cost, 1/2/3 bar latency, fixed slippage, ATR/range slippage, and session-specific slippage.
+
+## Risk Budget And Paper Validation
+
+- Risk budget prevents weak-edge coverage from being scaled equally with the main Lightglow component.
+- The paper validation plan logs signal timestamps, order/fill fields, slippage, exit reason, PnL, risk state, reject reasons, and exception halts.
+- Current status is blocked until live/paper adapters can express Lightglow and Timecell signals, exits, position sizing, and risk controls.
 
 ## Blockers
 
@@ -1123,7 +1155,7 @@ def build_html_report(
     </section>
     <section>
       <h2>纸盘验证计划</h2>
-      {html_table(paper_plan, [("phase", "阶段"), ("duration", "周期"), ("minimum_samples", "最低样本"), ("pass_gate", "通过门槛"), ("failure_action", "失败处理")])}
+      {html_table(paper_plan, [("phase", "阶段"), ("duration", "周期"), ("minimum_samples", "最低样本"), ("pass_gate", "通过门槛"), ("log_fields", "日志字段"), ("exception_handling", "异常处理"), ("failure_action", "失败处理")])}
     </section>
   </main>
 </body>

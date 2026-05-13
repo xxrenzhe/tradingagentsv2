@@ -1,4 +1,4 @@
-phase,duration,minimum_samples,pass_gate,failure_action
-dry_run_signal,5 trading days,50,"no stale signals, no same-bar exits, no unsupported adapter path",blocked until signal adapter is fixed
-shadow_timecell,4 weeks,200,timecell remains positive on shadow basis and does not increase drawdown tail,keep timecell out of executable portfolio
-mnq_lightglow_paper,4-8 weeks,300,"net points > 0, PF >= 1.20, max consecutive losses <= 4, no daily risk breach",research-only; retrain is not allowed until new evaluation split is defined
+phase,duration,minimum_samples,pass_gate,log_fields,exception_handling,failure_action
+dry_run_signal,5 trading days,50,"no stale signals, no same-bar exits, no unsupported adapter path","strategy_id, signal_ts, confirmed_ts, side, planned_entry, adapter_status, reject_reason","block order emission on stale, unsupported, or same-bar signals; page operator",blocked until signal adapter is fixed
+shadow_timecell,4 weeks,200,timecell remains positive on shadow basis and does not increase drawdown tail,"signal_ts, cell_key, side, hypothetical_entry, hypothetical_exit, net_points, veto_reason",record only; never place orders while 0.05 NQ cannot map to integer contracts,keep timecell out of executable portfolio
+mnq_lightglow_paper,4-8 weeks,300,"net points > 0, PF >= 1.20, max consecutive losses <= 4, no daily risk breach","signal_ts, order_id, fill_ts, fill_price, slippage_points, exit_reason, pnl_points, risk_state","halt on daily loss, reject burst, data gap, abnormal spread/volatility, or drawdown trigger",research-only; retrain is not allowed until new evaluation split is defined
