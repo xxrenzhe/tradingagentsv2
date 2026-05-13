@@ -1,0 +1,4 @@
+phase,duration,minimum_samples,pass_gate,failure_action
+dry_run_signal,5 trading days,50,"no stale signals, no same-bar exits, no unsupported adapter path",blocked until signal adapter is fixed
+shadow_timecell,4 weeks,200,timecell remains positive on shadow basis and does not increase drawdown tail,keep timecell out of executable portfolio
+mnq_lightglow_paper,4-8 weeks,300,"net points > 0, PF >= 1.20, max consecutive losses <= 4, no daily risk breach",research-only; retrain is not allowed until new evaluation split is defined

@@ -201,6 +201,91 @@ def stress_table(trades: pd.DataFrame, extras: tuple[float, ...] = (0.0, 1.5, 2.
     return pd.DataFrame(rows)
 
 
+def add_prior_trend_context(trades: pd.DataFrame, bars: pd.DataFrame) -> pd.DataFrame:
+    context = bars[["ts", "Close"]].copy()
+    for span in (20, 60, 200):
+        context[f"ema{span}"] = context["Close"].ewm(span=span, adjust=False).mean()
+    for lookback in (15, 30, 60, 120):
+        context[f"mom{lookback}"] = context["Close"] - context["Close"].shift(lookback)
+    context["ctx_ts"] = (context["ts"] + pd.Timedelta(minutes=1)).astype("datetime64[ns, UTC]")
+    frame = trades.copy().sort_values("entry_ts")
+    frame["entry_ts"] = frame["entry_ts"].astype("datetime64[ns, UTC]")
+    return pd.merge_asof(
+        frame,
+        context.drop(columns=["ts"]).sort_values("ctx_ts"),
+        left_on="entry_ts",
+        right_on="ctx_ts",
+        direction="backward",
+    )
+
+
+def timecell_trend_veto_mask(trades_with_context: pd.DataFrame, *, momentum_threshold: float) -> pd.Series:
+    timecell = trades_with_context["strategy_source"].astype(str).eq("rollstable_timecell_oos")
+    long_against_downtrend = (
+        timecell
+        & trades_with_context["direction"].eq(1)
+        & (trades_with_context["Close"] < trades_with_context["ema20"])
+        & (trades_with_context["ema20"] < trades_with_context["ema60"])
+        & (trades_with_context["mom15"] < -momentum_threshold)
+        & (trades_with_context["mom30"] < -momentum_threshold)
+        & (trades_with_context["mom60"] < -momentum_threshold)
+    )
+    short_against_uptrend = (
+        timecell
+        & trades_with_context["direction"].eq(-1)
+        & (trades_with_context["Close"] > trades_with_context["ema20"])
+        & (trades_with_context["ema20"] > trades_with_context["ema60"])
+        & (trades_with_context["mom15"] > momentum_threshold)
+        & (trades_with_context["mom30"] > momentum_threshold)
+        & (trades_with_context["mom60"] > momentum_threshold)
+    )
+    return (long_against_downtrend | short_against_uptrend).fillna(False)
+
+
+def timecell_trend_veto_diagnostics(
+    trades: pd.DataFrame,
+    bars: pd.DataFrame,
+    thresholds: tuple[float, ...] = (0.0, 25.0, 50.0, 75.0, 100.0),
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    frame = add_prior_trend_context(trades, bars)
+    rows: list[dict[str, object]] = []
+    worst_index = frame["net_points"].idxmin()
+    for threshold in thresholds:
+        veto = timecell_trend_veto_mask(frame, momentum_threshold=threshold)
+        kept = frame.loc[~veto].copy()
+        vetoed = frame.loc[veto].copy()
+        yearly_trades = kept.groupby(kept["entry_ts"].dt.year).size()
+        yearly_net = kept.groupby(kept["entry_ts"].dt.year)["net_points"].sum()
+        rows.append(
+            {
+                "threshold_points": threshold,
+                "vetoed_trades": int(veto.sum()),
+                "vetoed_net_points": float(vetoed["net_points"].sum()) if not vetoed.empty else 0.0,
+                "kept_net_points": float(kept["net_points"].sum()),
+                "kept_profit_factor": profit_factor(kept["net_points"]),
+                "kept_worst_trade_points": float(kept["net_points"].min()) if not kept.empty else 0.0,
+                "kept_min_full_year_trades": int(yearly_trades.min()) if not yearly_trades.empty else 0,
+                "kept_min_full_year_net_points": float(yearly_net.min()) if not yearly_net.empty else 0.0,
+                "filters_original_worst_trade": bool(veto.loc[worst_index]),
+            }
+        )
+    worst_context = frame.loc[[worst_index], [
+        "entry_ts",
+        "strategy_source",
+        "direction",
+        "net_points",
+        "Close",
+        "ema20",
+        "ema60",
+        "ema200",
+        "mom15",
+        "mom30",
+        "mom60",
+        "mom120",
+    ]].copy()
+    return pd.DataFrame(rows), worst_context
+
+
 def fmt_num(value: object, digits: int = 2) -> str:
     number = as_float(value)
     return f"{number:,.{digits}f}"
@@ -403,6 +488,7 @@ def build_report(
     recent_months = monthly_table(composite_trades)
     sources = source_table(composite_trades)
     stress = stress_table(oos_trades)
+    veto_diagnostics, worst_context = timecell_trend_veto_diagnostics(composite_trades, bars)
     best_trade = composite_trades.loc[composite_trades["net_points"].idxmax()]
     worst_trade = composite_trades.loc[composite_trades["net_points"].idxmin()]
     best_lightglow = oos_trades.loc[oos_trades["net_points"].idxmax()] if not oos_trades.empty else best_trade
@@ -532,6 +618,19 @@ def build_report(
     </section>
 
     <section>
+      <h2>Timecell 急趋势反向 Veto 诊断</h2>
+      <div class="note warn">
+        <p><strong>问题：</strong>组合最差交易来自 <code>rollstable_timecell_oos</code>：进场前已经是明确急跌结构，timecell 却按统计时段偏置做多。</p>
+        <p><strong>因果过滤规则：</strong>只使用进场前一根已收盘 K 线。如果 timecell 做多，但 <code>Close &lt; EMA20 &lt; EMA60</code> 且 15/30/60 分钟动量同时小于负阈值，则跳过；做空时使用对称的急涨 veto。</p>
+        <p><strong>结论：</strong>阈值过宽会删掉大量盈利 timecell 交易；阈值约 100 点只过滤极端反向趋势，历史上可以过滤这笔最差交易，并且不破坏年度交易数门槛。该规则应进入 paper-readiness 审计，而不是直接当作已生产策略。</p>
+      </div>
+      <h3>最差交易入场前上下文</h3>
+      {html_table(worst_context, [("entry_ts", "入场"), ("strategy_source", "来源"), ("direction", "方向"), ("net_points", "净点"), ("Close", "前收盘"), ("ema20", "EMA20"), ("ema60", "EMA60"), ("ema200", "EMA200"), ("mom15", "15m动量"), ("mom30", "30m动量"), ("mom60", "60m动量"), ("mom120", "120m动量")])}
+      <h3>阈值扫描</h3>
+      {html_table(veto_diagnostics, [("threshold_points", "动量阈值"), ("vetoed_trades", "过滤笔数"), ("vetoed_net_points", "被过滤净点"), ("kept_net_points", "保留净点"), ("kept_profit_factor", "保留PF"), ("kept_worst_trade_points", "保留最差单笔"), ("kept_min_full_year_trades", "保留最低年交易"), ("kept_min_full_year_net_points", "保留最低年净点"), ("filters_original_worst_trade", "过滤原最差")])}
+    </section>
+
+    <section>
       <h2>最近月度表现</h2>
       {html_table(recent_months, [("month", "月份"), ("trades", "交易数"), ("net_points", "净点")])}
     </section>
@@ -566,6 +665,7 @@ def build_report(
         "oos_lightglow_summary": oos_summary,
         "best_trade_net_points": float(best_trade["net_points"]),
         "worst_trade_net_points": float(worst_trade["net_points"]),
+        "timecell_trend_veto": veto_diagnostics.to_dict(orient="records"),
         "report_generated_at": generated_at,
     }
     return html_doc, summary

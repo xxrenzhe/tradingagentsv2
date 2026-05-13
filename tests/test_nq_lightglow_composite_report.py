@@ -40,6 +40,30 @@ def _write_bars(path: Path) -> None:
         pickle.dump({"bars": pd.DataFrame(rows)}, file)
 
 
+def _write_downtrend_bars(path: Path) -> None:
+    ts = pd.date_range("2022-01-03 14:00", periods=260, freq="min", tz="UTC")
+    rows = []
+    for index, stamp in enumerate(ts):
+        if index < 120:
+            base = 15100.0 - index * 4.0
+        else:
+            base = 14620.0 + (index - 120) * 0.15
+        close = base - 0.8
+        rows.append(
+            {
+                "ts": stamp,
+                "symbol": "NQH2",
+                "Open": base,
+                "High": base + 1.0,
+                "Low": close - 1.0,
+                "Close": close,
+                "Volume": 200 + index,
+            }
+        )
+    with path.open("wb") as file:
+        pickle.dump({"bars": pd.DataFrame(rows)}, file)
+
+
 def _trade_rows() -> list[dict[str, object]]:
     return [
         {
@@ -156,4 +180,40 @@ def test_lightglow_composite_report_writes_metrics_and_trade_charts(tmp_path: Pa
     assert "Lightglow OOS 成本压力" in html
     assert result["raw_summary"]["trades"] == 3.0
     assert result["risk_budgeted_summary"]["net_points"] > result["raw_summary"]["net_points"]
+    assert "Timecell 急趋势反向 Veto 诊断" in html
+    assert result["timecell_trend_veto"]
     assert summary.exists()
+
+
+def test_timecell_trend_veto_flags_long_against_confirmed_downtrend(tmp_path: Path) -> None:
+    bars_path = tmp_path / "downtrend-bars.pkl"
+    _write_downtrend_bars(bars_path)
+    bars = report_script.load_bars(bars_path)
+    trades = pd.DataFrame(
+        [
+            {
+                "entry_ts": "2022-01-03 15:40:00+00:00",
+                "exit_ts": "2022-01-03 17:10:00+00:00",
+                "strategy_source": "rollstable_timecell_oos",
+                "strategy_label": "rollstable_trainpf105_timecell",
+                "feature_family": "rollstable_timecell_direction_map",
+                "direction": 1,
+                "entry_price": 14960.0,
+                "exit_price": 14880.0,
+                "gross_points": -80.0,
+                "net_points": -80.625,
+                "risk_weight": 0.05,
+            }
+        ]
+    )
+    trades["entry_ts"] = pd.to_datetime(trades["entry_ts"], utc=True)
+    trades["exit_ts"] = pd.to_datetime(trades["exit_ts"], utc=True)
+
+    diagnostics, context = report_script.timecell_trend_veto_diagnostics(trades, bars, thresholds=(50.0,))
+
+    assert diagnostics.iloc[0]["filters_original_worst_trade"]
+    assert diagnostics.iloc[0]["vetoed_trades"] == 1
+    assert context.iloc[0]["Close"] < context.iloc[0]["ema20"] < context.iloc[0]["ema60"]
+    assert context.iloc[0]["mom15"] < -50.0
+    assert context.iloc[0]["mom30"] < -50.0
+    assert context.iloc[0]["mom60"] < -50.0
