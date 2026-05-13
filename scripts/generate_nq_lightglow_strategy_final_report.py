@@ -65,6 +65,90 @@ def yearly(trades: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def recompute_no_same_bar_exits(bars: pd.DataFrame, trades: pd.DataFrame) -> pd.DataFrame:
+    """Reprice exits from the bar after entry to avoid 1m intrabar path ambiguity."""
+    if trades.empty:
+        return trades.copy()
+
+    costs = BacktestCosts()
+    bars = bars.reset_index(drop=True)
+    ts_to_index = pd.Series(np.arange(len(bars), dtype=int), index=pd.to_datetime(bars["ts"], utc=True))
+    high = bars["High"].to_numpy(dtype=float)
+    low = bars["Low"].to_numpy(dtype=float)
+    close = bars["Close"].to_numpy(dtype=float)
+    symbols = bars["symbol"].astype(str).to_numpy()
+    timestamps = bars["ts"].to_numpy()
+
+    rows: list[dict[str, Any]] = []
+    for _, trade in trades.iterrows():
+        entry_ts = pd.Timestamp(trade["entry_ts"])
+        if entry_ts not in ts_to_index.index:
+            continue
+        entry_index = int(ts_to_index.loc[entry_ts])
+        first_exit_check = entry_index + 1
+        if first_exit_check >= len(bars):
+            continue
+
+        direction = int(trade["direction"])
+        entry_symbol = symbols[entry_index]
+        entry_price = float(trade["entry_price"])
+        stop_distance = float(trade["stop_distance_points"])
+        target_distance = float(trade["target_distance_points"])
+        horizon = int(trade["horizon_minutes"])
+        planned_exit = min(entry_index + horizon, len(bars) - 1)
+        stop_price = entry_price + stop_distance if direction < 0 else entry_price - stop_distance
+        target_price = entry_price - target_distance if direction < 0 else entry_price + target_distance
+        exit_index = planned_exit
+        exit_price = float(close[planned_exit])
+        exit_reason = "time_no_same_bar"
+
+        for path_index in range(first_exit_check, planned_exit + 1):
+            if symbols[path_index] != entry_symbol:
+                exit_index = max(first_exit_check, path_index - 1)
+                exit_price = float(close[exit_index])
+                exit_reason = "symbol_change"
+                break
+            if direction < 0:
+                stop_hit = high[path_index] >= stop_price
+                target_hit = low[path_index] <= target_price
+            else:
+                stop_hit = low[path_index] <= stop_price
+                target_hit = high[path_index] >= target_price
+            if stop_hit:
+                exit_index = path_index
+                exit_price = stop_price
+                exit_reason = "stop_loss"
+                break
+            if target_hit:
+                exit_index = path_index
+                exit_price = target_price
+                exit_reason = "take_profit"
+                break
+
+        gross_points = (exit_price - entry_price) * direction
+        net_points = gross_points - costs.round_trip_cost_points
+        row = trade.to_dict()
+        row.update(
+            {
+                "original_exit_ts": trade["exit_ts"],
+                "original_exit_price": trade["exit_price"],
+                "original_exit_reason": trade["exit_reason"],
+                "original_gross_points": trade["gross_points"],
+                "original_net_points": trade["net_points"],
+                "exit_ts": timestamps[exit_index],
+                "exit_index": int(exit_index),
+                "exit_price": float(exit_price),
+                "exit_reason": exit_reason,
+                "gross_points": float(gross_points),
+                "net_points": float(net_points),
+                "net_dollars": float(net_points * costs.point_value),
+                "no_same_bar_exit": True,
+            }
+        )
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def fmt(value: Any, digits: int = 2) -> str:
     if value is None:
         return "N/A"
@@ -189,6 +273,8 @@ def main() -> int:
         end_date=args.end_date,
         cache_path=Path(args.bars_cache),
     )
+    original_summary = summarize(trades)
+    trades = recompute_no_same_bar_exits(bars, trades)
     summary = summarize(trades)
     full_smc = summarize(smc_trades) if not smc_trades.empty else {}
     year = yearly(trades)
@@ -212,6 +298,12 @@ def main() -> int:
         ("Positive Years", pct(chosen_pressure.iloc[0]["positive_year_rate"] if not chosen_pressure.empty else 0)),
     ]
     card_html = "".join(f"<div class='card'><span>{label}</span><strong>{value}</strong></div>" for label, value in cards)
+    original_compare = pd.DataFrame(
+        [
+            {"mode": "original_intrabar_bracket", **original_summary},
+            {"mode": "no_same_bar_exit", **summary},
+        ]
+    )
     agg_html = table(
         pd.concat([chosen_agg, staged_agg], ignore_index=True),
         ["feature_id", "exit_mode", "selected_folds", "test_trades", "test_net_points", "test_profit_factor", "test_win_rate", "positive_test_fold_rate"],
@@ -257,7 +349,7 @@ def main() -> int:
 
   <h2>核心结论</h2>
   <p class="warn">直接把 lightglow/SMC 截图规则翻译成“PD 区 + sweep + CHoCH/BOS + MACD”的策略，在 2020+ 全样本为负：{fmt(full_smc.get("trades", 0), 0)} 笔，净 {fmt(full_smc.get("net_points", 0))} 点，PF {fmt(full_smc.get("profit_factor", 0), 3)}。因此最终不采用直译策略。</p>
-  <p class="note">最终采用通过 walk-forward 与成本压力测试的变体：<code>fast_rally_fade_us_rth</code>。它本质上是“急涨扫流动性后衰竭做空”：US RTH 中价格快速上冲、远离 VWAP/成交量放大，随后确认失败，下一根开盘做空，止损放在事件极值外，RR=1，最多 30 分钟。</p>
+  <p class="note">最终采用通过 walk-forward 与成本压力测试的变体：<code>fast_rally_fade_us_rth</code>。它本质上是“急涨扫流动性后衰竭做空”：US RTH 中价格快速上冲、远离 VWAP/成交量放大，随后确认失败，下一根开盘做空，止损放在事件极值外，RR=1，最多 30 分钟。本报告已重新计算为更保守的 <code>no-same-bar-exit</code>：入场所在 1分钟 K 线内不允许止盈/止损，至少从下一根 K 线才检查出场。</p>
 
   <h2>策略原理</h2>
   <ul>
@@ -271,13 +363,16 @@ def main() -> int:
   <h2>无未来数据说明</h2>
   <ul>
     <li>所有 entry 都是 <code>next_open</code>，事件确认后下一根开盘成交。</li>
+    <li>本报告的最终指标禁止 entry bar 内出场，规避 1分钟 OHLC 无法判断开盘后路径的问题。</li>
     <li>rolling/结构类条件只使用事件时刻之前已完成 K 线。</li>
     <li>同一根 K 线同时触及止盈/止损时，回测框架按保守路径处理。</li>
     <li>不使用 TradingView <code>lookahead_on</code>、未来日内高低点、未来 pivot 或事后绘制结构线。</li>
   </ul>
 
   <h2>Walk-Forward 与压力测试</h2>
+  <p>下表第一张是原始 walk-forward 候选选择结果，第二张是原始 intrabar bracket 与本报告 no-same-bar-exit 重算后的对比。</p>
   {agg_html}
+  {table(original_compare, ["mode", "trades", "net_points", "net_dollars", "profit_factor", "win_rate", "max_drawdown_points", "best_trade_points", "worst_trade_points"])}
   {pressure_html}
 
   <h2>年度 OOS 结果</h2>
