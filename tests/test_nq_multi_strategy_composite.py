@@ -174,6 +174,12 @@ def test_composite_optimizer_combines_core_and_research_with_conflict_resolution
         walkforward_output=str(walkforward),
         max_combo_size=3,
         max_per_family=1,
+        include_coverage_candidates=False,
+        coverage_max_per_family=1,
+        max_coverage_candidates=0,
+        min_full_year_trades=0,
+        full_year_start=2020,
+        full_year_end=0,
         min_train_years=1,
         min_train_trades=1,
         rank_on_common_window=True,
@@ -206,3 +212,151 @@ def test_composite_optimizer_combines_core_and_research_with_conflict_resolution
     assert "预算净点" in html
     assert "风险预算净点曲线" in html
     assert "research_extension" in html
+
+
+def _many_trades(label: str, year: int, count: int, points: float, *, start_day: int = 1) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for index in range(count):
+        day = start_day + index // 12
+        minute = (index % 12) * 5
+        rows.append(
+            {
+                "template": label,
+                "entry_ts": f"{year}-01-{day:02d} 14:{minute:02d}:00+00:00",
+                "exit_ts": f"{year}-01-{day:02d} 14:{minute + 1:02d}:00+00:00",
+                "direction": 1,
+                "net_points": points,
+                "gross_points": points,
+                "entry_index": index * 10,
+                "exit_index": index * 10 + 1,
+            }
+        )
+    return rows
+
+
+def test_annual_trade_floor_selects_coverage_combo_and_ignores_partial_year(tmp_path: Path) -> None:
+    audit = tmp_path / "audit.csv"
+    regime = tmp_path / "regime.csv"
+    ofs = tmp_path / "ofs.csv"
+    screenshot = tmp_path / "screenshot.csv"
+    report = tmp_path / "report.html"
+    selected = tmp_path / "selected.csv"
+    dropped = tmp_path / "dropped.csv"
+    ranking = tmp_path / "ranking.csv"
+    components = tmp_path / "components.csv"
+    walkforward = tmp_path / "walkforward.csv"
+
+    pd.DataFrame(
+        [
+            {
+                "strategy_source": "regime_transition",
+                "strategy_label": "profitable_core",
+                "candidate": "profitable_core",
+                "long_term_research_pass": True,
+                "readiness_tier": "promote_to_paper_validation",
+                "net_points": 1000.0,
+                "profit_factor": 4.0,
+                "net_to_drawdown": 20.0,
+                "positive_year_rate": 1.0,
+                "positive_180d_rate": 1.0,
+                "cost_3_125_net_points": 900.0,
+            },
+            {
+                "strategy_source": "screenshot_smc_momentum",
+                "strategy_label": "coverage_displacement",
+                "candidate": "coverage_displacement",
+                "long_term_research_pass": False,
+                "readiness_tier": "reject_current_form",
+                "net_points": -100.0,
+                "profit_factor": 0.9,
+                "net_to_drawdown": -1.0,
+                "positive_year_rate": 0.0,
+                "positive_180d_rate": 0.0,
+                "cost_3_125_net_points": -200.0,
+            },
+        ]
+    ).to_csv(audit, index=False)
+    pd.DataFrame(
+        [
+            {
+                "audit_label": "profitable_core",
+                "candidate": "profitable_core",
+                "entry_ts": "2020-01-01 13:00:00+00:00",
+                "exit_ts": "2020-01-01 13:01:00+00:00",
+                "direction": 1,
+                "net_points": 500.0,
+                "gross_points": 500.0,
+            },
+            {
+                "audit_label": "profitable_core",
+                "candidate": "profitable_core",
+                "entry_ts": "2021-01-01 13:00:00+00:00",
+                "exit_ts": "2021-01-01 13:01:00+00:00",
+                "direction": 1,
+                "net_points": 500.0,
+                "gross_points": 500.0,
+            },
+            {
+                "audit_label": "profitable_core",
+                "candidate": "profitable_core",
+                "entry_ts": "2022-01-01 13:00:00+00:00",
+                "exit_ts": "2022-01-01 13:01:00+00:00",
+                "direction": 1,
+                "net_points": 500.0,
+                "gross_points": 500.0,
+            },
+        ]
+    ).to_csv(regime, index=False)
+    pd.DataFrame(columns=["template", "entry_ts", "exit_ts", "direction", "net_points", "gross_points"]).to_csv(
+        ofs, index=False
+    )
+    pd.DataFrame(
+        _many_trades("coverage_displacement", 2020, 4, -1.0)
+        + _many_trades("coverage_displacement", 2021, 4, -1.0)
+        + _many_trades("coverage_displacement", 2022, 1, -1.0)
+    ).to_csv(screenshot, index=False)
+
+    args = Namespace(
+        audit=str(audit),
+        regime_trades=str(regime),
+        ofs_trades=str(ofs),
+        screenshot_trades=str(screenshot),
+        report=str(report),
+        selected_trades_output=str(selected),
+        dropped_trades_output=str(dropped),
+        ranking_output=str(ranking),
+        components_output=str(components),
+        walkforward_output=str(walkforward),
+        max_combo_size=2,
+        max_per_family=1,
+        include_coverage_candidates=True,
+        coverage_max_per_family=2,
+        max_coverage_candidates=2,
+        min_full_year_trades=4,
+        full_year_start=2020,
+        full_year_end=2021,
+        min_train_years=1,
+        min_train_trades=1,
+        rank_on_common_window=True,
+        generated_at="2026-05-13 00:00 UTC",
+    )
+
+    result = module.write_outputs(args)
+
+    assert result["best_labels"] == ["profitable_core", "coverage_displacement"]
+    assert result["best_eligibility"] == "coverage_research"
+    assert result["annual_trade_floor_pass"] is True
+    assert result["full_years_checked"] == [2020, 2021]
+    assert result["best_metrics"]["min_full_year_trades"] == 5.0
+    selected_frame = pd.read_csv(selected)
+    assert set(selected_frame["entry_ts"].str[:4]) == {"2020", "2021", "2022"}
+    ranking_frame = pd.read_csv(ranking)
+    core_only = ranking_frame[ranking_frame["combo"].eq("profitable_core")].iloc[0]
+    assert core_only["annual_trade_floor_pass"] == 0.0
+    assert core_only["annual_trade_floor_deficit"] == 6.0
+    html = report.read_text(encoding="utf-8")
+    assert "完整年份交易次数" in html
+    assert "coverage_research" in html
+    assert "年度交易次数约束" in html
+    assert "<td>2020</td>" in html
+    assert "<td>2,020</td>" not in html

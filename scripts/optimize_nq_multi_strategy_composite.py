@@ -16,6 +16,7 @@ import pandas as pd
 CORE_TIER = "core_long_term"
 RESEARCH_TIER = "research_extension"
 REJECT_TIER = "reject"
+DEFAULT_MIN_FULL_YEAR_TRADES = 1001
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,8 @@ def as_float(value: object, default: float = 0.0) -> float:
 def as_bool(value: object) -> bool:
     if isinstance(value, bool):
         return value
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return bool(value)
     if pd.isna(value):
         return False
     return str(value).strip().lower() in {"true", "1", "yes", "y"}
@@ -77,6 +80,7 @@ def load_audit_metadata(path: str | Path) -> pd.DataFrame:
     frame["eligible_for_composite"] = frame["deployment_tier"].isin({CORE_TIER, RESEARCH_TIER}) & (
         pd.to_numeric(frame["net_points"], errors="coerce").fillna(0.0) > 0.0
     )
+    frame["coverage_candidate"] = frame["deployment_tier"].eq(REJECT_TIER)
     return frame
 
 
@@ -198,8 +202,8 @@ def load_trade_pool(args: argparse.Namespace, audit: pd.DataFrame) -> pd.DataFra
     if not frames:
         return pd.DataFrame()
     pool = pd.concat(frames, ignore_index=True, sort=False)
-    eligible_labels = set(audit.loc[audit["eligible_for_composite"], "strategy_label"].astype(str))
-    return pool[pool["strategy_label"].isin(eligible_labels)].reset_index(drop=True)
+    audit_labels = set(audit["strategy_label"].astype(str))
+    return pool[pool["strategy_label"].isin(audit_labels)].reset_index(drop=True)
 
 
 def candidate_rows(audit: pd.DataFrame, trades: pd.DataFrame) -> pd.DataFrame:
@@ -214,10 +218,29 @@ def candidate_rows(audit: pd.DataFrame, trades: pd.DataFrame) -> pd.DataFrame:
     rows = audit.merge(counts, on=["strategy_source", "strategy_label"], how="left")
     rows["trade_rows"] = pd.to_numeric(rows["trade_rows"], errors="coerce").fillna(0).astype(int)
     rows["has_trade_coverage"] = rows["trade_rows"] > 0
+    rows["coverage_candidate"] = rows["deployment_tier"].eq(REJECT_TIER) & rows["has_trade_coverage"]
     return rows.sort_values(
         ["eligible_for_composite", "deployment_tier", "priority_score"],
         ascending=[False, True, False],
     ).reset_index(drop=True)
+
+
+def infer_full_years(trades: pd.DataFrame, *, start_year: int, end_year: int | None = None) -> tuple[int, ...]:
+    if trades.empty or "entry_ts" not in trades:
+        return tuple()
+    entry_ts = pd.to_datetime(trades["entry_ts"], utc=True)
+    if entry_ts.empty:
+        return tuple()
+    first_year = max(int(start_year), int(entry_ts.dt.year.min()))
+    if end_year is None or end_year <= 0:
+        last_ts = entry_ts.max()
+        inferred_end = int(last_ts.year)
+        if int(last_ts.month) < 12 or int(last_ts.day) < 29:
+            inferred_end -= 1
+        end_year = inferred_end
+    if end_year < first_year:
+        return tuple()
+    return tuple(range(first_year, int(end_year) + 1))
 
 
 def generate_combos(
@@ -226,20 +249,147 @@ def generate_combos(
     max_combo_size: int,
     require_core: bool,
     max_per_family: int,
+    include_coverage_candidates: bool = False,
+    coverage_max_per_family: int | None = None,
+    max_coverage_candidates: int | None = None,
 ) -> list[tuple[str, ...]]:
     eligible = candidates[candidates["eligible_for_composite"] & candidates["has_trade_coverage"]].copy()
+    if include_coverage_candidates:
+        coverage = candidates[candidates["coverage_candidate"] & candidates["has_trade_coverage"]].copy()
+        coverage = coverage.sort_values(["trade_rows", "priority_score"], ascending=[False, False])
+        if max_coverage_candidates is not None and max_coverage_candidates > 0:
+            coverage = coverage.head(max_coverage_candidates)
+        eligible = pd.concat([eligible, coverage], ignore_index=True, sort=False)
+        eligible = eligible.drop_duplicates("strategy_label", keep="first")
     labels = eligible["strategy_label"].astype(str).tolist()
     family_by_label = dict(zip(eligible["strategy_label"].astype(str), eligible["feature_family"].astype(str), strict=False))
     tier_by_label = dict(zip(eligible["strategy_label"].astype(str), eligible["deployment_tier"].astype(str), strict=False))
+    family_limit = coverage_max_per_family if include_coverage_candidates and coverage_max_per_family else max_per_family
     combos: list[tuple[str, ...]] = []
     for size in range(1, min(max_combo_size, len(labels)) + 1):
         for combo in itertools.combinations(labels, size):
             if require_core and CORE_TIER not in {tier_by_label[label] for label in combo}:
                 continue
             family_counts = pd.Series([family_by_label[label] for label in combo]).value_counts()
-            if int(family_counts.max()) > max_per_family:
+            if int(family_counts.max()) > family_limit:
                 continue
             combos.append(combo)
+    return combos
+
+
+def generate_coverage_combos(
+    candidates: pd.DataFrame,
+    seed_results: list[ComboResult],
+    *,
+    max_combo_size: int,
+    max_per_family: int,
+    max_coverage_candidates: int,
+    seed_count: int,
+) -> list[tuple[str, ...]]:
+    if max_combo_size <= 1 or max_coverage_candidates <= 0:
+        return []
+    covered = candidates[candidates["coverage_candidate"] & candidates["has_trade_coverage"]].copy()
+    if covered.empty:
+        return []
+    covered = covered.sort_values(["trade_rows", "priority_score"], ascending=[False, False]).head(max_coverage_candidates)
+    coverage_labels = covered["strategy_label"].astype(str).tolist()
+    family_by_label = dict(zip(candidates["strategy_label"].astype(str), candidates["feature_family"].astype(str), strict=False))
+    seeds: list[tuple[str, ...]] = []
+    for result in seed_results[:seed_count]:
+        if CORE_TIER in set(candidates.loc[candidates["strategy_label"].isin(result.labels), "deployment_tier"]):
+            seeds.append(result.labels)
+    core_labels = candidates[
+        candidates["deployment_tier"].eq(CORE_TIER) & candidates["has_trade_coverage"]
+    ]["strategy_label"].astype(str).tolist()
+    seeds.extend((label,) for label in core_labels)
+
+    combos: list[tuple[str, ...]] = []
+    seen: set[tuple[str, ...]] = set()
+    for seed in seeds:
+        seed = tuple(dict.fromkeys(seed))
+        remaining_slots = max_combo_size - len(seed)
+        if remaining_slots <= 0:
+            continue
+        available_coverage = [label for label in coverage_labels if label not in seed]
+        for count in range(1, min(remaining_slots, len(available_coverage)) + 1):
+            for prefix in itertools.combinations(available_coverage, count):
+                combo = seed + prefix
+                family_counts = pd.Series([family_by_label.get(label, "") for label in combo]).value_counts()
+                if int(family_counts.max()) > max_per_family:
+                    continue
+                if combo in seen:
+                    continue
+                seen.add(combo)
+                combos.append(combo)
+    return combos
+
+
+def fast_coverage_combos(
+    trades: pd.DataFrame,
+    candidates: pd.DataFrame,
+    audit: pd.DataFrame,
+    args: argparse.Namespace,
+) -> list[tuple[str, ...]]:
+    core_labels = candidates[
+        candidates["deployment_tier"].eq(CORE_TIER) & candidates["has_trade_coverage"]
+    ]["strategy_label"].astype(str).tolist()
+    if not core_labels:
+        return []
+    core_results = [
+        evaluate_combo(
+            trades,
+            audit,
+            (label,),
+            require_common_window=args.rank_on_common_window,
+            full_years=getattr(args, "full_years", tuple()),
+            annual_trade_floor=getattr(args, "min_full_year_trades", 0),
+            coverage_objective=getattr(args, "coverage_objective", False),
+        )
+        for label in core_labels
+    ]
+    best_core = max(core_results, key=lambda item: item.objective_score)
+    labels = list(best_core.labels)
+    combos = [tuple(labels)]
+    coverage_pool = candidates[candidates["coverage_candidate"] & candidates["has_trade_coverage"]].copy()
+    coverage_pool = coverage_pool.sort_values(["trade_rows", "priority_score"], ascending=[False, False]).head(
+        getattr(args, "max_coverage_candidates", 0)
+    )
+    remaining = coverage_pool["strategy_label"].astype(str).tolist()
+    family_by_label = dict(zip(candidates["strategy_label"].astype(str), candidates["feature_family"].astype(str), strict=False))
+    family_limit = getattr(args, "coverage_max_per_family", None) or args.max_per_family
+
+    current = best_core
+    while remaining and len(labels) < args.max_combo_size and current.metrics.get("annual_trade_floor_pass", 0.0) < 1.0:
+        current_deficit = current.metrics.get("annual_trade_floor_deficit", 0.0)
+        best_add: tuple[tuple[float, float, float], str, ComboResult] | None = None
+        for label in remaining:
+            proposed = tuple(labels + [label])
+            family_counts = pd.Series([family_by_label.get(item, "") for item in proposed]).value_counts()
+            if int(family_counts.max()) > family_limit:
+                continue
+            result = evaluate_combo(
+                trades,
+                audit,
+                proposed,
+                require_common_window=args.rank_on_common_window,
+                full_years=getattr(args, "full_years", tuple()),
+                annual_trade_floor=getattr(args, "min_full_year_trades", 0),
+                coverage_objective=getattr(args, "coverage_objective", False),
+            )
+            deficit_reduction = current_deficit - result.metrics.get("annual_trade_floor_deficit", 0.0)
+            key = (
+                deficit_reduction,
+                result.metrics.get("min_full_year_trades", 0.0),
+                result.objective_score,
+            )
+            if best_add is None or key > best_add[0]:
+                best_add = (key, label, result)
+        if best_add is None or best_add[0][0] <= 0:
+            break
+        labels.append(best_add[1])
+        remaining.remove(best_add[1])
+        current = best_add[2]
+        combos.append(tuple(labels))
     return combos
 
 
@@ -291,12 +441,21 @@ def risk_budget_map(audit: pd.DataFrame, labels: tuple[str, ...]) -> dict[str, f
         return {}
     core = meta[meta["deployment_tier"].eq(CORE_TIER)].copy()
     research = meta[meta["deployment_tier"].eq(RESEARCH_TIER)].copy()
-    if research.empty:
-        core_budget, research_budget = 1.0, 0.0
+    coverage = meta[meta["deployment_tier"].eq(REJECT_TIER)].copy()
+    if coverage.empty and research.empty:
+        core_budget, research_budget, coverage_budget = 1.0, 0.0, 0.0
+    elif coverage.empty and core.empty:
+        core_budget, research_budget, coverage_budget = 0.0, 1.0, 0.0
+    elif coverage.empty:
+        core_budget, research_budget, coverage_budget = 0.70, 0.30, 0.0
+    elif core.empty and research.empty:
+        core_budget, research_budget, coverage_budget = 0.0, 0.0, 1.0
     elif core.empty:
-        core_budget, research_budget = 0.0, 1.0
+        core_budget, research_budget, coverage_budget = 0.0, 0.55, 0.45
+    elif research.empty:
+        core_budget, research_budget, coverage_budget = 0.80, 0.0, 0.20
     else:
-        core_budget, research_budget = 0.70, 0.30
+        core_budget, research_budget, coverage_budget = 0.65, 0.20, 0.15
 
     budgets: dict[str, float] = {}
 
@@ -310,10 +469,47 @@ def risk_budget_map(audit: pd.DataFrame, labels: tuple[str, ...]) -> dict[str, f
 
     allocate(core, core_budget)
     allocate(research, research_budget)
+    allocate(coverage, coverage_budget)
     return budgets
 
 
-def summarize_trades(trades: pd.DataFrame, dropped: pd.DataFrame | None = None) -> dict[str, float]:
+def annual_trade_counts(trades: pd.DataFrame, years: tuple[int, ...]) -> dict[int, int]:
+    if not years:
+        return {}
+    if trades.empty or "entry_ts" not in trades:
+        return {year: 0 for year in years}
+    counts = trades.groupby(trades["entry_ts"].dt.year).size()
+    return {year: int(counts.get(year, 0)) for year in years}
+
+
+def annual_trade_floor_metrics(trades: pd.DataFrame, years: tuple[int, ...], floor: int) -> dict[str, float]:
+    counts = annual_trade_counts(trades, years)
+    if not counts or floor <= 0:
+        return {
+            "annual_trade_floor": float(floor),
+            "min_full_year_trades": 0.0,
+            "annual_trade_floor_pass": 1.0 if floor <= 0 else 0.0,
+            "annual_trade_floor_deficit": 0.0,
+            "full_years_checked": 0.0,
+        }
+    min_count = min(counts.values())
+    deficit = sum(max(int(floor) - count, 0) for count in counts.values())
+    return {
+        "annual_trade_floor": float(floor),
+        "min_full_year_trades": float(min_count),
+        "annual_trade_floor_pass": float(deficit == 0),
+        "annual_trade_floor_deficit": float(deficit),
+        "full_years_checked": float(len(counts)),
+    }
+
+
+def summarize_trades(
+    trades: pd.DataFrame,
+    dropped: pd.DataFrame | None = None,
+    *,
+    full_years: tuple[int, ...] = tuple(),
+    annual_trade_floor: int = 0,
+) -> dict[str, float]:
     if trades.empty:
         return {
             "trades": 0.0,
@@ -333,6 +529,7 @@ def summarize_trades(trades: pd.DataFrame, dropped: pd.DataFrame | None = None) 
             "risk_budgeted_net_points": 0.0,
             "risk_budgeted_max_drawdown_points": 0.0,
             "risk_budgeted_profit_factor": 0.0,
+            **annual_trade_floor_metrics(trades, full_years, annual_trade_floor),
         }
     frame = trades.sort_values(["entry_ts", "exit_ts"]).copy()
     net = pd.to_numeric(frame["net_points"], errors="coerce").fillna(0.0)
@@ -381,6 +578,7 @@ def summarize_trades(trades: pd.DataFrame, dropped: pd.DataFrame | None = None) 
         metrics["risk_budgeted_net_points"] = metrics["net_points"]
         metrics["risk_budgeted_max_drawdown_points"] = metrics["max_drawdown_points"]
         metrics["risk_budgeted_profit_factor"] = metrics["profit_factor"]
+    metrics.update(annual_trade_floor_metrics(frame, full_years, annual_trade_floor))
     return metrics
 
 
@@ -402,12 +600,31 @@ def objective_score(metrics: dict[str, float], *, family_count: int, research_co
     return float((scored_net / risk) * stability * diversification * research_penalty * same_bar_penalty)
 
 
+def coverage_objective_score(
+    metrics: dict[str, float],
+    *,
+    family_count: int,
+    research_count: int,
+    coverage_count: int,
+) -> float:
+    base = objective_score(metrics, family_count=family_count, research_count=research_count)
+    deficit = metrics.get("annual_trade_floor_deficit", 0.0)
+    min_trades = metrics.get("min_full_year_trades", 0.0)
+    coverage_penalty = 1.0 - min(coverage_count, 8) * 0.03
+    if deficit > 0:
+        return float(-1_000_000.0 - deficit * 1000.0 + min_trades + base * 0.01)
+    return float(1_000_000.0 + min_trades * 10.0 + base * coverage_penalty)
+
+
 def evaluate_combo(
     trades: pd.DataFrame,
     audit: pd.DataFrame,
     labels: tuple[str, ...],
     *,
     require_common_window: bool,
+    full_years: tuple[int, ...] = tuple(),
+    annual_trade_floor: int = 0,
+    coverage_objective: bool = False,
 ) -> ComboResult:
     selected = trades[trades["strategy_label"].isin(labels)].copy()
     start: pd.Timestamp | None = None
@@ -420,13 +637,30 @@ def evaluate_combo(
             selected = selected[(selected["entry_ts"] >= start) & (selected["entry_ts"] <= end)]
     selected["risk_weight"] = selected["strategy_label"].map(risk_budget_map(audit, labels)).fillna(1.0)
     resolved, dropped = resolve_conflicts(selected)
-    metrics = summarize_trades(resolved, dropped)
+    metrics = summarize_trades(
+        resolved,
+        dropped,
+        full_years=full_years,
+        annual_trade_floor=annual_trade_floor,
+    )
     meta = audit[audit["strategy_label"].isin(labels)]
     family_count = int(meta["feature_family"].nunique()) if not meta.empty else 0
     research_count = int((meta["deployment_tier"] == RESEARCH_TIER).sum()) if not meta.empty else 0
-    eligibility = "production_core" if research_count == 0 else "research_diversified"
+    coverage_count = int((meta["deployment_tier"] == REJECT_TIER).sum()) if not meta.empty else 0
+    if coverage_count:
+        eligibility = "coverage_research"
+    else:
+        eligibility = "production_core" if research_count == 0 else "research_diversified"
     name = " + ".join(labels)
-    score = objective_score(metrics, family_count=family_count, research_count=research_count)
+    if coverage_objective:
+        score = coverage_objective_score(
+            metrics,
+            family_count=family_count,
+            research_count=research_count,
+            coverage_count=coverage_count,
+        )
+    else:
+        score = objective_score(metrics, family_count=family_count, research_count=research_count)
     return ComboResult(name, labels, resolved, dropped, metrics, score, eligibility, start, end)
 
 
@@ -436,20 +670,64 @@ def evaluate_combinations(
     audit: pd.DataFrame,
     args: argparse.Namespace,
 ) -> list[ComboResult]:
-    combos = generate_combos(
-        candidates,
-        max_combo_size=args.max_combo_size,
-        require_core=True,
-        max_per_family=args.max_per_family,
+    fast_coverage = bool(
+        getattr(args, "include_coverage_candidates", False)
+        and getattr(args, "min_full_year_trades", 0) > 0
+        and getattr(args, "coverage_objective", False)
     )
-    results = [
-        evaluate_combo(trades, audit, combo, require_common_window=args.rank_on_common_window)
+    if fast_coverage:
+        combos = fast_coverage_combos(trades, candidates, audit, args)
+    else:
+        combos = generate_combos(
+            candidates,
+            max_combo_size=args.max_combo_size,
+            require_core=True,
+            max_per_family=args.max_per_family,
+            include_coverage_candidates=False,
+        )
+    base_results = [
+        evaluate_combo(
+            trades,
+            audit,
+            combo,
+            require_common_window=args.rank_on_common_window,
+            full_years=getattr(args, "full_years", tuple()),
+            annual_trade_floor=getattr(args, "min_full_year_trades", 0),
+            coverage_objective=getattr(args, "coverage_objective", False),
+        )
         for combo in combos
     ]
+    results = base_results
+    if getattr(args, "include_coverage_candidates", False) and not fast_coverage:
+        coverage_combos = generate_coverage_combos(
+            candidates,
+            sorted(base_results, key=lambda item: item.objective_score, reverse=True),
+            max_combo_size=args.max_combo_size,
+            max_per_family=getattr(args, "coverage_max_per_family", None) or args.max_per_family,
+            max_coverage_candidates=getattr(args, "max_coverage_candidates", 0),
+            seed_count=getattr(args, "coverage_seed_count", 8),
+        )
+        coverage_results = [
+            evaluate_combo(
+                trades,
+                audit,
+                combo,
+                require_common_window=args.rank_on_common_window,
+                full_years=getattr(args, "full_years", tuple()),
+                annual_trade_floor=getattr(args, "min_full_year_trades", 0),
+                coverage_objective=getattr(args, "coverage_objective", False),
+            )
+            for combo in coverage_combos
+        ]
+        results = base_results + coverage_results
     return sorted(results, key=lambda item: item.objective_score, reverse=True)
 
 
-def select_best(results: list[ComboResult]) -> ComboResult:
+def select_best(results: list[ComboResult], *, annual_trade_floor: int = 0) -> ComboResult:
+    if annual_trade_floor > 0:
+        passing = [item for item in results if item.metrics.get("annual_trade_floor_pass", 0.0) >= 1.0]
+        if passing:
+            return max(passing, key=lambda item: item.objective_score)
     diversified = [item for item in results if len(item.labels) >= 2 and item.eligibility == "research_diversified"]
     if diversified:
         return max(diversified, key=lambda item: item.objective_score)
@@ -458,7 +736,8 @@ def select_best(results: list[ComboResult]) -> ComboResult:
         return max(multi, key=lambda item: item.objective_score)
     if results:
         return results[0]
-    return ComboResult("empty", tuple(), pd.DataFrame(), pd.DataFrame(), summarize_trades(pd.DataFrame()), 0.0, "none", None, None)
+    empty_metrics = summarize_trades(pd.DataFrame(), annual_trade_floor=annual_trade_floor)
+    return ComboResult("empty", tuple(), pd.DataFrame(), pd.DataFrame(), empty_metrics, 0.0, "none", None, None)
 
 
 def walk_forward_years(
@@ -469,7 +748,11 @@ def walk_forward_years(
 ) -> pd.DataFrame:
     if trades.empty:
         return pd.DataFrame()
-    years = sorted(pd.to_datetime(trades["entry_ts"], utc=True).dt.year.unique().tolist())
+    years = list(getattr(args, "full_years", tuple()))
+    if not years:
+        years = sorted(pd.to_datetime(trades["entry_ts"], utc=True).dt.year.unique().tolist())
+    if getattr(args, "max_walkforward_years", 0):
+        years = years[-int(args.max_walkforward_years) :]
     rows: list[dict[str, Any]] = []
     for year in years:
         train = trades[trades["entry_ts"].dt.year < year]
@@ -481,7 +764,13 @@ def walk_forward_years(
         train_args = argparse.Namespace(
             max_combo_size=args.max_combo_size,
             max_per_family=args.max_per_family,
+            include_coverage_candidates=False,
+            coverage_max_per_family=getattr(args, "coverage_max_per_family", None),
+            max_coverage_candidates=getattr(args, "max_coverage_candidates", None),
             rank_on_common_window=False,
+            full_years=tuple(),
+            min_full_year_trades=0,
+            coverage_objective=False,
         )
         train_results = evaluate_combinations(train, covered, audit, train_args)
         if not train_results:
@@ -519,6 +808,31 @@ def source_breakdown(trades: pd.DataFrame) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows).sort_values("net_points", ascending=False)
+
+
+def annual_trade_table(trades: pd.DataFrame, years: tuple[int, ...], floor: int) -> pd.DataFrame:
+    if not years:
+        return pd.DataFrame(columns=["year", "trades", "net_points", "floor", "floor_pass"])
+    if trades.empty:
+        return pd.DataFrame(
+            [{"year": year, "trades": 0, "net_points": 0.0, "floor": floor, "floor_pass": False} for year in years]
+        )
+    grouped = trades.groupby(trades["entry_ts"].dt.year)
+    counts = grouped.size()
+    net = grouped["net_points"].sum()
+    rows = []
+    for year in years:
+        trade_count = int(counts.get(year, 0))
+        rows.append(
+            {
+                "year": year,
+                "trades": trade_count,
+                "net_points": float(net.get(year, 0.0)),
+                "floor": int(floor),
+                "floor_pass": trade_count >= int(floor) if floor > 0 else True,
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def summarize_walk_forward(walk_forward: pd.DataFrame) -> dict[str, float]:
@@ -573,9 +887,13 @@ def svg_line(points: pd.DataFrame, *, width: int = 980, height: int = 300) -> st
 
 
 def fmt_metric(key: str, value: object) -> str:
+    if key.endswith("_pass"):
+        return "通过" if as_bool(value) else "未通过"
     if key.endswith("_rate") or key in {"win_rate", "positive_month_rate", "positive_year_rate"}:
         return f"{as_float(value) * 100:.1f}%"
-    if key in {"trades", "conflict_dropped"} or key.endswith("_trades") or key.endswith("_dropped"):
+    if key == "year":
+        return f"{int(as_float(value))}"
+    if key in {"trades", "conflict_dropped", "floor"} or key.endswith("_trades") or key.endswith("_dropped"):
         return f"{int(as_float(value)):,}"
     if key == "profit_factor" or key.endswith("_profit_factor"):
         number = as_float(value)
@@ -629,6 +947,9 @@ def build_html(
     walk_forward: pd.DataFrame,
     generated_at: str,
     source_paths: dict[str, str],
+    full_years: tuple[int, ...],
+    annual_trade_floor: int,
+    max_walkforward_years: int,
 ) -> str:
     metrics = best.metrics
     cards = [
@@ -637,6 +958,7 @@ def build_html(
         ("PF", "profit_factor"),
         ("预算净点", "risk_budgeted_net_points"),
         ("胜率", "win_rate"),
+        ("完整年份最少交易", "min_full_year_trades"),
         ("正年份率", "positive_year_rate"),
         ("冲突丢弃", "conflict_dropped"),
         ("同K进出率", "same_bar_exit_rate"),
@@ -649,7 +971,16 @@ def build_html(
     component_meta = candidates[candidates["strategy_label"].isin(best.labels)].copy()
     component_meta["risk_budget_fraction"] = component_meta["strategy_label"].map(risk_budget_map(candidates, best.labels)).fillna(0.0)
     breakdown = source_breakdown(best.trades)
+    annual_counts = annual_trade_table(best.trades, full_years, annual_trade_floor)
     wf_summary = summarize_walk_forward(walk_forward)
+    floor_status = "通过" if metrics.get("annual_trade_floor_pass", 0.0) >= 1.0 else "未通过"
+    coverage_note_class = "note" if metrics.get("annual_trade_floor_pass", 0.0) >= 1.0 else "note bad"
+    walkforward_scope = (
+        f"当前报告抽样最近 {max_walkforward_years:,} 个完整年份；如需全量年度验证，可运行 "
+        "<code>--max-walkforward-years 0</code>。"
+        if max_walkforward_years > 0
+        else "当前报告执行所有完整年份的年度验证。"
+    )
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -680,7 +1011,7 @@ def build_html(
     main {{ padding: 24px min(5vw, 58px) 56px; }}
     section {{ margin: 18px 0; padding: 22px; border: 1px solid var(--line); background: var(--panel); border-radius: 8px; }}
     .subtitle {{ max-width: 1050px; color: #c8d2df; font-size: 16px; }}
-    .metric-grid {{ display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 10px; margin-top: 20px; }}
+    .metric-grid {{ display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: 10px; margin-top: 20px; }}
     .metric {{ padding: 13px; border: 1px solid #2f3d4f; border-radius: 8px; background: #1e293b; }}
     .metric span {{ display: block; color: #b8c3d2; font-size: 12px; }}
     .metric strong {{ display: block; margin-top: 4px; font-size: 22px; color: #ffffff; }}
@@ -704,7 +1035,7 @@ def build_html(
 <body>
   <header>
     <h1>NQ 多策略组合优化报告</h1>
-    <p class="subtitle">组合目标：在长期通过的 regime-transition 核心策略上，谨慎叠加 OFS/SMC 等不同行情特征；所有组合必须经过冲突处理、共同样本窗口排名和年度 walk-forward 检查。生成时间：{safe_text(generated_at)}。</p>
+    <p class="subtitle">组合目标：在长期通过的 regime-transition 核心策略上，谨慎叠加 OFS/SMC 等不同行情特征；当前额外硬约束是每个完整年份至少 {annual_trade_floor:,} 笔交易，且仍需经过冲突处理、共同样本窗口排名和年度 walk-forward 检查。生成时间：{safe_text(generated_at)}。</p>
     <div class="metric-grid">{card_html}</div>
   </header>
   <main>
@@ -713,14 +1044,29 @@ def build_html(
       <div class="grid">
         <div class="note">
           <p><strong>组合：</strong><code>{safe_text(best.name)}</code></p>
-          <p><strong>资格：</strong>{safe_text(best.eligibility)}。如果组合包含 research_extension，它只能作为研究组合或纸盘小仓验证，不能等同于生产批准。</p>
+          <p><strong>资格：</strong>{safe_text(best.eligibility)}。如果组合包含 research_extension 或 coverage_research，它只能作为研究组合或纸盘小仓验证，不能等同于生产批准。</p>
           <p><strong>共同样本窗口：</strong>{safe_text(str(best.window_start.date()) if best.window_start is not None else "N/A")} 至 {safe_text(str(best.window_end.date()) if best.window_end is not None else "N/A")}。</p>
+        </div>
+        <div class="{coverage_note_class}">
+          <p><strong>年度交易次数约束：</strong>{floor_status}；检查年份：{safe_text(', '.join(str(year) for year in full_years) if full_years else 'N/A')}；完整年份最少交易数：{fmt_metric("min_full_year_trades", metrics.get("min_full_year_trades", 0.0))}。</p>
+          <p><strong>约束解释：</strong>只检查完整日历年，当前样本中的未完整年份不会用于年度下限判断。</p>
         </div>
         <div class="note warn">
           <p><strong>冲突处理：</strong>同一时间只允许一笔持仓；若交易重叠，按进场时间和候选优先级保留先触发/高优先级交易，其他信号记录为 conflict_dropped。</p>
           <p><strong>关键限制：</strong>OFS/SMC 候选目前仍是研究层级，且部分 1 分钟 bar 策略存在同K进出假设，正式验证需使用严格成交模型或 tick replay。</p>
         </div>
       </div>
+    </section>
+    <section>
+      <h2>完整年份交易次数</h2>
+      <p>该表专门验证“每个完整年份交易次数必须大于 1000 次”。默认下限使用 {annual_trade_floor:,}，等价于严格大于 1000。</p>
+      {html_table(annual_counts, [
+          ("year", "年份"),
+          ("trades", "交易数"),
+          ("floor", "下限"),
+          ("floor_pass", "是否达标"),
+          ("net_points", "净点"),
+      ])}
     </section>
     <section>
       <h2>资金曲线</h2>
@@ -741,6 +1087,7 @@ def build_html(
           ("net_to_drawdown", "净值/回撤"),
           ("risk_budget_fraction", "风险预算"),
           ("trade_rows", "逐笔覆盖"),
+          ("coverage_candidate", "覆盖候选"),
       ])}
     </section>
     <section>
@@ -769,6 +1116,9 @@ def build_html(
           ("max_drawdown_points", "最大回撤"),
           ("profit_factor", "PF"),
           ("risk_budgeted_net_points", "预算净点"),
+          ("min_full_year_trades", "完整年最少交易"),
+          ("annual_trade_floor_pass", "年度交易达标"),
+          ("annual_trade_floor_deficit", "交易缺口"),
           ("positive_year_rate", "正年份率"),
           ("same_bar_exit_rate", "同K进出"),
           ("conflict_dropped", "冲突丢弃"),
@@ -777,7 +1127,7 @@ def build_html(
     </section>
     <section>
       <h2>年度 Walk-Forward 组合验证</h2>
-      <p>每个测试年只用此前历史选择组合，再应用到该测试年。这个表用于检查组合调度器是否依赖未来样本。</p>
+      <p>每个测试年只用此前历史选择组合，再应用到该测试年。{walkforward_scope}</p>
       <p class="note">年度 WF 汇总净点数：{fmt_metric("net_points", wf_summary.get("net_points", 0.0))}；正年份率：{fmt_metric("positive_year_rate", wf_summary.get("positive_year_rate", 0.0))}。</p>
       {html_table(walk_forward, [
           ("year", "测试年"),
@@ -810,9 +1160,20 @@ def build_html(
 def write_outputs(args: argparse.Namespace) -> dict[str, object]:
     audit = load_audit_metadata(args.audit)
     trades = load_trade_pool(args, audit)
+    min_full_year_trades = int(getattr(args, "min_full_year_trades", 0))
+    max_walkforward_years = int(getattr(args, "max_walkforward_years", 0))
+    full_years = infer_full_years(
+        trades,
+        start_year=int(getattr(args, "full_year_start", 2020)),
+        end_year=int(getattr(args, "full_year_end", 0)),
+    )
+    args.full_years = full_years
+    args.min_full_year_trades = min_full_year_trades
+    args.max_walkforward_years = max_walkforward_years
+    args.coverage_objective = min_full_year_trades > 0
     candidates = candidate_rows(audit, trades)
     results = evaluate_combinations(trades, candidates, audit, args)
-    best = select_best(results)
+    best = select_best(results, annual_trade_floor=min_full_year_trades)
     ranking = results_frame(results)
     walk_forward = walk_forward_years(trades, candidates, audit, args)
     generated_at = args.generated_at or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -829,6 +1190,9 @@ def write_outputs(args: argparse.Namespace) -> dict[str, object]:
         walk_forward=walk_forward,
         generated_at=generated_at,
         source_paths=source_paths,
+        full_years=full_years,
+        annual_trade_floor=min_full_year_trades,
+        max_walkforward_years=max_walkforward_years,
     )
     for output_path, frame in [
         (Path(args.selected_trades_output), best.trades),
@@ -852,6 +1216,9 @@ def write_outputs(args: argparse.Namespace) -> dict[str, object]:
         "best_labels": list(best.labels),
         "best_eligibility": best.eligibility,
         "best_metrics": best.metrics,
+        "full_years_checked": list(full_years),
+        "annual_trade_floor": min_full_year_trades,
+        "annual_trade_floor_pass": bool(best.metrics.get("annual_trade_floor_pass", 0.0)),
         "combo_count": int(len(results)),
         "candidate_count": int(len(candidates)),
     }
@@ -872,8 +1239,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--walkforward-output", default=".tmp/nq-multi-strategy-composite-walkforward.csv")
     parser.add_argument("--max-combo-size", type=int, default=4)
     parser.add_argument("--max-per-family", type=int, default=1)
+    parser.add_argument("--include-coverage-candidates", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--coverage-max-per-family", type=int, default=3)
+    parser.add_argument("--max-coverage-candidates", type=int, default=3)
+    parser.add_argument("--coverage-seed-count", type=int, default=2)
+    parser.add_argument("--min-full-year-trades", type=int, default=DEFAULT_MIN_FULL_YEAR_TRADES)
+    parser.add_argument("--full-year-start", type=int, default=2020)
+    parser.add_argument("--full-year-end", type=int, default=0)
     parser.add_argument("--min-train-years", type=int, default=3)
     parser.add_argument("--min-train-trades", type=int, default=20)
+    parser.add_argument("--max-walkforward-years", type=int, default=2)
     parser.add_argument("--rank-on-common-window", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--generated-at", default="")
     return parser
