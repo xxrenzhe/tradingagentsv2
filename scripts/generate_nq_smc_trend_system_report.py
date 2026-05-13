@@ -30,6 +30,7 @@ TRADES_PATH = ROOT_DIR / ".tmp" / "nq-regime-transition-readiness-trades.csv"
 YEARLY_PATH = ROOT_DIR / ".tmp" / "nq-regime-transition-readiness-yearly.csv"
 ROLLING90_PATH = ROOT_DIR / ".tmp" / "nq-regime-transition-readiness-rolling90.csv"
 REPORT_PATH = ROOT_DIR / "reports" / "NQ-smc-regime-trend-system-report.html"
+COMPOSITE_SUMMARY_PATH = ROOT_DIR / "reports" / "NQ-smc-regime-trend-composite-summary.csv"
 BEST_LABEL = "optimized50_2r5_quality"
 
 
@@ -115,6 +116,28 @@ def render_report(summary: pd.DataFrame, trades: pd.DataFrame, yearly: pd.DataFr
             metric("同根入出场", fmt_int(same_bar_count), "已修正为0"),
         ]
     )
+    composite_html = ""
+    if COMPOSITE_SUMMARY_PATH.exists():
+        composite = read_csv(COMPOSITE_SUMMARY_PATH)
+        composite_html = f"""
+  <section class="panel">
+    <h2>提高净收益的组合版本</h2>
+    <p>如果目标从“最高质量单策略”切换到“提高总净收益”，当前更好的做法不是放宽单一主策略，而是组合 <code>50m quality primary</code> 与 <code>45m low-eff add-on</code>，并按 non-overlap 规则过滤重叠持仓。</p>
+    {table(composite, [
+        ("label", "口径", "text"),
+        ("trades", "交易数", "int"),
+        ("net_points", "净点数", "num"),
+        ("profit_factor", "PF", "num"),
+        ("win_rate", "胜率", "pct"),
+        ("expectancy_points", "期望/笔", "num"),
+        ("max_drawdown_points", "最大DD", "num"),
+        ("net_to_drawdown", "净值/DD", "num"),
+        ("positive_90d_rate", "90日正收益", "pct"),
+        ("same_bar_count", "同根", "int"),
+    ])}
+    <p>取舍：组合净点数更高，但 PF 低于单一 50m quality。若以净收益为第一目标，组合更合适；若以最高 PF/最低回撤为第一目标，仍保留单一 50m quality。</p>
+  </section>
+        """
 
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -194,6 +217,8 @@ def render_report(summary: pd.DataFrame, trades: pd.DataFrame, yearly: pd.DataFr
     <h3>最差滚动90日窗口</h3>
     {rolling_worst}
   </section>
+
+  {composite_html}
 
   <section class="panel">
     <h2>最佳/最差入场与出场</h2>

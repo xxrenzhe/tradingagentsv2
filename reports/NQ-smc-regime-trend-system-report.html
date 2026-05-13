@@ -91,6 +91,22 @@
 
   </section>
 
+
+  <section class="panel">
+    <h2>提高净收益的组合版本</h2>
+    <p>如果目标从“最高质量单策略”切换到“提高总净收益”，当前更好的做法不是放宽单一主策略，而是组合 <code>50m quality primary</code> 与 <code>45m low-eff add-on</code>，并按 non-overlap 规则过滤重叠持仓。</p>
+
+    <div class="table-wrap compact-table">
+      <table>
+        <thead><tr><th>口径</th><th>交易数</th><th>净点数</th><th>PF</th><th>胜率</th><th>期望/笔</th><th>最大DD</th><th>净值/DD</th><th>90日正收益</th><th>同根</th></tr></thead>
+        <tbody><tr><td class="">Composite</td><td class="num">661</td><td class="num positive">4,077.06</td><td class="num positive">1.76</td><td class="num">40.7%</td><td class="num positive">6.17</td><td class="num positive">254.79</td><td class="num positive">16.00</td><td class="num">71.4%</td><td class="num">0</td></tr><tr><td class="">50m quality primary</td><td class="num">442</td><td class="num positive">3,479.65</td><td class="num positive">1.97</td><td class="num">42.8%</td><td class="num positive">7.87</td><td class="num positive">210.75</td><td class="num positive">16.51</td><td class="num">65.1%</td><td class="num">0</td></tr><tr><td class="">45m low-eff add-on</td><td class="num">593</td><td class="num positive">3,398.33</td><td class="num positive">1.71</td><td class="num">39.1%</td><td class="num positive">5.73</td><td class="num positive">230.09</td><td class="num positive">14.77</td><td class="num">63.3%</td><td class="num">0</td></tr></tbody>
+      </table>
+    </div>
+
+    <p>取舍：组合净点数更高，但 PF 低于单一 50m quality。若以净收益为第一目标，组合更合适；若以最高 PF/最低回撤为第一目标，仍保留单一 50m quality。</p>
+  </section>
+
+
   <section class="panel">
     <h2>最佳/最差入场与出场</h2>
 
