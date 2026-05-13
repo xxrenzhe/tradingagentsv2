@@ -389,6 +389,9 @@ def train_action_map(
     train_years: list[int],
     min_cell: int,
     min_train_net: float = 0.0,
+    min_train_pf: float = 0.0,
+    min_train_avg: float = -1_000_000.0,
+    min_train_positive_year_rate: float = 0.0,
 ) -> dict[tuple[Any, ...], int]:
     train = events[events["year"].isin(train_years)].copy()
     actions: dict[tuple[Any, ...], int] = {}
@@ -398,11 +401,34 @@ def train_action_map(
         key = key_tuple(raw_key)
         if len(group) < int(min_cell):
             continue
-        long_net = float((group["gross_long"] - ROUND_TRIP_COST_POINTS).sum())
-        short_net = float((-group["gross_long"] - ROUND_TRIP_COST_POINTS).sum())
-        if max(long_net, short_net) <= float(min_train_net):
+        best_direction = 0
+        best_metrics: dict[str, float] | None = None
+        for direction in (1, -1):
+            net = group["gross_long"].astype(float) * direction - ROUND_TRIP_COST_POINTS
+            wins = net[net > 0]
+            losses = net[net < 0]
+            gross_loss = float(-losses.sum())
+            yearly = net.groupby(group["year"]).sum().reindex(train_years, fill_value=0.0)
+            metrics = {
+                "net": float(net.sum()),
+                "pf": float(wins.sum() / gross_loss) if gross_loss else (999.0 if float(wins.sum()) > 0.0 else 0.0),
+                "avg": float(net.mean()) if len(net) else 0.0,
+                "positive_year_rate": float((yearly > 0.0).mean()) if not yearly.empty else 0.0,
+            }
+            if best_metrics is None or metrics["net"] > best_metrics["net"]:
+                best_direction = direction
+                best_metrics = metrics
+        if best_metrics is None:
             continue
-        actions[key] = 1 if long_net >= short_net else -1
+        if best_metrics["net"] <= float(min_train_net):
+            continue
+        if best_metrics["pf"] < float(min_train_pf):
+            continue
+        if best_metrics["avg"] < float(min_train_avg):
+            continue
+        if best_metrics["positive_year_rate"] < float(min_train_positive_year_rate):
+            continue
+        actions[key] = int(best_direction)
     return actions
 
 
@@ -485,6 +511,9 @@ def search_timecells(
     min_cells: list[int],
     annual_floor: int,
     min_train_net: float = 0.0,
+    min_train_pfs: list[float] | None = None,
+    min_train_avgs: list[float] | None = None,
+    min_train_positive_year_rates: list[float] | None = None,
     min_profit_factor: float = 1.25,
     min_net_to_drawdown: float = 5.0,
     prevent_overlap: bool = True,
@@ -494,6 +523,9 @@ def search_timecells(
     best_actions: dict[tuple[Any, ...], int] = {}
     best_sort: tuple[float, ...] | None = None
     key_columns_list = [key_set.split("/") for key_set in key_sets]
+    train_pf_values = min_train_pfs or [0.0]
+    train_avg_values = min_train_avgs or [-1_000_000.0]
+    train_pos_year_values = min_train_positive_year_rates or [0.0]
     needs_features = any(any(column.endswith("_bin") for column in columns) for columns in key_columns_list)
     prepared = add_causal_feature_bins(bars) if needs_features else normalize_bars(bars)
 
@@ -517,54 +549,65 @@ def search_timecells(
                 for key_columns in key_columns_list:
                     key_name = "/".join(key_columns)
                     for min_cell in min_cells:
-                        actions = train_action_map(
-                            events,
-                            key_columns=key_columns,
-                            train_years=train_years,
-                            min_cell=int(min_cell),
-                            min_train_net=min_train_net,
-                        )
-                        label = (
-                            f"oos{train_years[0]}_{train_years[-1]}_step{int(step)}_hold{int(hold)}_"
-                            f"{session}_mc{int(min_cell)}_{key_name.replace('/', '-')}"
-                        )
-                        trades = apply_actions(
-                            events,
-                            actions,
-                            key_columns=key_columns,
-                            test_years=test_years,
-                            label=label,
-                        )
-                        summary = summarize_trades(trades, test_years=test_years, annual_floor=annual_floor)
-                        quality_gate = bool(
-                            summary["gate"]
-                            and summary["pf"] >= float(min_profit_factor)
-                            and summary["net_to_drawdown"] >= float(min_net_to_drawdown)
-                        )
-                        row = {
-                            "label": label,
-                            "step": int(step),
-                            "hold": int(hold),
-                            "session": session,
-                            "keys": key_name,
-                            "min_cell": int(min_cell),
-                            "cells": int(len(actions)),
-                            "quality_gate": quality_gate,
-                            **summary,
-                        }
-                        rows.append(row)
-                        sort_key = (
-                            float(quality_gate),
-                            float(summary["gate"]),
-                            float(summary["net"]),
-                            float(summary["pf"]),
-                            float(summary["net_to_drawdown"]),
-                            float(summary["mincnt"]),
-                        )
-                        if best_sort is None or sort_key > best_sort:
-                            best_sort = sort_key
-                            best_trades = trades
-                            best_actions = actions
+                        for min_train_pf in train_pf_values:
+                            for min_train_avg in train_avg_values:
+                                for min_train_pos_year in train_pos_year_values:
+                                    actions = train_action_map(
+                                        events,
+                                        key_columns=key_columns,
+                                        train_years=train_years,
+                                        min_cell=int(min_cell),
+                                        min_train_net=min_train_net,
+                                        min_train_pf=float(min_train_pf),
+                                        min_train_avg=float(min_train_avg),
+                                        min_train_positive_year_rate=float(min_train_pos_year),
+                                    )
+                                    label = (
+                                        f"oos{train_years[0]}_{train_years[-1]}_step{int(step)}_hold{int(hold)}_"
+                                        f"{session}_mc{int(min_cell)}"
+                                        f"_tpf{float(min_train_pf):g}_tavg{float(min_train_avg):g}_"
+                                        f"tpos{float(min_train_pos_year):g}_{key_name.replace('/', '-')}"
+                                    )
+                                    trades = apply_actions(
+                                        events,
+                                        actions,
+                                        key_columns=key_columns,
+                                        test_years=test_years,
+                                        label=label,
+                                    )
+                                    summary = summarize_trades(trades, test_years=test_years, annual_floor=annual_floor)
+                                    quality_gate = bool(
+                                        summary["gate"]
+                                        and summary["pf"] >= float(min_profit_factor)
+                                        and summary["net_to_drawdown"] >= float(min_net_to_drawdown)
+                                    )
+                                    row = {
+                                        "label": label,
+                                        "step": int(step),
+                                        "hold": int(hold),
+                                        "session": session,
+                                        "keys": key_name,
+                                        "min_cell": int(min_cell),
+                                        "min_train_pf": float(min_train_pf),
+                                        "min_train_avg": float(min_train_avg),
+                                        "min_train_positive_year_rate": float(min_train_pos_year),
+                                        "cells": int(len(actions)),
+                                        "quality_gate": quality_gate,
+                                        **summary,
+                                    }
+                                    rows.append(row)
+                                    sort_key = (
+                                        float(quality_gate),
+                                        float(summary["gate"]),
+                                        float(summary["net"]),
+                                        float(summary["pf"]),
+                                        float(summary["net_to_drawdown"]),
+                                        float(summary["mincnt"]),
+                                    )
+                                    if best_sort is None or sort_key > best_sort:
+                                        best_sort = sort_key
+                                        best_trades = trades
+                                        best_actions = actions
 
     search = pd.DataFrame(rows)
     if search.empty:
@@ -617,6 +660,9 @@ def write_outputs(args: argparse.Namespace) -> dict[str, Any]:
         min_cells=[int(value) for value in args.min_cells],
         annual_floor=int(args.annual_floor),
         min_train_net=float(args.min_train_net),
+        min_train_pfs=[float(value) for value in args.min_train_pfs],
+        min_train_avgs=[float(value) for value in args.min_train_avgs],
+        min_train_positive_year_rates=[float(value) for value in args.min_train_positive_year_rates],
         min_profit_factor=float(args.min_profit_factor),
         min_net_to_drawdown=float(args.min_net_to_drawdown),
         prevent_overlap=not args.allow_overlap,
@@ -676,6 +722,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-feature-key-sets", type=int, default=12)
     parser.add_argument("--min-cells", type=int, nargs="+", default=[20, 50, 100, 200])
     parser.add_argument("--min-train-net", type=float, default=0.0)
+    parser.add_argument("--min-train-pfs", type=float, nargs="+", default=[0.0])
+    parser.add_argument("--min-train-avgs", type=float, nargs="+", default=[-1_000_000.0])
+    parser.add_argument("--min-train-positive-year-rates", type=float, nargs="+", default=[0.0])
     parser.add_argument("--annual-floor", type=int, default=1001)
     parser.add_argument("--min-profit-factor", type=float, default=1.25)
     parser.add_argument("--min-net-to-drawdown", type=float, default=5.0)

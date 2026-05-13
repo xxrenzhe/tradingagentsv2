@@ -93,6 +93,31 @@ def test_action_map_is_trained_only_on_train_years_and_applied_only_to_test_year
     assert trades["strategy_label"].tolist() == ["strict_oos"]
 
 
+def test_train_quality_filters_are_based_on_training_years_only() -> None:
+    events = pd.DataFrame(
+        [
+            {"year": 2019, "hour": 0, "gross_long": -3.0},
+            {"year": 2019, "hour": 0, "gross_long": 3.0},
+            {"year": 2020, "hour": 0, "gross_long": 20.0},
+            {"year": 2019, "hour": 1, "gross_long": 3.0},
+            {"year": 2019, "hour": 1, "gross_long": 4.0},
+            {"year": 2020, "hour": 1, "gross_long": -20.0},
+        ]
+    )
+
+    actions = module.train_action_map(
+        events,
+        key_columns=["hour"],
+        train_years=[2019],
+        min_cell=2,
+        min_train_pf=1.2,
+        min_train_avg=0.0,
+    )
+
+    assert (0,) not in actions
+    assert actions[(1,)] == 1
+
+
 def test_search_timecells_sorts_quality_gated_rows_and_exports_best_test_trades() -> None:
     bars = pd.concat(
         [
@@ -112,6 +137,9 @@ def test_search_timecells_sorts_quality_gated_rows_and_exports_best_test_trades(
         key_sets=["hour", "dow/hour"],
         min_cells=[1],
         annual_floor=1,
+        min_train_pfs=[1.0],
+        min_train_avgs=[0.0],
+        min_train_positive_year_rates=[0.0],
         min_profit_factor=1.25,
         min_net_to_drawdown=1.0,
     )
