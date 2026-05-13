@@ -113,7 +113,11 @@ def test_runtime_future_perturbation_audit_is_causal() -> None:
 
     assert result["passed"] is True
     assert result["severity"] == "pass"
-    assert result["baseline_hash"] == result["perturbed_hash"]
+    assert result["baseline_feature_hash"] == result["perturbed_feature_hash"]
+    assert result["baseline_signal_hash"] == result["perturbed_signal_hash"]
+    assert result["baseline_trade_hash"] == result["perturbed_trade_hash"]
+    assert "Open" in result["features_checked"]
+    assert "premium_discount_reversal" in result["columns_checked"]
 
 
 def test_walk_forward_uses_past_train_years_only() -> None:

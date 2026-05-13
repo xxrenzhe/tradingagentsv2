@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from backtest_lightglow_nq_bars import build_lightglow_signals
+from backtest_lightglow_nq_bars import LightglowCandidate, build_lightglow_signals, build_trades
 from generate_nq_lightglow_composite_report import (
     add_prior_trend_context,
     candlestick_svg,
@@ -29,6 +29,7 @@ from generate_nq_lightglow_composite_report import (
     summarize_trades,
     timecell_trend_veto_mask,
 )
+from tradingagents.backtesting.short_patterns import BacktestCosts
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -496,6 +497,54 @@ def hash_frame(frame: pd.DataFrame, columns: list[str]) -> str:
     return hashlib.sha256(hashed).hexdigest()
 
 
+def perturbation_trade_signature(signals: pd.DataFrame, *, cutoff_index: int) -> pd.DataFrame:
+    frame = signals.copy()
+    frame["ts"] = pd.to_datetime(frame["ts"], utc=True)
+    if "trade_date" not in frame.columns:
+        frame["trade_date"] = frame["ts"].dt.date
+    if "minute_of_day" not in frame.columns:
+        frame["minute_of_day"] = frame["ts"].dt.hour * 60 + frame["ts"].dt.minute
+    if "timeframe_minutes" not in frame.columns:
+        frame["timeframe_minutes"] = 1
+    candidate = LightglowCandidate(
+        signal="premium_discount_reversal",
+        timeframe_minutes=1,
+        session="all",
+        hold_bars=10,
+        direction_mode="reverse",
+        stop_loss_points=None,
+        take_profit_points=None,
+    )
+    trades = build_trades(frame, candidate, BacktestCosts())
+    if trades.empty:
+        return pd.DataFrame(
+            columns=[
+                "entry_index",
+                "exit_index",
+                "entry_ts",
+                "exit_ts",
+                "direction",
+                "entry_price",
+                "exit_price",
+                "gross_points",
+                "net_points",
+            ]
+        )
+    pre_cutoff = trades[pd.to_numeric(trades["exit_index"], errors="coerce") <= cutoff_index].copy()
+    columns = [
+        "entry_index",
+        "exit_index",
+        "entry_ts",
+        "exit_ts",
+        "direction",
+        "entry_price",
+        "exit_price",
+        "gross_points",
+        "net_points",
+    ]
+    return pre_cutoff[columns].reset_index(drop=True)
+
+
 def static_leakage_scan(files: list[str] | None = None) -> pd.DataFrame:
     patterns = {
         "negative_shift": re.compile(r"\.shift\s*\(\s*-\d+"),
@@ -563,18 +612,37 @@ def runtime_future_perturbation_audit(
         "internal_choch_zone",
         "fvg_zone",
     ]
-    baseline_hash = hash_frame(baseline.iloc[: cutoff_index + 1], ["ts", *signal_columns])
-    changed_hash = hash_frame(changed.iloc[: cutoff_index + 1], ["ts", *signal_columns])
+    feature_columns = ["Open", "High", "Low", "Close", "Volume"]
+    baseline_feature_hash = hash_frame(baseline.iloc[: cutoff_index + 1], ["ts", *feature_columns])
+    changed_feature_hash = hash_frame(changed.iloc[: cutoff_index + 1], ["ts", *feature_columns])
+    baseline_signal_hash = hash_frame(baseline.iloc[: cutoff_index + 1], ["ts", *signal_columns])
+    changed_signal_hash = hash_frame(changed.iloc[: cutoff_index + 1], ["ts", *signal_columns])
+    baseline_trades = perturbation_trade_signature(baseline, cutoff_index=cutoff_index)
+    changed_trades = perturbation_trade_signature(changed, cutoff_index=cutoff_index)
+    trade_columns = list(baseline_trades.columns)
+    baseline_trade_hash = hash_frame(baseline_trades, trade_columns)
+    changed_trade_hash = hash_frame(changed_trades, trade_columns)
+    passed = (
+        baseline_feature_hash == changed_feature_hash
+        and baseline_signal_hash == changed_signal_hash
+        and baseline_trade_hash == changed_trade_hash
+    )
     return {
         "audit": "future_ohlcv_perturbation",
         "cutoff_ts": str(subset.loc[cutoff_index, "ts"]),
         "cutoff_index": int(cutoff_index),
         "sample_rows": int(len(subset)),
+        "features_checked": ",".join(feature_columns),
         "columns_checked": ",".join(signal_columns),
-        "baseline_hash": baseline_hash,
-        "perturbed_hash": changed_hash,
-        "passed": baseline_hash == changed_hash,
-        "severity": "pass" if baseline_hash == changed_hash else "fail",
+        "trades_checked": int(len(baseline_trades)),
+        "baseline_feature_hash": baseline_feature_hash,
+        "perturbed_feature_hash": changed_feature_hash,
+        "baseline_signal_hash": baseline_signal_hash,
+        "perturbed_signal_hash": changed_signal_hash,
+        "baseline_trade_hash": baseline_trade_hash,
+        "perturbed_trade_hash": changed_trade_hash,
+        "passed": passed,
+        "severity": "pass" if passed else "fail",
     }
 
 
@@ -998,7 +1066,7 @@ def build_html_report(
     </section>
     <section>
       <h2>泄漏审计</h2>
-      {html_table(leakage, [("audit", "审计"), ("severity", "结果"), ("passed", "通过"), ("cutoff_ts", "cutoff"), ("same_bar_trades", "同K数"), ("violations", "违规数"), ("fail_hits", "静态失败"), ("review_hits", "需复核")])}
+      {html_table(leakage, [("audit", "审计"), ("severity", "结果"), ("passed", "通过"), ("cutoff_ts", "cutoff"), ("features_checked", "特征列"), ("columns_checked", "信号列"), ("trades_checked", "交易签名数"), ("same_bar_trades", "同K数"), ("violations", "违规数"), ("fail_hits", "静态失败"), ("review_hits", "需复核")])}
     </section>
     <section>
       <h2>滚动 Walk-Forward</h2>
