@@ -37,6 +37,18 @@ class LiveStrategySpec:
     htf_mode: str = "off"
     volatility_filter: str = "all"
     imbalance_threshold: float = 0.3
+    width_atr_max: float = 8.0
+    efficiency_max: float = 0.15
+    displacement_atr_min: float = 1.8
+    body_share_min: float = 0.60
+    volume_z_min: float | None = 0.50
+    stop_mode: str = "break_bar"
+    reward_risk: float = 2.5
+    breakout_buffer_atr: float = 0.05
+    stop_buffer_atr: float = 0.10
+    min_buffer_points: float = 0.25
+    min_stop_points: float = 4.0
+    max_stop_points: float = 80.0
 
 
 @dataclass(frozen=True)
@@ -50,6 +62,50 @@ class LiveStrategySignalConfig:
 
 def best_mean_reversion_spec() -> LiveStrategySpec:
     return LiveStrategySpec()
+
+
+def regime_transition_spec(strategy_id: str, selected_alias: str | None = None) -> LiveStrategySpec:
+    specs = {
+        "optimized50_2r5_quality": dict(
+            lookback=50,
+            width_atr_max=8.0,
+            efficiency_max=0.15,
+            displacement_atr_min=1.8,
+            body_share_min=0.60,
+            volume_z_min=0.50,
+            reward_risk=2.5,
+            max_hold_minutes=180,
+        ),
+        "defensive45_2r5_loweff": dict(
+            lookback=45,
+            width_atr_max=10.0,
+            efficiency_max=0.10,
+            displacement_atr_min=1.6,
+            body_share_min=0.55,
+            volume_z_min=0.0,
+            reward_risk=2.5,
+            max_hold_minutes=180,
+        ),
+        "short45_2r25_netdd": dict(
+            lookback=45,
+            width_atr_max=12.0,
+            efficiency_max=0.25,
+            displacement_atr_min=1.2,
+            body_share_min=0.55,
+            volume_z_min=0.0,
+            reward_risk=2.25,
+            max_hold_minutes=240,
+        ),
+    }
+    if strategy_id not in specs:
+        raise ValueError(f"unsupported regime_transition strategy: {strategy_id}")
+    return LiveStrategySpec(
+        strategy_id=strategy_id,
+        selected_alias=selected_alias or strategy_id,
+        family="regime_transition",
+        session="us_late",
+        **specs[strategy_id],
+    )
 
 
 def build_strategy_live_signal_row(
@@ -78,7 +134,13 @@ def build_strategy_live_signal_row(
     market_event = _market_event(timestamp, top_snapshot, tick_events)
     _append_market_event(strategy_config.history_path, market_event)
     history = _load_recent_history(strategy_config.history_path, timestamp, strategy_config.max_history_minutes)
-    bars = _build_minute_bars(history)
+    bars = (
+        _historical_bars_frame(_safe_historical_minute_bars(active_broker, signal_config.contract))
+        if strategy_spec.family == "regime_transition"
+        else pd.DataFrame()
+    )
+    if bars.empty:
+        bars = _build_minute_bars(history)
     if strategy_spec.family == "mean_reversion":
         evaluation = evaluate_mean_reversion_signal(bars, strategy_spec, min_bars=strategy_config.min_bars)
     elif strategy_spec.family == "mtf_setup":
@@ -95,12 +157,20 @@ def build_strategy_live_signal_row(
             mtf_spec,
             min_bars=strategy_config.min_bars,
         )
+    elif strategy_spec.family == "regime_transition":
+        required_bars = max(strategy_config.min_bars, strategy_spec.lookback + 121)
+        if len(bars) < required_bars:
+            bootstrap = _load_bootstrap_bars(strategy_config.bootstrap_cache_path, timestamp, required_bars)
+            if not bootstrap.empty:
+                bars = pd.concat([bars, bootstrap], ignore_index=True)
+                bars = bars.sort_values("ts").drop_duplicates("ts").reset_index(drop=True)
+        evaluation = evaluate_regime_transition_signal(bars, strategy_spec, min_bars=strategy_config.min_bars)
     else:
         raise ValueError(f"unsupported live strategy family: {strategy_spec.family}")
     if not evaluation["triggered"]:
         raise ValueError(json.dumps({"reason": "no_strategy_signal", **evaluation}, sort_keys=True, default=str))
     direction = int(evaluation["direction"])
-    return build_live_signal_row(
+    row = build_live_signal_row(
         config=LiveSignalConfig(
             output=signal_config.output,
             strategy_id=signal_config.strategy_id,
@@ -116,7 +186,16 @@ def build_strategy_live_signal_row(
         ),
         broker=active_broker,
         now=timestamp,
-    ) | {
+    )
+    dynamic_stop_points = evaluation.get("stop_points", "")
+    dynamic_target_points = evaluation.get("target_points", "")
+    if strategy_spec.family == "regime_transition":
+        actual_entry = _finite_float(row.get("entry_price"))
+        stop_price = _finite_float(evaluation.get("stop_price"))
+        if actual_entry is not None and stop_price is not None and actual_entry > stop_price:
+            dynamic_stop_points = actual_entry - stop_price
+            dynamic_target_points = dynamic_stop_points * float(evaluation.get("reward_risk", strategy_spec.reward_risk))
+    return row | {
         "session_bucket": strategy_spec.session,
         "vol_bucket": strategy_spec.volatility_filter,
         "realized_vol_30": evaluation.get("realized_vol_30", 0.0),
@@ -129,6 +208,14 @@ def build_strategy_live_signal_row(
         "setup_htf_trend": evaluation.get("htf_trend", ""),
         "setup_mtf_reclaim": evaluation.get("mtf_reclaim", ""),
         "setup_ltf_trigger": evaluation.get("ltf_trigger", ""),
+        "strategy_stop_points": dynamic_stop_points,
+        "strategy_target_points": dynamic_target_points,
+        "strategy_horizon_minutes": evaluation.get("horizon_minutes", signal_config.max_hold_minutes),
+        "strategy_range_width_atr": evaluation.get("range_width_atr", ""),
+        "strategy_range_efficiency": evaluation.get("range_efficiency", ""),
+        "strategy_displacement_atr": evaluation.get("displacement_atr", ""),
+        "strategy_body_share": evaluation.get("body_share", ""),
+        "strategy_volume_z": evaluation.get("volume_z", ""),
     }
 
 
@@ -199,6 +286,108 @@ def evaluate_mean_reversion_signal(
     }
 
 
+def evaluate_regime_transition_signal(
+    bars: pd.DataFrame,
+    spec: LiveStrategySpec,
+    *,
+    min_bars: int | None = None,
+) -> dict[str, Any]:
+    if bars.empty:
+        return {"triggered": False, "reason": "no_market_history", "bars": 0}
+    data = bars.sort_values("ts").reset_index(drop=True).copy()
+    required_bars = max(int(min_bars or 0), spec.lookback + 121)
+    if len(data) < required_bars:
+        return {"triggered": False, "reason": "insufficient_bars", "bars": int(len(data)), "required_bars": required_bars}
+    data["ts"] = pd.to_datetime(data["ts"], utc=True, errors="coerce")
+    for column in ["Open", "High", "Low", "Close"]:
+        data[column] = pd.to_numeric(data[column], errors="coerce")
+    if data[["ts", "Open", "High", "Low", "Close"]].tail(required_bars).isna().any().any():
+        return {"triggered": False, "reason": "invalid_ohlc", "bars": int(len(data))}
+    last = data.iloc[-1]
+    minute = int(last["ts"].hour * 60 + last["ts"].minute)
+    if spec.session == "us_late" and not (20 * 60 <= minute < 23 * 60):
+        return {"triggered": False, "reason": "outside_session", "bars": int(len(data)), "minute_of_day": minute}
+    if spec.session == "europe" and not (7 * 60 <= minute < 13 * 60 + 30):
+        return {"triggered": False, "reason": "outside_session", "bars": int(len(data)), "minute_of_day": minute}
+
+    high = data["High"]
+    low = data["Low"]
+    close = data["Close"]
+    open_price = data["Open"]
+    previous_close = close.shift(1)
+    true_range = pd.concat([high - low, (high - previous_close).abs(), (low - previous_close).abs()], axis=1).max(axis=1)
+    atr_30 = true_range.rolling(30, min_periods=10).mean()
+    atr_120 = true_range.rolling(120, min_periods=30).mean()
+    rolling_high = high.rolling(spec.lookback, min_periods=spec.lookback).max().shift(1)
+    rolling_low = low.rolling(spec.lookback, min_periods=spec.lookback).min().shift(1)
+    range_width_atr = (rolling_high - rolling_low) / atr_120.replace(0, pd.NA)
+    tr_sum = true_range.rolling(spec.lookback, min_periods=spec.lookback).sum().shift(1)
+    range_efficiency = (close.shift(1) - close.shift(spec.lookback + 1)).abs() / tr_sum.replace(0, pd.NA)
+    range_points = high - low
+    body_share = (close - open_price).abs() / range_points.replace(0, pd.NA)
+    displacement_atr = range_points / atr_30.replace(0, pd.NA)
+    volume_z = _volume_z(data)
+
+    metrics = {
+        "range_high": _finite_float(rolling_high.iloc[-1]),
+        "range_low": _finite_float(rolling_low.iloc[-1]),
+        "range_width_atr": _finite_float(range_width_atr.iloc[-1]),
+        "range_efficiency": _finite_float(range_efficiency.iloc[-1]),
+        "displacement_atr": _finite_float(displacement_atr.iloc[-1]),
+        "body_share": _finite_float(body_share.iloc[-1]),
+        "atr_30": _finite_float(atr_30.iloc[-1]),
+        "volume_z": _finite_float(volume_z.iloc[-1]) if volume_z is not None else None,
+    }
+    missing = [key for key, value in metrics.items() if value is None and key != "volume_z"]
+    if missing:
+        return {"triggered": False, "reason": "invalid_regime_features", "missing": missing, "bars": int(len(data))}
+    if spec.volume_z_min is not None and metrics["volume_z"] is None:
+        return {"triggered": False, "reason": "missing_volume_for_volume_z", "bars": int(len(data))}
+    if metrics["range_width_atr"] > spec.width_atr_max:
+        return {"triggered": False, "reason": "range_too_wide", **metrics, "minute_of_day": minute}
+    if metrics["range_efficiency"] > spec.efficiency_max:
+        return {"triggered": False, "reason": "range_too_efficient", **metrics, "minute_of_day": minute}
+    if metrics["displacement_atr"] < spec.displacement_atr_min:
+        return {"triggered": False, "reason": "insufficient_displacement", **metrics, "minute_of_day": minute}
+    if metrics["body_share"] < spec.body_share_min:
+        return {"triggered": False, "reason": "insufficient_body_share", **metrics, "minute_of_day": minute}
+    if spec.volume_z_min is not None and metrics["volume_z"] < spec.volume_z_min:
+        return {"triggered": False, "reason": "insufficient_volume_z", **metrics, "minute_of_day": minute}
+    breakout_buffer = max(spec.min_buffer_points, spec.breakout_buffer_atr * metrics["atr_30"])
+    if not (float(last["Close"]) > metrics["range_high"] + breakout_buffer and float(last["Close"]) > float(last["Open"])):
+        return {"triggered": False, "reason": "no_long_breakout", **metrics, "minute_of_day": minute}
+    if spec.stop_mode != "break_bar":
+        return {"triggered": False, "reason": "unsupported_stop_mode", "stop_mode": spec.stop_mode}
+    stop_buffer = max(spec.min_buffer_points, spec.stop_buffer_atr * metrics["atr_30"])
+    entry_price = float(last["Close"])
+    stop_price = float(last["Low"]) - stop_buffer
+    stop_points = entry_price - stop_price
+    if stop_points < spec.min_stop_points or stop_points > spec.max_stop_points:
+        return {
+            "triggered": False,
+            "reason": "stop_distance_outside_bounds",
+            **metrics,
+            "stop_points": float(stop_points),
+            "minute_of_day": minute,
+        }
+    target_points = stop_points * spec.reward_risk
+    return {
+        "triggered": True,
+        "reason": "strategy_signal",
+        "direction": 1,
+        "side": "long_regime_transition",
+        "bars": int(len(data)),
+        "minute_of_day": minute,
+        "session": spec.session,
+        "stop_price": float(stop_price),
+        "stop_points": float(stop_points),
+        "target_points": float(target_points),
+        "horizon_minutes": int(spec.max_hold_minutes),
+        "reward_risk": float(spec.reward_risk),
+        **metrics,
+    }
+
+
 def _mtf_spec(spec: LiveStrategySpec) -> MultiTimeframeSetupSpec:
     return MultiTimeframeSetupSpec(
         name=spec.strategy_id,
@@ -231,6 +420,13 @@ def _order_ready_snapshot(broker: IBKRPaperBroker, config: LiveSignalConfig) -> 
 def _safe_tick_by_tick_snapshot(broker: IBKRPaperBroker, contract: IBKRContractSpec, interval_seconds: float) -> list[dict[str, Any]]:
     try:
         return broker.tick_by_tick_snapshot(contract, interval_seconds=interval_seconds)
+    except Exception:
+        return []
+
+
+def _safe_historical_minute_bars(broker: IBKRPaperBroker, contract: IBKRContractSpec) -> list[dict[str, Any]]:
+    try:
+        return broker.historical_minute_bars(contract)
     except Exception:
         return []
 
@@ -343,6 +539,24 @@ def _build_minute_bars(history: pd.DataFrame) -> pd.DataFrame:
     return bars.sort_values("ts").reset_index(drop=True)
 
 
+def _historical_bars_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame()
+    bars = pd.DataFrame(rows)
+    if "ts" not in bars.columns:
+        return pd.DataFrame()
+    bars["ts"] = pd.to_datetime(bars["ts"], utc=True, errors="coerce")
+    for column in ["Open", "High", "Low", "Close", "Volume"]:
+        if column in bars.columns:
+            bars[column] = pd.to_numeric(bars[column], errors="coerce")
+    required = ["ts", "Open", "High", "Low", "Close", "Volume"]
+    missing = [column for column in required if column not in bars.columns]
+    if missing:
+        return pd.DataFrame()
+    bars = bars.dropna(subset=required).sort_values("ts").drop_duplicates("ts")
+    return bars[required].reset_index(drop=True)
+
+
 def _direction_from_z(z_score: float | None, threshold: float) -> int:
     if z_score is None:
         return 0
@@ -367,6 +581,16 @@ def _vwap_distance(data: pd.DataFrame) -> float:
     if vwap is None or vwap == 0:
         return 0.0
     return float((close - vwap) / vwap)
+
+
+def _volume_z(data: pd.DataFrame) -> pd.Series | None:
+    if "Volume" not in data.columns:
+        return None
+    volume = pd.to_numeric(data["Volume"], errors="coerce")
+    if volume.isna().all():
+        return None
+    rolling = volume.rolling(60, min_periods=20)
+    return (volume - rolling.mean()) / rolling.std().replace(0, pd.NA)
 
 
 def _mean(values: list[float]) -> float | None:

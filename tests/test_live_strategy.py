@@ -17,6 +17,8 @@ from tradingagents.execution import (
     LiveStrategySpec,
     LiveStrategySignalConfig,
     evaluate_mean_reversion_signal,
+    evaluate_regime_transition_signal,
+    regime_transition_spec,
     run_live_paper_trader_once,
 )
 
@@ -82,6 +84,21 @@ class FakeIB:
             ]
         )
 
+    def reqHistoricalData(self, contract, endDateTime, durationStr, barSizeSetting, whatToShow, useRTH, formatDate):
+        return [
+            SimpleNamespace(
+                date=row["ts"].to_pydatetime(),
+                open=row["Open"],
+                high=row["High"],
+                low=row["Low"],
+                close=row["Close"],
+                volume=row.get("Volume", 0),
+                wap=row["Close"],
+                barCount=1,
+            )
+            for _, row in _regime_bars().iterrows()
+        ]
+
     def cancelTickByTickData(self, ticker):
         return None
 
@@ -101,6 +118,40 @@ def _bars(*, prices: list[float], imbalance: float | None, start: datetime | Non
             "imbalance_last": [imbalance] * len(prices),
         }
     )
+
+
+def _regime_bars(*, include_volume: bool = True) -> pd.DataFrame:
+    start = datetime(2026, 5, 4, 20, 0, tzinfo=UTC)
+    rows = []
+    price = 100.0
+    for index in range(180):
+        timestamp = start + timedelta(minutes=index)
+        if index < 179:
+            open_price = price
+            close = price + (0.02 if index % 2 == 0 else -0.02)
+            high = max(open_price, close) + 0.08
+            low = min(open_price, close) - 0.08
+            price = close
+            volume = 100.0
+        else:
+            open_price = 100.0
+            close = 112.0
+            high = 112.5
+            low = 99.0
+            volume = 400.0
+            price = close
+        rows.append(
+            {
+                "ts": timestamp,
+                "Open": open_price,
+                "High": high,
+                "Low": low,
+                "Close": close,
+                "imbalance_last": 0.0,
+                **({"Volume": volume} if include_volume else {}),
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def _broker(tmp_path, fake_ib: FakeIB) -> IBKRPaperBroker:
@@ -166,6 +217,41 @@ def test_mean_reversion_all_session_allows_non_europe_window():
     assert evaluation["minute_of_day"] == 20 * 60 + 6
 
 
+def test_regime_transition_triggers_long_breakout_with_dynamic_bracket():
+    spec = LiveStrategySpec(
+        strategy_id="test_regime",
+        selected_alias="test_regime",
+        family="regime_transition",
+        session="us_late",
+        lookback=50,
+        width_atr_max=20.0,
+        efficiency_max=0.30,
+        displacement_atr_min=1.0,
+        body_share_min=0.50,
+        volume_z_min=0.0,
+        reward_risk=2.5,
+        max_hold_minutes=180,
+    )
+
+    evaluation = evaluate_regime_transition_signal(_regime_bars(), spec)
+
+    assert evaluation["triggered"]
+    assert evaluation["direction"] == 1
+    assert evaluation["side"] == "long_regime_transition"
+    assert evaluation["stop_points"] > 4.0
+    assert evaluation["target_points"] == evaluation["stop_points"] * 2.5
+    assert evaluation["horizon_minutes"] == 180
+
+
+def test_regime_transition_blocks_volume_filtered_strategy_without_volume():
+    spec = regime_transition_spec("optimized50_2r5_quality")
+
+    evaluation = evaluate_regime_transition_signal(_regime_bars(include_volume=False), spec)
+
+    assert not evaluation["triggered"]
+    assert evaluation["reason"] == "missing_volume_for_volume_z"
+
+
 def test_live_trader_blocks_when_strategy_history_is_insufficient(tmp_path):
     broker = _broker(tmp_path, FakeIB())
     result = run_live_paper_trader_once(
@@ -185,6 +271,34 @@ def test_live_trader_blocks_when_strategy_history_is_insufficient(tmp_path):
     assert "insufficient_bars" in result["reason"]
     assert not result["submitted"]
     assert not (tmp_path / "signal.csv").exists()
+
+
+def test_live_trader_regime_transition_uses_historical_ohlcv_bars(tmp_path, monkeypatch):
+    start = datetime(2026, 5, 4, 22, 59, tzinfo=UTC)
+    monkeypatch.setattr("tradingagents.execution.live_strategy._utc_now", lambda value=None: start)
+    broker = _broker(tmp_path, FakeIB(bid=112.0, ask=112.25, last=112.0))
+
+    result = run_live_paper_trader_once(
+        config=LivePaperTraderConfig(
+            live_signal_path=tmp_path / "signal.csv",
+            state_path=tmp_path / "state.json",
+            strategy_id="optimized50_2r5_quality",
+            selected_alias="optimized50_2r5_quality",
+            signal_mode="strategy",
+            strategy_spec=regime_transition_spec("optimized50_2r5_quality"),
+            contract=IBKRContractSpec(last_trade_date_or_contract_month="202606"),
+            strategy_signal=LiveStrategySignalConfig(history_path=tmp_path / "history.jsonl", tick_interval_seconds=0, min_bars=171),
+            max_hold_minutes=180,
+        ),
+        broker=broker,
+    )
+
+    assert result["status"] == "dry_run"
+    assert result["live_signal"]["signal_source"].startswith("strategy:optimized50_2r5_quality:long_regime_transition")
+    assert float(result["live_signal"]["strategy_stop_points"]) > 4.0
+    assert float(result["live_signal"]["strategy_target_points"]) > float(result["live_signal"]["strategy_stop_points"])
+    signal = pd.read_csv(tmp_path / "signal.csv")
+    assert float(signal.iloc[0]["strategy_volume_z"]) >= 0.5
 
 
 def test_live_trader_blocks_when_live_imbalance_is_missing(tmp_path, monkeypatch):

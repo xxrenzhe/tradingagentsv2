@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 import sys
 import time
@@ -122,13 +123,15 @@ def run_adaptive_portfolio_paper_once(
         selected_alias=selected_alias,
         row_index=row_index,
     )
+    stop_loss_points = _sample_optional_float(sample, "strategy_stop_points", config.stop_loss_points)
+    take_profit_points = _sample_optional_float(sample, "strategy_target_points", config.take_profit_points)
     intent = build_paper_intent_from_trade(
         sample,
         contract_month=config.contract_month,
         account=config.account,
         quantity=config.quantity,
-        stop_loss_points=config.stop_loss_points,
-        take_profit_points=config.take_profit_points,
+        stop_loss_points=stop_loss_points,
+        take_profit_points=take_profit_points,
         symbol=config.tick_recorder.symbol,
     ).normalized()
     key = _candidate_key(sample, intent.strategy_id)
@@ -240,6 +243,19 @@ def _candidate_key(sample: Any, strategy_id: str) -> str:
         str(sample.get("entry_price", "")),
     ]
     return "|".join(parts)
+
+
+def _sample_optional_float(sample: Any, key: str, fallback: float | None) -> float | None:
+    value = sample.get(key, None)
+    if value is None or value == "":
+        return fallback
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    if not math.isfinite(number):
+        return fallback
+    return number
 
 
 def _load_state(path: Path) -> dict[str, Any]:

@@ -238,6 +238,40 @@ def test_paper_runner_dry_run_records_state_and_skips_duplicate(tmp_path):
     assert state_path.with_suffix(".jsonl").exists()
 
 
+def test_paper_runner_uses_dynamic_strategy_bracket_points(tmp_path):
+    trades_path = tmp_path / "trades.csv"
+    state_path = tmp_path / "runner-state.json"
+    pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-05-01",
+                "entry_ts": "2026-05-01 10:30:00",
+                "exit_ts": "2026-05-01 13:30:00",
+                "direction": 1,
+                "entry_price": 18025.25,
+                "portfolio_rule": "regime_transition",
+                "selected_alias": "optimized50_2r5_quality",
+                "exit_reason": "live_bracket",
+                "strategy_stop_points": 9.5,
+                "strategy_target_points": 23.75,
+            }
+        ]
+    ).to_csv(trades_path, index=False)
+    broker = IBKRPaperBroker(
+        risk=IBKRPaperRiskConfig(allowed_accounts=("DU123",), allowed_symbols=("MNQ",)),
+        audit_path=tmp_path / "ibkr.jsonl",
+    )
+    config = PaperRunnerConfig(trades_path=trades_path, state_path=state_path, account="DU123")
+
+    result = run_adaptive_portfolio_paper_once(config=config, broker=broker)
+
+    assert result["status"] == "dry_run"
+    assert result["intent"]["stop_loss_price"] == 18015.75
+    assert result["intent"]["take_profit_price"] == 18049.0
+    assert "stop_loss_points=9.5000" in result["intent"]["reason"]
+    assert "take_profit_points=23.7500" in result["intent"]["reason"]
+
+
 def test_paper_runner_waits_when_live_signal_file_missing(tmp_path):
     config = PaperRunnerConfig(trades_path=tmp_path / "missing-live-signal.csv", state_path=tmp_path / "runner-state.json", submit=True)
 

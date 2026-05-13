@@ -836,6 +836,36 @@ class IBKRPaperBroker:
                 ib.cancelTickByTickData(contract, tick_type)
         return ticks
 
+    def historical_minute_bars(
+        self,
+        spec: IBKRContractSpec,
+        *,
+        duration: str = "2 D",
+        bar_size: str = "1 min",
+        what_to_show: str = "TRADES",
+        use_rth: bool = False,
+    ) -> list[dict[str, Any]]:
+        self._ensure_connected_for_market_data()
+        ib = self._ib()
+        if not hasattr(ib, "reqHistoricalData"):
+            return []
+        intent = IBKROrderIntent(action="BUY", quantity=1, **spec.to_intent_fields())
+        contract = _contract_for_broker(intent, self.ib)
+        if hasattr(ib, "qualifyContracts"):
+            qualified = ib.qualifyContracts(contract)
+            if qualified:
+                contract = qualified[0]
+        bars = ib.reqHistoricalData(
+            contract,
+            endDateTime=datetime.now(),
+            durationStr=duration,
+            barSizeSetting=bar_size,
+            whatToShow=what_to_show,
+            useRTH=use_rth,
+            formatDate=1,
+        )
+        return [_serialize_historical_bar(bar, spec.symbol) for bar in bars]
+
     def _orders(self, intent: IBKROrderIntent) -> list[Any]:
         if self.ib is not None and intent.stop_loss_price is not None and intent.take_profit_price is not None:
             return _build_bracket_order(intent, self.ib)
@@ -974,6 +1004,30 @@ def _serialize_tick_by_tick(tick: Any) -> dict[str, Any]:
         "exchange": getattr(tick, "exchange", None),
         "special_conditions": getattr(tick, "specialConditions", None),
     }
+
+
+def _serialize_historical_bar(bar: Any, symbol: str) -> dict[str, Any]:
+    return {
+        "event_type": "ibkr_historical_bar",
+        "symbol": symbol.upper(),
+        "ts": _serialize_bar_time(getattr(bar, "date", None)),
+        "Open": _optional_float(getattr(bar, "open", None)),
+        "High": _optional_float(getattr(bar, "high", None)),
+        "Low": _optional_float(getattr(bar, "low", None)),
+        "Close": _optional_float(getattr(bar, "close", None)),
+        "Volume": _optional_float(getattr(bar, "volume", None)),
+        "wap": _optional_float(getattr(bar, "wap", None)),
+        "bar_count": _optional_float(getattr(bar, "barCount", None)),
+    }
+
+
+def _serialize_bar_time(value: Any) -> str:
+    if isinstance(value, datetime):
+        timestamp = value
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=UTC)
+        return timestamp.astimezone(UTC).isoformat()
+    return str(value or "")
 
 
 def _optional_float(value: Any) -> float | None:

@@ -20,6 +20,8 @@ from .live_strategy import (
     LiveStrategySpec,
     build_strategy_live_signal_row,
     evaluate_mean_reversion_signal,
+    evaluate_regime_transition_signal,
+    regime_transition_spec,
 )
 from .agent_gate import (
     AgentGateConfig,
@@ -131,5 +133,7 @@ __all__ = [
     "select_feature_trigger",
     "walk_forward_gate_replay",
     "evaluate_mean_reversion_signal",
+    "evaluate_regime_transition_signal",
+    "regime_transition_spec",
     "LIVE_SIGNAL_COLUMNS",
 ]

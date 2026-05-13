@@ -24,6 +24,7 @@ from tradingagents.execution import (
     LiveStrategySignalConfig,
     run_live_paper_trader_daemon,
     run_live_paper_trader_once,
+    regime_transition_spec,
 )
 
 DEFAULT_STRATEGY_ID = BEST_MEAN_REVERSION_STRATEGY_ID
@@ -37,7 +38,7 @@ def main() -> int:
     parser.add_argument("--state-path", default=".tmp/mbp-live-paper-trader-state.json")
     parser.add_argument("--strategy-id", default=DEFAULT_STRATEGY_ID)
     parser.add_argument("--selected-alias", default=DEFAULT_SELECTED_ALIAS)
-    parser.add_argument("--strategy-family", choices=["mean_reversion", "mtf_setup"], default="mean_reversion")
+    parser.add_argument("--strategy-family", choices=["mean_reversion", "mtf_setup", "regime_transition"], default="mean_reversion")
     parser.add_argument("--imbalance-threshold", type=float, default=None)
     parser.add_argument("--signal-mode", choices=["strategy", "manual"], default="strategy")
     parser.add_argument("--direction", choices=["buy", "sell", "BUY", "SELL"], default=None)
@@ -96,6 +97,18 @@ def main() -> int:
     if args.strategy_family == "mtf_setup" and strategy_id == DEFAULT_STRATEGY_ID and selected_alias == DEFAULT_SELECTED_ALIAS:
         strategy_id = "mtf_setup"
         selected_alias = "mtf_setup"
+    strategy_spec = (
+        regime_transition_spec(strategy_id, selected_alias)
+        if args.strategy_family == "regime_transition"
+        else LiveStrategySpec(
+            strategy_id=strategy_id,
+            selected_alias=selected_alias,
+            family=args.strategy_family,
+            session=args.strategy_session,
+            htf_mode=args.htf_mode,
+            imbalance_threshold=0.3 if args.imbalance_threshold is None else args.imbalance_threshold,
+        )
+    )
     config = LivePaperTraderConfig(
         live_signal_path=Path(args.live_signal),
         state_path=Path(args.state_path),
@@ -103,14 +116,7 @@ def main() -> int:
         selected_alias=selected_alias,
         direction=direction,
         signal_mode=args.signal_mode,
-        strategy_spec=LiveStrategySpec(
-            strategy_id=strategy_id,
-            selected_alias=selected_alias,
-            family=args.strategy_family,
-            session=args.strategy_session,
-            htf_mode=args.htf_mode,
-            imbalance_threshold=0.3 if args.imbalance_threshold is None else args.imbalance_threshold,
-        ),
+        strategy_spec=strategy_spec,
         strategy_signal=LiveStrategySignalConfig(
             history_path=Path(args.history_path),
             max_history_minutes=args.max_history_minutes,

@@ -49,6 +49,14 @@ LIVE_SIGNAL_COLUMNS = [
     "setup_htf_trend",
     "setup_mtf_reclaim",
     "setup_ltf_trigger",
+    "strategy_stop_points",
+    "strategy_target_points",
+    "strategy_horizon_minutes",
+    "strategy_range_width_atr",
+    "strategy_range_efficiency",
+    "strategy_displacement_atr",
+    "strategy_body_share",
+    "strategy_volume_z",
 ]
 
 
@@ -133,6 +141,14 @@ def build_live_signal_row(
         "cumulative_net_points": 0.0,
         "exit_reason": "live_bracket",
         "signal_source": signal_source,
+        "strategy_stop_points": "",
+        "strategy_target_points": "",
+        "strategy_horizon_minutes": int(config.max_hold_minutes),
+        "strategy_range_width_atr": "",
+        "strategy_range_efficiency": "",
+        "strategy_displacement_atr": "",
+        "strategy_body_share": "",
+        "strategy_volume_z": "",
     }
 
 
