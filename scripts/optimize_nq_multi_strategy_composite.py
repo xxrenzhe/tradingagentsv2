@@ -17,6 +17,8 @@ CORE_TIER = "core_long_term"
 RESEARCH_TIER = "research_extension"
 REJECT_TIER = "reject"
 DEFAULT_MIN_FULL_YEAR_TRADES = 1001
+ROLLSTABLE_TIMECELL_SOURCE = "rollstable_timecell_oos"
+ROLLSTABLE_TIMECELL_LABEL = "rollstable_oos_2010_2019_timecell_month_hour"
 
 
 @dataclass(frozen=True)
@@ -84,6 +86,92 @@ def load_audit_metadata(path: str | Path) -> pd.DataFrame:
     return frame
 
 
+def summarize_for_audit(trades: pd.DataFrame) -> dict[str, float]:
+    if trades.empty:
+        return {
+            "trades": 0.0,
+            "net_points": 0.0,
+            "profit_factor": 0.0,
+            "win_rate": 0.0,
+            "payoff_ratio": 0.0,
+            "expectancy_points": 0.0,
+            "max_drawdown_points": 0.0,
+            "net_to_drawdown": 0.0,
+            "positive_year_rate": 0.0,
+            "worst_year_points": 0.0,
+            "positive_180d_rate": 0.0,
+            "worst_180d_points": 0.0,
+        }
+    frame = trades.sort_values("entry_ts").copy()
+    frame["entry_ts"] = pd.to_datetime(frame["entry_ts"], utc=True)
+    net = pd.to_numeric(frame["net_points"], errors="coerce").fillna(0.0)
+    wins = net[net > 0]
+    losses = net[net < 0]
+    equity = net.cumsum()
+    drawdown = equity.cummax() - equity
+    yearly = net.groupby(frame["entry_ts"].dt.year).sum()
+    rolling_180d = net.groupby(frame["entry_ts"].dt.floor("D")).sum().rolling(180, min_periods=30).sum().dropna()
+    gross_loss = float(-losses.sum())
+    avg_loss = float(-losses.mean()) if not losses.empty else 0.0
+    max_dd = float(drawdown.max()) if not drawdown.empty else 0.0
+    return {
+        "trades": float(len(frame)),
+        "net_points": float(net.sum()),
+        "profit_factor": float(wins.sum() / gross_loss) if gross_loss else (999.0 if float(wins.sum()) > 0.0 else 0.0),
+        "win_rate": float((net > 0).mean()),
+        "payoff_ratio": float(wins.mean() / avg_loss) if avg_loss else 0.0,
+        "expectancy_points": float(net.mean()),
+        "max_drawdown_points": max_dd,
+        "net_to_drawdown": float(net.sum() / max_dd) if max_dd else (999.0 if float(net.sum()) > 0.0 else 0.0),
+        "positive_year_rate": float((yearly > 0).mean()) if not yearly.empty else 0.0,
+        "worst_year_points": float(yearly.min()) if not yearly.empty else 0.0,
+        "positive_180d_rate": float((rolling_180d > 0).mean()) if not rolling_180d.empty else 0.0,
+        "worst_180d_points": float(rolling_180d.min()) if not rolling_180d.empty else 0.0,
+    }
+
+
+def augment_audit_with_rollstable_timecell(audit: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
+    path_value = str(getattr(args, "rollstable_timecell_trades", "") or "")
+    if not path_value:
+        return audit
+    path = Path(path_value)
+    if not path.exists() or not path.is_file():
+        return audit
+    trades = read_csv(path)
+    if trades.empty or not {"entry_ts", "exit_ts", "net_points", "direction"}.issubset(trades.columns):
+        return audit
+    label = str(getattr(args, "rollstable_timecell_label", ROLLSTABLE_TIMECELL_LABEL))
+    summary = summarize_for_audit(trades)
+    row = {column: np.nan for column in audit.columns}
+    row.update(
+        {
+            "strategy_source": ROLLSTABLE_TIMECELL_SOURCE,
+            "strategy_label": label,
+            "candidate": "Roll-stable OOS timecell direction map trained on 2010-2019",
+            "candidate_key": label,
+            "family": "rollstable_timecell_direction_map",
+            "sample_start_year": int(pd.to_datetime(trades["entry_ts"], utc=True).dt.year.min()),
+            "sample_end_year": int(pd.to_datetime(trades["entry_ts"], utc=True).dt.year.max()),
+            "sample_years": float(pd.to_datetime(trades["entry_ts"], utc=True).dt.year.nunique()),
+            "long_term_research_pass": False,
+            "paper_validation_pass": False,
+            "execution_validation_pass": False,
+            "live_risk_limits_pass": False,
+            "production_ready": False,
+            "readiness_tier": "continue_research",
+            "deployment_tier": RESEARCH_TIER,
+            "feature_family": "rollstable_timecell_direction_map",
+            "eligible_for_composite": True,
+            "coverage_candidate": False,
+            "cost_3_125_net_points": summary["net_points"],
+            **summary,
+        }
+    )
+    row["priority_score"] = priority_score(pd.Series(row))
+    existing = audit[~audit["strategy_label"].astype(str).eq(label)].copy()
+    return pd.concat([existing, pd.DataFrame([row])], ignore_index=True, sort=False)
+
+
 def deployment_tier(row: pd.Series) -> str:
     if as_bool(row.get("long_term_research_pass")):
         return CORE_TIER
@@ -114,6 +202,8 @@ def feature_family(row: pd.Series) -> str:
             return "smc_displacement_pullback"
         if "bos" in text:
             return "smc_bos_continuation"
+    if source == ROLLSTABLE_TIMECELL_SOURCE:
+        return "rollstable_timecell_direction_map"
     return source or "unknown"
 
 
@@ -148,6 +238,22 @@ def normalize_template_trades(path: str | Path, strategy_source: str, audit: pd.
     label_column = "template" if "template" in frame.columns else "candidate"
     frame["strategy_source"] = strategy_source
     frame["strategy_label"] = frame[label_column].astype(str)
+    return normalize_trade_columns(frame, audit)
+
+
+def normalize_rollstable_timecell_trades(path: str | Path, audit: pd.DataFrame, label: str) -> pd.DataFrame:
+    if not str(path):
+        return pd.DataFrame()
+    trades = read_csv(path)
+    if trades.empty:
+        return pd.DataFrame()
+    frame = trades.copy()
+    if "entry_ts" not in frame and "entry_exec_ts" in frame:
+        frame["entry_ts"] = frame["entry_exec_ts"]
+    frame["strategy_source"] = ROLLSTABLE_TIMECELL_SOURCE
+    frame["strategy_label"] = label
+    if "gross_points" not in frame:
+        frame["gross_points"] = frame["net_points"]
     return normalize_trade_columns(frame, audit)
 
 
@@ -197,6 +303,11 @@ def load_trade_pool(args: argparse.Namespace, audit: pd.DataFrame) -> pd.DataFra
         normalize_regime_trades(args.regime_trades, audit),
         normalize_template_trades(args.ofs_trades, "ict_order_flow_shift", audit),
         normalize_template_trades(args.screenshot_trades, "screenshot_smc_momentum", audit),
+        normalize_rollstable_timecell_trades(
+            getattr(args, "rollstable_timecell_trades", ""),
+            audit,
+            str(getattr(args, "rollstable_timecell_label", ROLLSTABLE_TIMECELL_LABEL)),
+        ),
     ]
     frames = [frame for frame in frames if not frame.empty]
     if not frames:
@@ -330,12 +441,12 @@ def fast_coverage_combos(
     audit: pd.DataFrame,
     args: argparse.Namespace,
 ) -> list[tuple[str, ...]]:
-    core_labels = candidates[
-        candidates["deployment_tier"].eq(CORE_TIER) & candidates["has_trade_coverage"]
-    ]["strategy_label"].astype(str).tolist()
-    if not core_labels:
+    seed_labels = candidates[
+        candidates["eligible_for_composite"] & candidates["has_trade_coverage"]
+    ].sort_values(["trade_rows", "priority_score"], ascending=[False, False])["strategy_label"].astype(str).tolist()
+    if not seed_labels:
         return []
-    core_results = [
+    seed_results = [
         evaluate_combo(
             trades,
             audit,
@@ -345,11 +456,23 @@ def fast_coverage_combos(
             annual_trade_floor=getattr(args, "min_full_year_trades", 0),
             coverage_objective=getattr(args, "coverage_objective", False),
         )
-        for label in core_labels
+        for label in seed_labels
     ]
-    best_core = max(core_results, key=lambda item: item.objective_score)
-    labels = list(best_core.labels)
+    quality_seed_results = [item for item in seed_results if quality_gate_pass(item.metrics, args)]
+    best_seed = max(quality_seed_results or seed_results, key=lambda item: item.objective_score)
+    labels = list(best_seed.labels)
     combos = [tuple(labels)]
+    core_labels = [
+        label
+        for label in candidates[
+            candidates["deployment_tier"].eq(CORE_TIER) & candidates["has_trade_coverage"]
+        ]["strategy_label"].astype(str).tolist()
+        if label not in labels
+    ]
+    for label in core_labels:
+        if len(labels) + 1 > args.max_combo_size:
+            break
+        combos.append(tuple(labels + [label]))
     coverage_pool = candidates[candidates["coverage_candidate"] & candidates["has_trade_coverage"]].copy()
     coverage_pool = coverage_pool.sort_values(["trade_rows", "priority_score"], ascending=[False, False]).head(
         getattr(args, "max_coverage_candidates", 0)
@@ -358,7 +481,7 @@ def fast_coverage_combos(
     family_by_label = dict(zip(candidates["strategy_label"].astype(str), candidates["feature_family"].astype(str), strict=False))
     family_limit = getattr(args, "coverage_max_per_family", None) or args.max_per_family
 
-    current = best_core
+    current = best_seed
     while remaining and len(labels) < args.max_combo_size and current.metrics.get("annual_trade_floor_pass", 0.0) < 1.0:
         current_deficit = current.metrics.get("annual_trade_floor_deficit", 0.0)
         best_add: tuple[tuple[float, float, float], str, ComboResult] | None = None
@@ -503,6 +626,19 @@ def annual_trade_floor_metrics(trades: pd.DataFrame, years: tuple[int, ...], flo
     }
 
 
+def annual_net_quality_metrics(trades: pd.DataFrame, years: tuple[int, ...]) -> dict[str, float]:
+    if not years:
+        return {"min_full_year_net_points": 0.0, "positive_full_year_net_rate": 0.0}
+    if trades.empty or "entry_ts" not in trades:
+        return {"min_full_year_net_points": 0.0, "positive_full_year_net_rate": 0.0}
+    net = pd.to_numeric(trades["net_points"], errors="coerce").fillna(0.0)
+    yearly = net.groupby(trades["entry_ts"].dt.year).sum().reindex(years, fill_value=0.0)
+    return {
+        "min_full_year_net_points": float(yearly.min()) if not yearly.empty else 0.0,
+        "positive_full_year_net_rate": float((yearly > 0).mean()) if not yearly.empty else 0.0,
+    }
+
+
 def summarize_trades(
     trades: pd.DataFrame,
     dropped: pd.DataFrame | None = None,
@@ -530,6 +666,7 @@ def summarize_trades(
             "risk_budgeted_max_drawdown_points": 0.0,
             "risk_budgeted_profit_factor": 0.0,
             **annual_trade_floor_metrics(trades, full_years, annual_trade_floor),
+            **annual_net_quality_metrics(trades, full_years),
         }
     frame = trades.sort_values(["entry_ts", "exit_ts"]).copy()
     net = pd.to_numeric(frame["net_points"], errors="coerce").fillna(0.0)
@@ -579,6 +716,7 @@ def summarize_trades(
         metrics["risk_budgeted_max_drawdown_points"] = metrics["max_drawdown_points"]
         metrics["risk_budgeted_profit_factor"] = metrics["profit_factor"]
     metrics.update(annual_trade_floor_metrics(frame, full_years, annual_trade_floor))
+    metrics.update(annual_net_quality_metrics(frame, full_years))
     return metrics
 
 
@@ -613,7 +751,56 @@ def coverage_objective_score(
     coverage_penalty = 1.0 - min(coverage_count, 8) * 0.03
     if deficit > 0:
         return float(-1_000_000.0 - deficit * 1000.0 + min_trades + base * 0.01)
-    return float(1_000_000.0 + min_trades * 10.0 + base * coverage_penalty)
+    quality_bonus = (
+        max(metrics.get("profit_factor", 0.0) - 1.0, 0.0) * 25000.0
+        + max(metrics.get("net_to_drawdown", 0.0), 0.0) * 1000.0
+        + max(metrics.get("min_full_year_net_points", 0.0), 0.0) * 2.0
+    )
+    return float(1_000_000.0 + quality_bonus + min_trades * 10.0 + base * coverage_penalty)
+
+
+def quality_gate_pass(metrics: dict[str, float], args: argparse.Namespace) -> bool:
+    if metrics.get("annual_trade_floor_pass", 0.0) < 1.0:
+        return False
+    if metrics.get("profit_factor", 0.0) < getattr(args, "min_profit_factor", 0.0):
+        return False
+    if metrics.get("net_points", 0.0) < getattr(args, "min_net_points", 0.0):
+        return False
+    if metrics.get("net_to_drawdown", 0.0) < getattr(args, "min_net_to_drawdown", 0.0):
+        return False
+    if metrics.get("positive_full_year_net_rate", 0.0) < getattr(args, "min_positive_full_year_net_rate", 0.0):
+        return False
+    return True
+
+
+def quality_gate_reasons(metrics: dict[str, float], args: argparse.Namespace) -> list[str]:
+    reasons: list[str] = []
+    if metrics.get("annual_trade_floor_pass", 0.0) < 1.0:
+        reasons.append(
+            f"完整年份最低交易数 {fmt_metric('min_full_year_trades', metrics.get('min_full_year_trades', 0.0))} "
+            f"< {fmt_metric('trades', getattr(args, 'min_full_year_trades', 0))}"
+        )
+    if metrics.get("profit_factor", 0.0) < getattr(args, "min_profit_factor", 0.0):
+        reasons.append(
+            f"PF {fmt_metric('profit_factor', metrics.get('profit_factor', 0.0))} "
+            f"< {fmt_metric('profit_factor', getattr(args, 'min_profit_factor', 0.0))}"
+        )
+    if metrics.get("net_points", 0.0) < getattr(args, "min_net_points", 0.0):
+        reasons.append(
+            f"净点 {fmt_metric('net_points', metrics.get('net_points', 0.0))} "
+            f"< {fmt_metric('net_points', getattr(args, 'min_net_points', 0.0))}"
+        )
+    if metrics.get("net_to_drawdown", 0.0) < getattr(args, "min_net_to_drawdown", 0.0):
+        reasons.append(
+            f"净值/回撤 {fmt_metric('net_to_drawdown', metrics.get('net_to_drawdown', 0.0))} "
+            f"< {fmt_metric('net_to_drawdown', getattr(args, 'min_net_to_drawdown', 0.0))}"
+        )
+    if metrics.get("positive_full_year_net_rate", 0.0) < getattr(args, "min_positive_full_year_net_rate", 0.0):
+        reasons.append(
+            f"完整年份正收益率 {fmt_metric('positive_full_year_net_rate', metrics.get('positive_full_year_net_rate', 0.0))} "
+            f"< {fmt_metric('positive_full_year_net_rate', getattr(args, 'min_positive_full_year_net_rate', 0.0))}"
+        )
+    return reasons
 
 
 def evaluate_combo(
@@ -723,7 +910,18 @@ def evaluate_combinations(
     return sorted(results, key=lambda item: item.objective_score, reverse=True)
 
 
-def select_best(results: list[ComboResult], *, annual_trade_floor: int = 0) -> ComboResult:
+def select_best(results: list[ComboResult], args: argparse.Namespace) -> ComboResult:
+    annual_trade_floor = getattr(args, "min_full_year_trades", 0)
+    quality_gated = [
+        item for item in results
+        if quality_gate_pass(item.metrics, args)
+        and item.eligibility != "coverage_research"
+    ]
+    if quality_gated:
+        return max(quality_gated, key=lambda item: item.objective_score)
+    any_quality_gated = [item for item in results if quality_gate_pass(item.metrics, args)]
+    if any_quality_gated:
+        return max(any_quality_gated, key=lambda item: item.objective_score)
     if annual_trade_floor > 0:
         passing = [item for item in results if item.metrics.get("annual_trade_floor_pass", 0.0) >= 1.0]
         if passing:
@@ -746,7 +944,7 @@ def walk_forward_years(
     audit: pd.DataFrame,
     args: argparse.Namespace,
 ) -> pd.DataFrame:
-    if trades.empty:
+    if trades.empty or getattr(args, "skip_walkforward", False):
         return pd.DataFrame()
     years = list(getattr(args, "full_years", tuple()))
     if not years:
@@ -775,7 +973,7 @@ def walk_forward_years(
         train_results = evaluate_combinations(train, covered, audit, train_args)
         if not train_results:
             continue
-        selected = select_best(train_results)
+        selected = select_best(train_results, train_args)
         test_result = evaluate_combo(test, audit, selected.labels, require_common_window=False)
         rows.append(
             {
@@ -859,6 +1057,9 @@ def svg_line(points: pd.DataFrame, *, width: int = 980, height: int = 300) -> st
     if points.empty:
         return "<p class=\"empty\">无曲线数据。</p>"
     values = pd.to_numeric(points["equity"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+    if len(values) > 1000:
+        indexes = np.unique(np.linspace(0, len(values) - 1, 1000).round().astype(int))
+        values = values[indexes]
     low = min(0.0, float(values.min()))
     high = max(0.0, float(values.max()))
     if high <= low:
@@ -950,6 +1151,7 @@ def build_html(
     full_years: tuple[int, ...],
     annual_trade_floor: int,
     max_walkforward_years: int,
+    quality_args: argparse.Namespace,
 ) -> str:
     metrics = best.metrics
     cards = [
@@ -974,13 +1176,23 @@ def build_html(
     annual_counts = annual_trade_table(best.trades, full_years, annual_trade_floor)
     wf_summary = summarize_walk_forward(walk_forward)
     floor_status = "通过" if metrics.get("annual_trade_floor_pass", 0.0) >= 1.0 else "未通过"
-    coverage_note_class = "note" if metrics.get("annual_trade_floor_pass", 0.0) >= 1.0 else "note bad"
-    walkforward_scope = (
-        f"当前报告抽样最近 {max_walkforward_years:,} 个完整年份；如需全量年度验证，可运行 "
-        "<code>--max-walkforward-years 0</code>。"
-        if max_walkforward_years > 0
-        else "当前报告执行所有完整年份的年度验证。"
+    quality_reasons = quality_gate_reasons(metrics, quality_args)
+    quality_status = "通过" if not quality_reasons else "未通过"
+    quality_reason_text = "；".join(quality_reasons) if quality_reasons else "所有质量门槛均通过。"
+    coverage_note_class = (
+        "note"
+        if metrics.get("annual_trade_floor_pass", 0.0) >= 1.0 and not quality_reasons
+        else "note bad"
     )
+    if getattr(quality_args, "skip_walkforward", False):
+        walkforward_scope = "本次按 <code>--skip-walkforward</code> 跳过年度 walk-forward；当前报告只展示静态组合选择结果。"
+    elif max_walkforward_years > 0:
+        walkforward_scope = (
+            f"当前报告抽样最近 {max_walkforward_years:,} 个完整年份；如需全量年度验证，可运行 "
+            "<code>--max-walkforward-years 0</code>。"
+        )
+    else:
+        walkforward_scope = "当前报告执行所有完整年份的年度验证。"
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -1035,7 +1247,7 @@ def build_html(
 <body>
   <header>
     <h1>NQ 多策略组合优化报告</h1>
-    <p class="subtitle">组合目标：在长期通过的 regime-transition 核心策略上，谨慎叠加 OFS/SMC 等不同行情特征；当前额外硬约束是每个完整年份至少 {annual_trade_floor:,} 笔交易，且仍需经过冲突处理、共同样本窗口排名和年度 walk-forward 检查。生成时间：{safe_text(generated_at)}。</p>
+    <p class="subtitle">组合目标：在长期通过的 regime-transition 核心策略上，谨慎叠加 OFS/SMC/roll-stable timecell 等不同行情特征；当前额外硬约束是每个完整年份至少 {annual_trade_floor:,} 笔交易，且 PF、净收益、净值/回撤和完整年份收益质量必须同时达标。生成时间：{safe_text(generated_at)}。</p>
     <div class="metric-grid">{card_html}</div>
   </header>
   <main>
@@ -1049,11 +1261,14 @@ def build_html(
         </div>
         <div class="{coverage_note_class}">
           <p><strong>年度交易次数约束：</strong>{floor_status}；检查年份：{safe_text(', '.join(str(year) for year in full_years) if full_years else 'N/A')}；完整年份最少交易数：{fmt_metric("min_full_year_trades", metrics.get("min_full_year_trades", 0.0))}。</p>
-          <p><strong>约束解释：</strong>只检查完整日历年，当前样本中的未完整年份不会用于年度下限判断。</p>
+          <p><strong>收益质量：</strong>{quality_status}；完整年份最低净点：{fmt_metric("min_full_year_net_points", metrics.get("min_full_year_net_points", 0.0))}；完整年份正收益率：{fmt_metric("positive_full_year_net_rate", metrics.get("positive_full_year_net_rate", 0.0))}。</p>
+          <p><strong>质量门槛：</strong>PF ≥ {fmt_metric("profit_factor", getattr(quality_args, "min_profit_factor", 0.0))}；净点 ≥ {fmt_metric("net_points", getattr(quality_args, "min_net_points", 0.0))}；净值/回撤 ≥ {fmt_metric("net_to_drawdown", getattr(quality_args, "min_net_to_drawdown", 0.0))}；完整年份正收益率 ≥ {fmt_metric("positive_full_year_net_rate", getattr(quality_args, "min_positive_full_year_net_rate", 0.0))}。</p>
+          <p><strong>未通过原因：</strong>{safe_text(quality_reason_text)}</p>
+          <p><strong>约束解释：</strong>只检查完整日历年，当前样本中的未完整年份不会用于年度下限判断。PF/收益质量优先于单纯凑交易次数。</p>
         </div>
         <div class="note warn">
           <p><strong>冲突处理：</strong>同一时间只允许一笔持仓；若交易重叠，按进场时间和候选优先级保留先触发/高优先级交易，其他信号记录为 conflict_dropped。</p>
-          <p><strong>关键限制：</strong>OFS/SMC 候选目前仍是研究层级，且部分 1 分钟 bar 策略存在同K进出假设，正式验证需使用严格成交模型或 tick replay。</p>
+          <p><strong>关键限制：</strong>OFS/SMC/timecell 候选目前仍是研究层级。timecell 候选使用 roll-stable 日主力合约和下一根 bar 入场，但仍需要 walk-forward、纸盘和更高滑点压力测试。</p>
         </div>
       </div>
     </section>
@@ -1119,6 +1334,8 @@ def build_html(
           ("min_full_year_trades", "完整年最少交易"),
           ("annual_trade_floor_pass", "年度交易达标"),
           ("annual_trade_floor_deficit", "交易缺口"),
+          ("min_full_year_net_points", "完整年最低净点"),
+          ("positive_full_year_net_rate", "完整年正收益"),
           ("positive_year_rate", "正年份率"),
           ("same_bar_exit_rate", "同K进出"),
           ("conflict_dropped", "冲突丢弃"),
@@ -1158,7 +1375,7 @@ def build_html(
 
 
 def write_outputs(args: argparse.Namespace) -> dict[str, object]:
-    audit = load_audit_metadata(args.audit)
+    audit = augment_audit_with_rollstable_timecell(load_audit_metadata(args.audit), args)
     trades = load_trade_pool(args, audit)
     min_full_year_trades = int(getattr(args, "min_full_year_trades", 0))
     max_walkforward_years = int(getattr(args, "max_walkforward_years", 0))
@@ -1173,7 +1390,7 @@ def write_outputs(args: argparse.Namespace) -> dict[str, object]:
     args.coverage_objective = min_full_year_trades > 0
     candidates = candidate_rows(audit, trades)
     results = evaluate_combinations(trades, candidates, audit, args)
-    best = select_best(results, annual_trade_floor=min_full_year_trades)
+    best = select_best(results, args)
     ranking = results_frame(results)
     walk_forward = walk_forward_years(trades, candidates, audit, args)
     generated_at = args.generated_at or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -1182,6 +1399,7 @@ def write_outputs(args: argparse.Namespace) -> dict[str, object]:
         "regime_trades": args.regime_trades,
         "ofs_trades": args.ofs_trades,
         "screenshot_trades": args.screenshot_trades,
+        "rollstable_timecell_trades": getattr(args, "rollstable_timecell_trades", ""),
     }
     html_text = build_html(
         best=best,
@@ -1193,6 +1411,7 @@ def write_outputs(args: argparse.Namespace) -> dict[str, object]:
         full_years=full_years,
         annual_trade_floor=min_full_year_trades,
         max_walkforward_years=max_walkforward_years,
+        quality_args=args,
     )
     for output_path, frame in [
         (Path(args.selected_trades_output), best.trades),
@@ -1219,6 +1438,8 @@ def write_outputs(args: argparse.Namespace) -> dict[str, object]:
         "full_years_checked": list(full_years),
         "annual_trade_floor": min_full_year_trades,
         "annual_trade_floor_pass": bool(best.metrics.get("annual_trade_floor_pass", 0.0)),
+        "quality_gate_pass": quality_gate_pass(best.metrics, args),
+        "quality_gate_reasons": quality_gate_reasons(best.metrics, args),
         "combo_count": int(len(results)),
         "candidate_count": int(len(candidates)),
     }
@@ -1231,6 +1452,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--regime-trades", default=".tmp/nq-regime-transition-readiness-trades.csv")
     parser.add_argument("--ofs-trades", default=".tmp/nq-ofs-candidate-pressure-trades.csv")
     parser.add_argument("--screenshot-trades", default=".tmp/nq-screenshot-smc-candidate-pressure-trades.csv")
+    parser.add_argument("--rollstable-timecell-trades", default=".tmp/nq-2010train-2020test-timecell-best-trades.csv")
+    parser.add_argument("--rollstable-timecell-label", default=ROLLSTABLE_TIMECELL_LABEL)
     parser.add_argument("--report", default="reports/NQ-multi-strategy-composite-optimizer.html")
     parser.add_argument("--selected-trades-output", default=".tmp/nq-multi-strategy-composite-selected-trades.csv")
     parser.add_argument("--dropped-trades-output", default=".tmp/nq-multi-strategy-composite-dropped-trades.csv")
@@ -1244,11 +1467,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-coverage-candidates", type=int, default=3)
     parser.add_argument("--coverage-seed-count", type=int, default=2)
     parser.add_argument("--min-full-year-trades", type=int, default=DEFAULT_MIN_FULL_YEAR_TRADES)
+    parser.add_argument("--min-profit-factor", type=float, default=1.25)
+    parser.add_argument("--min-net-points", type=float, default=10_000.0)
+    parser.add_argument("--min-net-to-drawdown", type=float, default=5.0)
+    parser.add_argument("--min-positive-full-year-net-rate", type=float, default=1.0)
     parser.add_argument("--full-year-start", type=int, default=2020)
     parser.add_argument("--full-year-end", type=int, default=0)
     parser.add_argument("--min-train-years", type=int, default=3)
     parser.add_argument("--min-train-trades", type=int, default=20)
-    parser.add_argument("--max-walkforward-years", type=int, default=2)
+    parser.add_argument("--max-walkforward-years", type=int, default=0)
+    parser.add_argument("--skip-walkforward", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--rank-on-common-window", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--generated-at", default="")
     return parser
