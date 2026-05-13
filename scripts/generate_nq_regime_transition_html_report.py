@@ -32,10 +32,11 @@ LOSSFILTER_45_FULL_SAMPLE_PATH = ROOT_DIR / ".tmp" / "nq-regime-transition-45m-l
 POINT_VALUE = 20.0
 MIN_FULL_YEAR_TRADES = 1000
 FULL_YEARS = list(range(2011, 2026))
-BEST_LABEL = "short45_2r5_balanced"
+BEST_LABEL = "optimized50_2r5_quality"
 BASELINE_LABEL = "highest_fullsample_3r_neighbor"
 LIGHTGLOW_CANDIDATE = "lightglow_premium_discount_reversal_1m_all_hold2m_reverse_time"
 LABEL_ORDER = [
+    "optimized50_2r5_quality",
     "short45_2r5_balanced",
     "short45_2r25_netdd",
     "short45_2r5_maxnet",
@@ -47,6 +48,7 @@ LABEL_ORDER = [
     "best_wf_2r",
 ]
 LABEL_NAMES = {
+    "optimized50_2r5_quality": "50m 2.5R quality",
     "short45_2r5_balanced": "45m 2.5R balanced",
     "short45_2r25_netdd": "45m 2.25R net/DD",
     "short45_2r5_maxnet": "45m 2.5R max net",
@@ -58,6 +60,7 @@ LABEL_NAMES = {
     "best_wf_2r": "120m 2R walk-forward",
 }
 PALETTE = {
+    "optimized50_2r5_quality": "#15803d",
     "short45_2r5_balanced": "#0f766e",
     "short45_2r25_netdd": "#2563eb",
     "short45_2r5_maxnet": "#7c3aed",
@@ -1158,7 +1161,7 @@ def render_report(
     """
 
     comparison_body = f"""
-    <p class="note">本次新增的 45m 短区间、低于 3R 的候选整体优于原 60m 3R：45m 2.5R balanced 在全样本净点数、净值/回撤和滚动90日稳定性上更均衡；45m 2.25R net/DD 的净值/回撤最高；原 60m 3R 作为基准保留。亏损过滤候选提高 PF、最大回撤和最差90日，但降低总交易数与总净点数，所以更适合作为防守版本，而不是替代主版本。</p>
+    <p class="note">本轮邻域优化后，50m 2.5R quality 成为新的主候选：它牺牲部分交易数，换取更高 PF、更低最大回撤和更高净值/回撤。45m 2.5R balanced、45m low-eff、45m loss-filter 和原 60m 3R 继续作为对照候选保留，用于监控不同波动环境下的稳健性。</p>
     {candidate_table(summary)}
     {gate_table(summary)}
     """
@@ -1167,7 +1170,7 @@ def render_report(
     <div class="rule-grid">
       <div>
         <h3>35/40m 与更低R的结论</h3>
-        <p>继续缩短区间到 35/40 分钟、并把止盈下探到 1.25R-2.25R 后，没有出现能同时超过 45m 2.5R balanced 的候选。35m 2.25R 代表候选交易数更高，但净点数、PF 和回撤质量均弱于主候选。</p>
+        <p>继续缩短区间到 35/40 分钟、并把止盈下探到 1.25R-2.25R 后，没有出现能同时超过 50m 2.5R quality 的候选。35m 2.25R 代表候选交易数更高，但 PF 和回撤质量弱于主候选。</p>
       </div>
       <div>
         <h3>为什么更低R没有胜出</h3>
@@ -1243,7 +1246,7 @@ def render_report(
     ])}
     <div class="callout warn-callout">
       <h3>结论</h3>
-      <p>亏损交易确实能教会策略如何防守：45m 2.5R loss-filter 把最大回撤从 <b>{fmt_num(best["max_drawdown_points"])}</b> 降到 <b>{fmt_num(lossfilter["max_drawdown_points"])}</b>，PF 从 <b>{fmt_num(best["profit_factor"], 3)}</b> 提高到 <b>{fmt_num(lossfilter["profit_factor"], 3)}</b>，90日正收益率从 <b>{fmt_pct(best["positive_90d_rate"])}</b> 提高到 <b>{fmt_pct(lossfilter["positive_90d_rate"])}</b>。代价是净点数从 <b>{fmt_num(best["net_points"])}</b> 降到 <b>{fmt_num(lossfilter["net_points"])}</b>、交易数从 <b>{fmt_int(best["trades"])}</b> 降到 <b>{fmt_int(lossfilter["trades"])}</b>。因此当前最合理的处理是：主策略保持 45m 2.5R balanced，防守过滤版本作为降风险版本继续跟踪。</p>
+      <p>亏损交易确实能教会策略如何防守：相比 45m balanced，新主候选 50m 2.5R quality 要求更窄区间、更强位移、更高实体占比和成交量确认，PF 提升到 <b>{fmt_num(best["profit_factor"], 3)}</b>，最大回撤降到 <b>{fmt_num(best["max_drawdown_points"])}</b>，净值/DD 提升到 <b>{fmt_num(best["net_to_drawdown"])}</b>。代价是交易数降到 <b>{fmt_int(best["trades"])}</b>，且正收益年份比例低于 45m low-eff。当前处理：50m quality 作为主候选，45m low-eff/loss-filter 作为环境漂移对照继续跟踪。</p>
     </div>
     """
 
@@ -1606,7 +1609,7 @@ def render_report(
     <header class="hero">
       <p class="kicker">NQ 1m Regime Transition Strategy Report</p>
       <h1>震荡结束、趋势起步：NQ 稳定盈利候选策略报告</h1>
-      <p class="hero-summary">本报告汇总 2010-2026 NQ 1分钟 bar 回测审计。继续缩短区间到 35/40m、降低固定 R 后，没有找到能全面超过 45m 2.5R balanced 的主策略；亏损交易反推的强位移/成交量/低效率过滤能明显降低回撤，但会牺牲总收益和交易数。当前更合理的组合是主策略保持 45m 2.5R，防守版本作为降风险方案继续纸面跟踪。</p>
+      <p class="hero-summary">本报告汇总 2010-2026 NQ 1分钟 bar 回测审计。本轮邻域优化从 45m 低效率突破推进到 50m quality 版本：要求更窄箱体、更强位移、更高实体占比和成交量确认。结果是 PF、最大回撤、每笔期望和净值/DD 均改善；代价是交易数更低、年度覆盖略弱。当前主候选升级为 50m 2.5R quality。</p>
       <code class="candidate-code">{candidate_code}</code>
       <div class="pills">
         {pill("生成时间", pd.Timestamp.now("UTC").strftime("%Y-%m-%d %H:%M UTC"))}

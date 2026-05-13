@@ -118,6 +118,22 @@ def default_candidates() -> list[AuditCandidate]:
             ),
         ),
         AuditCandidate(
+            "optimized50_2r5_quality",
+            RegimeCandidate(
+                lookback=50,
+                width_atr_max=8.0,
+                efficiency_max=0.15,
+                displacement_atr_min=1.8,
+                body_share_min=0.60,
+                volume_z_min=0.50,
+                session="us_late",
+                direction_filter="long",
+                stop_mode="break_bar",
+                reward_risk=2.5,
+                horizon_minutes=180,
+            ),
+        ),
+        AuditCandidate(
             "short35_2r25_lowr_probe",
             RegimeCandidate(
                 lookback=35,
@@ -186,7 +202,37 @@ def default_candidates() -> list[AuditCandidate]:
 
 def summarize_trades(trades: pd.DataFrame, costs: BacktestCosts) -> dict[str, Any]:
     if trades.empty:
-        return {}
+        return {
+            "trades": 0,
+            "net_points": 0.0,
+            "net_dollars": 0.0,
+            "gross_profit_points": 0.0,
+            "gross_loss_points": 0.0,
+            "profit_factor": 0.0,
+            "win_rate": 0.0,
+            "avg_win_points": 0.0,
+            "avg_loss_points": 0.0,
+            "payoff_ratio": 0.0,
+            "expectancy_points": 0.0,
+            "max_drawdown_points": 0.0,
+            "net_to_drawdown": 0.0,
+            "first_half_points": 0.0,
+            "second_half_points": 0.0,
+            "positive_years": 0,
+            "years": 0,
+            "positive_year_rate": 0.0,
+            "worst_year_points": 0.0,
+            "positive_month_rate": 0.0,
+            "worst_month_points": 0.0,
+            "positive_90d_rate": 0.0,
+            "worst_90d_points": 0.0,
+            "positive_180d_rate": 0.0,
+            "worst_180d_points": 0.0,
+            "max_losing_streak": 0,
+            "target_exit_share": 0.0,
+            "stop_exit_share": 0.0,
+            "timeout_exit_share": 0.0,
+        }
     net = pd.to_numeric(trades["net_points"], errors="coerce").fillna(0.0)
     wins = net[net > 0]
     losses = net[net < 0]
@@ -444,7 +490,7 @@ def main() -> int:
     parser.add_argument("--gate-positive-year-rate", type=float, default=0.70)
     parser.add_argument("--gate-positive-90d-rate", type=float, default=0.55)
     parser.add_argument("--gate-cost-points", type=float, default=2.125)
-    parser.add_argument("--lookbacks", type=int, nargs="+", default=[35, 45, 60, 120])
+    parser.add_argument("--lookbacks", type=int, nargs="+", default=[35, 45, 50, 60, 120])
     parser.add_argument("--width-atr-max", type=float, nargs="+", default=[12.0])
     parser.add_argument("--efficiency-max", type=float, nargs="+", default=[0.35])
     parser.add_argument("--displacement-atr-min", type=float, nargs="+", default=[1.0])

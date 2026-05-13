@@ -30,7 +30,7 @@ TRADES_PATH = ROOT_DIR / ".tmp" / "nq-regime-transition-readiness-trades.csv"
 YEARLY_PATH = ROOT_DIR / ".tmp" / "nq-regime-transition-readiness-yearly.csv"
 ROLLING90_PATH = ROOT_DIR / ".tmp" / "nq-regime-transition-readiness-rolling90.csv"
 REPORT_PATH = ROOT_DIR / "reports" / "NQ-smc-regime-trend-system-report.html"
-BEST_LABEL = "defensive45_2r5_loweff"
+BEST_LABEL = "optimized50_2r5_quality"
 
 
 def esc(value: object) -> str:
