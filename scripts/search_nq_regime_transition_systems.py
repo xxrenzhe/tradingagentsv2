@@ -250,7 +250,7 @@ def compute_outcomes(
     target_distances = stop_distances * float(reward_risk)
     target_prices = np.where(directions > 0, entry_prices + target_distances, entry_prices - target_distances)
 
-    offsets = np.arange(1, horizon + 1, dtype=int)
+    offsets = np.arange(2, horizon + 1, dtype=int)
     realized_exit_indexes = np.empty(len(events), dtype=int)
     exit_prices = np.empty(len(events), dtype=float)
     reason_codes = np.empty(len(events), dtype=np.int8)
@@ -272,12 +272,13 @@ def compute_outcomes(
             low_prices[window_indexes] <= target_prices[start:stop, None],
         )
         symbol_valid = symbol_codes[window_indexes] == symbol_codes[chunk_events, None]
-        first_invalid = np.where((~symbol_valid).any(axis=1), (~symbol_valid).argmax(axis=1), horizon + 1)
-        first_stop = np.where(stop_hits.any(axis=1), stop_hits.argmax(axis=1), horizon + 1)
-        first_target = np.where(target_hits.any(axis=1), target_hits.argmax(axis=1), horizon + 1)
+        no_hit_offset = horizon + 1
+        first_invalid = np.where((~symbol_valid).any(axis=1), offsets[(~symbol_valid).argmax(axis=1)], no_hit_offset)
+        first_stop = np.where(stop_hits.any(axis=1), offsets[stop_hits.argmax(axis=1)], no_hit_offset)
+        first_target = np.where(target_hits.any(axis=1), offsets[target_hits.argmax(axis=1)], no_hit_offset)
         stop_first = first_stop <= first_target
         bracket_hit = (first_stop <= horizon) | (first_target <= horizon)
-        exit_offsets = np.where(bracket_hit, np.minimum(first_stop, first_target) + 1, horizon)
+        exit_offsets = np.where(bracket_hit, np.minimum(first_stop, first_target), horizon)
         invalid_before_exit = first_invalid < exit_offsets
         chunk_exit_indexes = np.where(bracket_hit, chunk_events + exit_offsets, timeout_indexes[start:stop])
         chunk_exit_prices = close_prices[timeout_indexes[start:stop]]
@@ -310,7 +311,8 @@ def compute_outcomes(
     risk_points = stop_distances + costs.round_trip_cost_points
     reasons = np.asarray(["timeout", "stop_loss", "take_profit"], dtype=object)[reason_codes]
     out = events.copy()
-    out["entry_ts"] = pd.to_datetime(timestamps[event_indexes], utc=True)
+    out["signal_ts"] = pd.to_datetime(timestamps[event_indexes], utc=True)
+    out["entry_ts"] = pd.to_datetime(timestamps[entry_indexes], utc=True)
     out["exit_ts"] = pd.to_datetime(timestamps[realized_exit_indexes], utc=True)
     out["entry_index"] = entry_indexes
     out["exit_index"] = realized_exit_indexes
