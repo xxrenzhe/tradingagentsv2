@@ -628,6 +628,153 @@ def test_quality_gate_reports_no_pass_for_low_pf_high_frequency_candidate(tmp_pa
     assert "未通过原因" in html
 
 
+def test_bar_best_walkforward_trades_are_promoted_into_research_pool(tmp_path: Path) -> None:
+    audit = tmp_path / "audit.csv"
+    regime = tmp_path / "regime.csv"
+    ofs = tmp_path / "ofs.csv"
+    screenshot = tmp_path / "screenshot.csv"
+    bar_best = tmp_path / "bar_best.csv"
+    report = tmp_path / "report.html"
+    selected = tmp_path / "selected.csv"
+    dropped = tmp_path / "dropped.csv"
+    ranking = tmp_path / "ranking.csv"
+    components = tmp_path / "components.csv"
+    walkforward = tmp_path / "walkforward.csv"
+
+    pd.DataFrame(
+        [
+            {
+                "strategy_source": "regime_transition",
+                "strategy_label": "core_breakout",
+                "candidate": "core_breakout",
+                "long_term_research_pass": True,
+                "readiness_tier": "promote_to_paper_validation",
+                "net_points": 60.0,
+                "profit_factor": 1.5,
+                "net_to_drawdown": 3.0,
+                "positive_year_rate": 1.0,
+                "positive_180d_rate": 1.0,
+                "cost_3_125_net_points": 50.0,
+            }
+        ]
+    ).to_csv(audit, index=False)
+    pd.DataFrame(
+        [
+            {
+                "audit_label": "core_breakout",
+                "candidate": "core_breakout",
+                "entry_ts": "2022-01-03 14:00:00+00:00",
+                "exit_ts": "2022-01-03 14:05:00+00:00",
+                "direction": 1,
+                "net_points": 20.0,
+                "gross_points": 20.0,
+            },
+            {
+                "audit_label": "core_breakout",
+                "candidate": "core_breakout",
+                "entry_ts": "2022-01-04 14:00:00+00:00",
+                "exit_ts": "2022-01-04 14:05:00+00:00",
+                "direction": 1,
+                "net_points": 20.0,
+                "gross_points": 20.0,
+            },
+        ]
+    ).to_csv(regime, index=False)
+    pd.DataFrame(columns=["template", "entry_ts", "exit_ts", "direction", "net_points", "gross_points"]).to_csv(
+        ofs, index=False
+    )
+    pd.DataFrame(columns=["template", "entry_ts", "exit_ts", "direction", "net_points", "gross_points"]).to_csv(
+        screenshot, index=False
+    )
+    pd.DataFrame(
+        [
+            {
+                "candidate": "bar_best_momentum_lb60_thr0.0006_hold60_long_us_late",
+                "entry_ts": "2022-02-05 15:00:00+00:00",
+                "exit_ts": "2022-02-05 16:00:00+00:00",
+                "direction": 1,
+                "net_points": 90.0,
+                "gross_points": 90.5,
+                "entry_index": 100,
+                "exit_index": 160,
+            },
+            {
+                "candidate": "bar_best_momentum_lb60_thr0.0006_hold60_long_us_late",
+                "entry_ts": "2022-03-06 15:00:00+00:00",
+                "exit_ts": "2022-03-06 16:00:00+00:00",
+                "direction": 1,
+                "net_points": 90.0,
+                "gross_points": 90.5,
+                "entry_index": 200,
+                "exit_index": 260,
+            },
+            {
+                "candidate": "bar_best_mean_reversion_lb10_thr1_hold30_short_us_late",
+                "entry_ts": "2022-04-07 15:00:00+00:00",
+                "exit_ts": "2022-04-07 15:30:00+00:00",
+                "direction": -1,
+                "net_points": -10.0,
+                "gross_points": -9.5,
+                "entry_index": 300,
+                "exit_index": 330,
+            },
+        ]
+    ).to_csv(bar_best, index=False)
+
+    args = Namespace(
+        audit=str(audit),
+        regime_trades=str(regime),
+        ofs_trades=str(ofs),
+        screenshot_trades=str(screenshot),
+        bar_best_trades=str(bar_best),
+        report=str(report),
+        selected_trades_output=str(selected),
+        dropped_trades_output=str(dropped),
+        ranking_output=str(ranking),
+        components_output=str(components),
+        walkforward_output=str(walkforward),
+        max_combo_size=2,
+        max_per_family=1,
+        include_coverage_candidates=False,
+        coverage_max_per_family=1,
+        max_coverage_candidates=0,
+        min_full_year_trades=0,
+        min_profit_factor=0.0,
+        min_net_points=0.0,
+        min_net_to_drawdown=0.0,
+        min_positive_full_year_net_rate=0.0,
+        full_year_start=2020,
+        full_year_end=2022,
+        min_train_years=1,
+        min_train_trades=1,
+        max_walkforward_years=0,
+        skip_walkforward=True,
+        rank_on_common_window=False,
+        generated_at="2026-05-13 00:00 UTC",
+    )
+
+    result = module.write_outputs(args)
+
+    assert result["best_labels"] == [
+        "core_breakout",
+        "bar_best_momentum_lb60_thr0.0006_hold60_long_us_late",
+    ]
+    selected_frame = pd.read_csv(selected)
+    components_frame = pd.read_csv(components)
+    assert module.BAR_BEST_SOURCE in set(selected_frame["strategy_source"])
+    bar_best_rows = components_frame[components_frame["strategy_source"].eq(module.BAR_BEST_SOURCE)]
+    assert set(bar_best_rows["strategy_label"]) == {
+        "bar_best_momentum_lb60_thr0.0006_hold60_long_us_late",
+    }
+    assert bar_best_rows["feature_family"].iloc[0] == "bar_best_momentum"
+    assert bar_best_rows["eligible_for_composite"].iloc[0] in {True, "True"}
+    ranking_frame = pd.read_csv(ranking)
+    assert any(
+        "bar_best_momentum_lb60_thr0.0006_hold60_long_us_late" in combo
+        for combo in ranking_frame["combo"].astype(str)
+    )
+
+
 def test_rollstable_timecell_budget_cap_reallocates_to_core() -> None:
     audit = pd.DataFrame(
         [
@@ -680,6 +827,55 @@ def test_risk_budget_quality_gate_uses_budgeted_metrics() -> None:
     assert module.quality_gate_pass(metrics, args) is True
     args.quality_gate_uses_risk_budget = False
     assert module.quality_gate_pass(metrics, args) is False
+
+
+def test_select_best_fallback_prefers_quality_when_no_combo_passes_gate() -> None:
+    args = Namespace(
+        min_full_year_trades=1001,
+        quality_gate_uses_risk_budget=True,
+        min_profit_factor=1.25,
+        min_net_points=10_000.0,
+        min_net_to_drawdown=5.0,
+        min_positive_full_year_net_rate=1.0,
+    )
+    lower_quality = module.ComboResult(
+        name="higher objective but lower quality",
+        labels=("a", "b", "c"),
+        trades=pd.DataFrame(),
+        dropped_trades=pd.DataFrame(),
+        metrics={
+            "annual_trade_floor_pass": 1.0,
+            "risk_budgeted_profit_factor": 1.29,
+            "risk_budgeted_net_points": 3_400.0,
+            "risk_budgeted_net_to_drawdown": 21.0,
+            "risk_budgeted_positive_full_year_net_rate": 1.0,
+        },
+        objective_score=200.0,
+        eligibility="research_diversified",
+        window_start=None,
+        window_end=None,
+    )
+    higher_quality = module.ComboResult(
+        name="lower objective but better quality",
+        labels=("a", "b"),
+        trades=pd.DataFrame(),
+        dropped_trades=pd.DataFrame(),
+        metrics={
+            "annual_trade_floor_pass": 1.0,
+            "risk_budgeted_profit_factor": 1.32,
+            "risk_budgeted_net_points": 4_000.0,
+            "risk_budgeted_net_to_drawdown": 18.0,
+            "risk_budgeted_positive_full_year_net_rate": 1.0,
+        },
+        objective_score=100.0,
+        eligibility="research_diversified",
+        window_start=None,
+        window_end=None,
+    )
+
+    selected = module.select_best([lower_quality, higher_quality], args)
+
+    assert selected.name == "lower objective but better quality"
 
 
 def test_fast_coverage_combos_greedily_adds_quality_core() -> None:
@@ -786,6 +982,317 @@ def test_fast_coverage_combos_greedily_adds_quality_core() -> None:
 
     assert ("rollstable",) in combos
     assert ("rollstable", "core_a") in combos
+
+
+def test_fast_coverage_combos_greedily_adds_quality_research_overlay() -> None:
+    candidates = pd.DataFrame(
+        [
+            {
+                "strategy_label": "rollstable",
+                "eligible_for_composite": True,
+                "has_trade_coverage": True,
+                "deployment_tier": module.RESEARCH_TIER,
+                "feature_family": module.ROLLSTABLE_TIMECELL_FAMILY,
+                "trade_rows": 8,
+                "priority_score": 10.0,
+                "coverage_candidate": False,
+            },
+            {
+                "strategy_label": "bar_best_momentum",
+                "eligible_for_composite": True,
+                "has_trade_coverage": True,
+                "deployment_tier": module.RESEARCH_TIER,
+                "feature_family": "bar_best_momentum",
+                "trade_rows": 2,
+                "priority_score": 200.0,
+                "coverage_candidate": False,
+            },
+        ]
+    )
+    audit = candidates.copy()
+    audit["strategy_source"] = ["rollstable_timecell_oos", module.BAR_BEST_SOURCE]
+    trades = pd.DataFrame(
+        [
+            *[
+                {
+                    "strategy_label": "rollstable",
+                    "entry_ts": pd.Timestamp(f"2020-01-01 10:{index:02d}:00", tz="UTC"),
+                    "exit_ts": pd.Timestamp(f"2020-01-01 10:{index + 1:02d}:00", tz="UTC"),
+                    "net_points": 1.0,
+                    "gross_points": 1.0,
+                    "direction": 1,
+                    "priority_score": 10.0,
+                    "strategy_source": "rollstable_timecell_oos",
+                    "feature_family": module.ROLLSTABLE_TIMECELL_FAMILY,
+                }
+                for index in range(4)
+            ],
+            *[
+                {
+                    "strategy_label": "rollstable",
+                    "entry_ts": pd.Timestamp(f"2021-01-01 10:{index:02d}:00", tz="UTC"),
+                    "exit_ts": pd.Timestamp(f"2021-01-01 10:{index + 1:02d}:00", tz="UTC"),
+                    "net_points": 1.0,
+                    "gross_points": 1.0,
+                    "direction": 1,
+                    "priority_score": 10.0,
+                    "strategy_source": "rollstable_timecell_oos",
+                    "feature_family": module.ROLLSTABLE_TIMECELL_FAMILY,
+                }
+                for index in range(4)
+            ],
+            {
+                "strategy_label": "bar_best_momentum",
+                "entry_ts": pd.Timestamp("2020-02-01 10:00:00", tz="UTC"),
+                "exit_ts": pd.Timestamp("2020-02-01 10:01:00", tz="UTC"),
+                "net_points": 200.0,
+                "gross_points": 200.0,
+                "direction": 1,
+                "priority_score": 200.0,
+                "strategy_source": module.BAR_BEST_SOURCE,
+                "feature_family": "bar_best_momentum",
+            },
+            {
+                "strategy_label": "bar_best_momentum",
+                "entry_ts": pd.Timestamp("2021-02-01 10:00:00", tz="UTC"),
+                "exit_ts": pd.Timestamp("2021-02-01 10:01:00", tz="UTC"),
+                "net_points": 200.0,
+                "gross_points": 200.0,
+                "direction": 1,
+                "priority_score": 200.0,
+                "strategy_source": module.BAR_BEST_SOURCE,
+                "feature_family": "bar_best_momentum",
+            },
+        ]
+    )
+    trades["same_bar_exit"] = False
+    args = Namespace(
+        rank_on_common_window=False,
+        full_years=(2020, 2021),
+        min_full_year_trades=4,
+        coverage_objective=True,
+        include_coverage_candidates=True,
+        max_combo_size=2,
+        max_per_family=1,
+        coverage_max_per_family=2,
+        max_coverage_candidates=0,
+        min_profit_factor=0.0,
+        min_net_points=0.0,
+        min_net_to_drawdown=0.0,
+        min_positive_full_year_net_rate=0.0,
+        quality_gate_uses_risk_budget=True,
+        rollstable_timecell_max_risk_budget=0.10,
+        max_research_overlay_candidates=24,
+    )
+
+    combos = module.fast_coverage_combos(trades, candidates, audit, args)
+
+    assert ("rollstable",) in combos
+    assert ("rollstable", "bar_best_momentum") in combos
+
+
+def test_fast_coverage_overlay_candidate_limit_is_configurable() -> None:
+    candidates = pd.DataFrame(
+        [
+            {
+                "strategy_label": "rollstable",
+                "eligible_for_composite": True,
+                "has_trade_coverage": True,
+                "deployment_tier": module.RESEARCH_TIER,
+                "feature_family": module.ROLLSTABLE_TIMECELL_FAMILY,
+                "trade_rows": 8,
+                "priority_score": 100.0,
+                "coverage_candidate": False,
+            },
+            {
+                "strategy_label": "weak_overlay",
+                "eligible_for_composite": True,
+                "has_trade_coverage": True,
+                "deployment_tier": module.RESEARCH_TIER,
+                "feature_family": "bar_best_momentum",
+                "trade_rows": 2,
+                "priority_score": 90.0,
+                "coverage_candidate": False,
+            },
+            {
+                "strategy_label": "strong_overlay",
+                "eligible_for_composite": True,
+                "has_trade_coverage": True,
+                "deployment_tier": module.RESEARCH_TIER,
+                "feature_family": "bar_best_mean_reversion",
+                "trade_rows": 2,
+                "priority_score": 80.0,
+                "coverage_candidate": False,
+            },
+        ]
+    )
+    audit = candidates.copy()
+    audit["strategy_source"] = ["rollstable_timecell_oos", module.BAR_BEST_SOURCE, module.BAR_BEST_SOURCE]
+    rows: list[dict[str, object]] = []
+    for year in (2020, 2021):
+        rows.extend(
+            [
+                {
+                    "strategy_label": "rollstable",
+                    "entry_ts": pd.Timestamp(f"{year}-01-01 10:{index:02d}:00", tz="UTC"),
+                    "exit_ts": pd.Timestamp(f"{year}-01-01 10:{index + 1:02d}:00", tz="UTC"),
+                    "net_points": 1.0,
+                    "gross_points": 1.0,
+                    "direction": 1,
+                    "priority_score": 100.0,
+                    "strategy_source": "rollstable_timecell_oos",
+                    "feature_family": module.ROLLSTABLE_TIMECELL_FAMILY,
+                    "same_bar_exit": False,
+                }
+                for index in range(4)
+            ]
+        )
+        rows.append(
+            {
+                "strategy_label": "weak_overlay",
+                "entry_ts": pd.Timestamp(f"{year}-02-01 10:00:00", tz="UTC"),
+                "exit_ts": pd.Timestamp(f"{year}-02-01 10:01:00", tz="UTC"),
+                "net_points": 2.0,
+                "gross_points": 2.0,
+                "direction": 1,
+                "priority_score": 90.0,
+                "strategy_source": module.BAR_BEST_SOURCE,
+                "feature_family": "bar_best_momentum",
+                "same_bar_exit": False,
+            }
+        )
+        rows.append(
+            {
+                "strategy_label": "strong_overlay",
+                "entry_ts": pd.Timestamp(f"{year}-03-01 10:00:00", tz="UTC"),
+                "exit_ts": pd.Timestamp(f"{year}-03-01 10:01:00", tz="UTC"),
+                "net_points": 200.0,
+                "gross_points": 200.0,
+                "direction": 1,
+                "priority_score": 80.0,
+                "strategy_source": module.BAR_BEST_SOURCE,
+                "feature_family": "bar_best_mean_reversion",
+                "same_bar_exit": False,
+            }
+        )
+    trades = pd.DataFrame(rows)
+    args = Namespace(
+        rank_on_common_window=False,
+        full_years=(2020, 2021),
+        min_full_year_trades=4,
+        coverage_objective=True,
+        include_coverage_candidates=True,
+        max_combo_size=2,
+        max_per_family=1,
+        coverage_max_per_family=2,
+        max_coverage_candidates=0,
+        min_profit_factor=0.0,
+        min_net_points=0.0,
+        min_net_to_drawdown=0.0,
+        min_positive_full_year_net_rate=0.0,
+        quality_gate_uses_risk_budget=True,
+        rollstable_timecell_max_risk_budget=0.10,
+        max_research_overlay_candidates=2,
+    )
+
+    limited = module.fast_coverage_combos(trades, candidates, audit, args)
+    args.max_research_overlay_candidates = 0
+    unlimited = module.fast_coverage_combos(trades, candidates, audit, args)
+
+    assert ("rollstable", "strong_overlay") not in limited
+    assert ("rollstable", "strong_overlay") in unlimited
+
+
+def test_fast_coverage_seed_candidate_limit_is_configurable() -> None:
+    candidates = pd.DataFrame(
+        [
+            {
+                "strategy_label": "wide_low_quality",
+                "eligible_for_composite": True,
+                "has_trade_coverage": True,
+                "deployment_tier": module.RESEARCH_TIER,
+                "feature_family": "wide_low_quality",
+                "trade_rows": 10,
+                "priority_score": 10.0,
+                "coverage_candidate": False,
+            },
+            {
+                "strategy_label": "narrow_high_quality",
+                "eligible_for_composite": True,
+                "has_trade_coverage": True,
+                "deployment_tier": module.RESEARCH_TIER,
+                "feature_family": "narrow_high_quality",
+                "trade_rows": 8,
+                "priority_score": 200.0,
+                "coverage_candidate": False,
+            },
+        ]
+    )
+    audit = candidates.copy()
+    audit["strategy_source"] = [module.BAR_BEST_SOURCE, module.BAR_BEST_SOURCE]
+    rows: list[dict[str, object]] = []
+    for year in (2020, 2021):
+        rows.extend(
+            [
+                {
+                    "strategy_label": "wide_low_quality",
+                    "entry_ts": pd.Timestamp(f"{year}-01-01 10:{index:02d}:00", tz="UTC"),
+                    "exit_ts": pd.Timestamp(f"{year}-01-01 10:{index + 1:02d}:00", tz="UTC"),
+                    "net_points": 1.0,
+                    "gross_points": 1.0,
+                    "direction": 1,
+                    "priority_score": 10.0,
+                    "strategy_source": module.BAR_BEST_SOURCE,
+                    "feature_family": "wide_low_quality",
+                    "same_bar_exit": False,
+                }
+                for index in range(5)
+            ]
+        )
+        rows.extend(
+            [
+                {
+                    "strategy_label": "narrow_high_quality",
+                    "entry_ts": pd.Timestamp(f"{year}-02-01 10:{index:02d}:00", tz="UTC"),
+                    "exit_ts": pd.Timestamp(f"{year}-02-01 10:{index + 1:02d}:00", tz="UTC"),
+                    "net_points": 50.0,
+                    "gross_points": 50.0,
+                    "direction": 1,
+                    "priority_score": 200.0,
+                    "strategy_source": module.BAR_BEST_SOURCE,
+                    "feature_family": "narrow_high_quality",
+                    "same_bar_exit": False,
+                }
+                for index in range(4)
+            ]
+        )
+    trades = pd.DataFrame(rows)
+    args = Namespace(
+        rank_on_common_window=False,
+        full_years=(2020, 2021),
+        min_full_year_trades=4,
+        coverage_objective=True,
+        include_coverage_candidates=True,
+        max_combo_size=1,
+        max_per_family=1,
+        coverage_max_per_family=1,
+        max_coverage_candidates=0,
+        min_profit_factor=0.0,
+        min_net_points=0.0,
+        min_net_to_drawdown=0.0,
+        min_positive_full_year_net_rate=0.0,
+        quality_gate_uses_risk_budget=True,
+        rollstable_timecell_max_risk_budget=0.10,
+        max_fast_seed_candidates=1,
+        max_research_overlay_candidates=24,
+    )
+
+    limited = module.fast_coverage_combos(trades, candidates, audit, args)
+    args.max_fast_seed_candidates = 0
+    unlimited = module.fast_coverage_combos(trades, candidates, audit, args)
+
+    assert limited == [("wide_low_quality",)]
+    assert unlimited == [("narrow_high_quality",)]
 
 
 def test_svg_line_downsamples_large_equity_curve() -> None:

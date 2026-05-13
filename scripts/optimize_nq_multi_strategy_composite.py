@@ -20,6 +20,7 @@ DEFAULT_MIN_FULL_YEAR_TRADES = 1001
 ROLLSTABLE_TIMECELL_SOURCE = "rollstable_timecell_oos"
 ROLLSTABLE_TIMECELL_LABEL = "rollstable_oos_2010_2019_timecell_month_hour"
 ROLLSTABLE_TIMECELL_FAMILY = "rollstable_timecell_direction_map"
+BAR_BEST_SOURCE = "bar_best_walkforward"
 
 
 @dataclass(frozen=True)
@@ -173,6 +174,71 @@ def augment_audit_with_rollstable_timecell(audit: pd.DataFrame, args: argparse.N
     return pd.concat([existing, pd.DataFrame([row])], ignore_index=True, sort=False)
 
 
+def bar_best_family(label: str) -> str:
+    text = str(label).lower()
+    if "mean_reversion" in text:
+        return "bar_best_mean_reversion"
+    if "momentum" in text:
+        return "bar_best_momentum"
+    if "support_reclaim" in text:
+        return "bar_best_support_reclaim"
+    if "vwap_reclaim" in text:
+        return "bar_best_vwap_reclaim"
+    if "breakout_retest" in text:
+        return "bar_best_breakout_retest"
+    return "bar_best_other"
+
+
+def augment_audit_with_bar_best(audit: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
+    path_value = str(getattr(args, "bar_best_trades", "") or "")
+    if not path_value:
+        return audit
+    path = Path(path_value)
+    if not path.exists() or not path.is_file():
+        return audit
+    trades = read_csv(path)
+    if trades.empty or not {"candidate", "entry_ts", "exit_ts", "net_points", "direction"}.issubset(trades.columns):
+        return audit
+
+    rows: list[dict[str, Any]] = []
+    for label, group in trades.groupby(trades["candidate"].astype(str)):
+        summary = summarize_for_audit(group)
+        if summary["net_points"] <= 0.0:
+            continue
+        row = {column: np.nan for column in audit.columns}
+        row.update(
+            {
+                "strategy_source": BAR_BEST_SOURCE,
+                "strategy_label": str(label),
+                "candidate": f"Bar-best walk-forward candidate: {label}",
+                "candidate_key": str(label),
+                "family": bar_best_family(str(label)),
+                "sample_start_year": int(pd.to_datetime(group["entry_ts"], utc=True).dt.year.min()),
+                "sample_end_year": int(pd.to_datetime(group["entry_ts"], utc=True).dt.year.max()),
+                "sample_years": float(pd.to_datetime(group["entry_ts"], utc=True).dt.year.nunique()),
+                "long_term_research_pass": False,
+                "paper_validation_pass": False,
+                "execution_validation_pass": False,
+                "live_risk_limits_pass": False,
+                "production_ready": False,
+                "readiness_tier": "continue_research",
+                "deployment_tier": RESEARCH_TIER,
+                "feature_family": bar_best_family(str(label)),
+                "eligible_for_composite": True,
+                "coverage_candidate": False,
+                "cost_3_125_net_points": summary["net_points"],
+                **summary,
+            }
+        )
+        row["priority_score"] = priority_score(pd.Series(row))
+        rows.append(row)
+    if not rows:
+        return audit
+    labels = {str(row["strategy_label"]) for row in rows}
+    existing = audit[~audit["strategy_label"].astype(str).isin(labels)].copy()
+    return pd.concat([existing, pd.DataFrame(rows)], ignore_index=True, sort=False)
+
+
 def deployment_tier(row: pd.Series) -> str:
     if as_bool(row.get("long_term_research_pass")):
         return CORE_TIER
@@ -205,6 +271,8 @@ def feature_family(row: pd.Series) -> str:
             return "smc_bos_continuation"
     if source == ROLLSTABLE_TIMECELL_SOURCE:
         return ROLLSTABLE_TIMECELL_FAMILY
+    if source == BAR_BEST_SOURCE:
+        return bar_best_family(label)
     return source or "unknown"
 
 
@@ -253,6 +321,20 @@ def normalize_rollstable_timecell_trades(path: str | Path, audit: pd.DataFrame, 
         frame["entry_ts"] = frame["entry_exec_ts"]
     frame["strategy_source"] = ROLLSTABLE_TIMECELL_SOURCE
     frame["strategy_label"] = label
+    if "gross_points" not in frame:
+        frame["gross_points"] = frame["net_points"]
+    return normalize_trade_columns(frame, audit)
+
+
+def normalize_bar_best_trades(path: str | Path, audit: pd.DataFrame) -> pd.DataFrame:
+    if not str(path):
+        return pd.DataFrame()
+    trades = read_csv(path)
+    if trades.empty or "candidate" not in trades.columns:
+        return pd.DataFrame()
+    frame = trades.copy()
+    frame["strategy_source"] = BAR_BEST_SOURCE
+    frame["strategy_label"] = frame["candidate"].astype(str)
     if "gross_points" not in frame:
         frame["gross_points"] = frame["net_points"]
     return normalize_trade_columns(frame, audit)
@@ -309,6 +391,7 @@ def load_trade_pool(args: argparse.Namespace, audit: pd.DataFrame) -> pd.DataFra
             audit,
             str(getattr(args, "rollstable_timecell_label", ROLLSTABLE_TIMECELL_LABEL)),
         ),
+        normalize_bar_best_trades(getattr(args, "bar_best_trades", ""), audit),
     ]
     frames = [frame for frame in frames if not frame.empty]
     if not frames:
@@ -442,9 +525,13 @@ def fast_coverage_combos(
     audit: pd.DataFrame,
     args: argparse.Namespace,
 ) -> list[tuple[str, ...]]:
-    seed_labels = candidates[
+    seed_pool = candidates[
         candidates["eligible_for_composite"] & candidates["has_trade_coverage"]
-    ].sort_values(["trade_rows", "priority_score"], ascending=[False, False])["strategy_label"].astype(str).tolist()
+    ].sort_values(["trade_rows", "priority_score"], ascending=[False, False])
+    max_seed = int(getattr(args, "max_fast_seed_candidates", 12) or 0)
+    if max_seed > 0:
+        seed_pool = seed_pool.head(max_seed)
+    seed_labels = seed_pool["strategy_label"].astype(str).tolist()
     if not seed_labels:
         return []
     seed_results = [
@@ -464,17 +551,21 @@ def fast_coverage_combos(
     best_seed = max(quality_seed_results or seed_results, key=lambda item: item.objective_score)
     labels = list(best_seed.labels)
     combos = [tuple(labels)]
-    core_pool = candidates[
-        candidates["deployment_tier"].eq(CORE_TIER) & candidates["has_trade_coverage"]
-    ].sort_values(["priority_score", "trade_rows"], ascending=[False, False])
-    core_labels = [label for label in core_pool["strategy_label"].astype(str).tolist() if label not in labels]
     current = best_seed
     family_by_label = dict(zip(candidates["strategy_label"].astype(str), candidates["feature_family"].astype(str), strict=False))
     family_limit = getattr(args, "coverage_max_per_family", None) or args.max_per_family
-    remaining_core = list(core_labels)
-    while remaining_core and len(labels) < args.max_combo_size:
+    overlay_pool = candidates[
+        candidates["eligible_for_composite"] & candidates["has_trade_coverage"]
+    ].sort_values(["priority_score", "trade_rows"], ascending=[False, False])
+    max_overlay = int(getattr(args, "max_research_overlay_candidates", 24) or 0)
+    if max_overlay > 0:
+        overlay_pool = overlay_pool.head(max_overlay)
+    remaining_overlay = [
+        label for label in overlay_pool["strategy_label"].astype(str).tolist() if label not in labels
+    ]
+    while remaining_overlay and len(labels) < args.max_combo_size:
         best_add: tuple[float, str, ComboResult] | None = None
-        for label in remaining_core:
+        for label in remaining_overlay:
             proposed = tuple(labels + [label])
             family_counts = pd.Series([family_by_label.get(item, "") for item in proposed]).value_counts()
             if int(family_counts.max()) > family_limit:
@@ -494,7 +585,7 @@ def fast_coverage_combos(
         if best_add is None or best_add[0] <= current.objective_score:
             break
         labels.append(best_add[1])
-        remaining_core.remove(best_add[1])
+        remaining_overlay.remove(best_add[1])
         current = best_add[2]
         combos.append(tuple(labels))
     coverage_pool = candidates[candidates["coverage_candidate"] & candidates["has_trade_coverage"]].copy()
@@ -937,6 +1028,24 @@ def quality_gate_reasons(metrics: dict[str, float], args: argparse.Namespace) ->
     return reasons
 
 
+def quality_fallback_key(metrics: dict[str, float], args: argparse.Namespace) -> tuple[float, ...]:
+    checks = [
+        metrics.get("annual_trade_floor_pass", 0.0) >= 1.0,
+        quality_value(metrics, args, "profit_factor") >= getattr(args, "min_profit_factor", 0.0),
+        quality_value(metrics, args, "net_points") >= getattr(args, "min_net_points", 0.0),
+        quality_value(metrics, args, "net_to_drawdown") >= getattr(args, "min_net_to_drawdown", 0.0),
+        quality_value(metrics, args, "positive_full_year_net_rate")
+        >= getattr(args, "min_positive_full_year_net_rate", 0.0),
+    ]
+    return (
+        float(sum(checks)),
+        quality_value(metrics, args, "net_points"),
+        quality_value(metrics, args, "profit_factor"),
+        quality_value(metrics, args, "net_to_drawdown"),
+        quality_value(metrics, args, "positive_full_year_net_rate"),
+    )
+
+
 def evaluate_combo(
     trades: pd.DataFrame,
     audit: pd.DataFrame,
@@ -1064,7 +1173,13 @@ def select_best(results: list[ComboResult], args: argparse.Namespace) -> ComboRe
     if annual_trade_floor > 0:
         passing = [item for item in results if item.metrics.get("annual_trade_floor_pass", 0.0) >= 1.0]
         if passing:
-            return max(passing, key=lambda item: item.objective_score)
+            return max(
+                passing,
+                key=lambda item: (
+                    *quality_fallback_key(item.metrics, args),
+                    item.objective_score,
+                ),
+            )
     diversified = [item for item in results if len(item.labels) >= 2 and item.eligibility == "research_diversified"]
     if diversified:
         return max(diversified, key=lambda item: item.objective_score)
@@ -1110,6 +1225,8 @@ def walk_forward_years(
             coverage_objective=False,
             quality_gate_uses_risk_budget=getattr(args, "quality_gate_uses_risk_budget", True),
             rollstable_timecell_max_risk_budget=getattr(args, "rollstable_timecell_max_risk_budget", 0.10),
+            max_fast_seed_candidates=getattr(args, "max_fast_seed_candidates", 12),
+            max_research_overlay_candidates=getattr(args, "max_research_overlay_candidates", 24),
         )
         train_results = evaluate_combinations(train, covered, audit, train_args)
         if not train_results:
@@ -1419,7 +1536,7 @@ def build_html(
         </div>
         <div class="note warn">
           <p><strong>冲突处理：</strong>同一时间只允许一笔持仓；若交易重叠，按进场时间和候选优先级保留先触发/高优先级交易，其他信号记录为 conflict_dropped。</p>
-          <p><strong>关键限制：</strong>OFS/SMC/timecell 候选目前仍是研究层级。timecell 候选使用 roll-stable 日主力合约和下一根 bar 入场，但 PF 边缘偏薄，默认风险预算上限为 {fmt_metric("risk_weight", getattr(quality_args, "rollstable_timecell_max_risk_budget", 0.10))}；仍需要 walk-forward、纸盘和更高滑点压力测试。</p>
+          <p><strong>关键限制：</strong>OFS/SMC/timecell/bar-best 候选目前仍是研究层级。timecell 候选使用 roll-stable 日主力合约和下一根 bar 入场，但 PF 边缘偏薄，默认风险预算上限为 {fmt_metric("risk_weight", getattr(quality_args, "rollstable_timecell_max_risk_budget", 0.10))}；仍需要 walk-forward、纸盘和更高滑点压力测试。</p>
         </div>
       </div>
     </section>
@@ -1530,7 +1647,9 @@ def build_html(
 
 
 def write_outputs(args: argparse.Namespace) -> dict[str, object]:
-    audit = augment_audit_with_rollstable_timecell(load_audit_metadata(args.audit), args)
+    audit = load_audit_metadata(args.audit)
+    audit = augment_audit_with_rollstable_timecell(audit, args)
+    audit = augment_audit_with_bar_best(audit, args)
     trades = load_trade_pool(args, audit)
     min_full_year_trades = int(getattr(args, "min_full_year_trades", 0))
     max_walkforward_years = int(getattr(args, "max_walkforward_years", 0))
@@ -1559,6 +1678,7 @@ def write_outputs(args: argparse.Namespace) -> dict[str, object]:
         "ofs_trades": args.ofs_trades,
         "screenshot_trades": args.screenshot_trades,
         "rollstable_timecell_trades": getattr(args, "rollstable_timecell_trades", ""),
+        "bar_best_trades": getattr(args, "bar_best_trades", ""),
     }
     html_text = build_html(
         best=best,
@@ -1614,6 +1734,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--screenshot-trades", default=".tmp/nq-screenshot-smc-candidate-pressure-trades.csv")
     parser.add_argument("--rollstable-timecell-trades", default=".tmp/nq-2010train-2020test-timecell-best-trades.csv")
     parser.add_argument("--rollstable-timecell-label", default=ROLLSTABLE_TIMECELL_LABEL)
+    parser.add_argument("--bar-best-trades", default="")
     parser.add_argument("--report", default="reports/NQ-multi-strategy-composite-optimizer.html")
     parser.add_argument("--selected-trades-output", default=".tmp/nq-multi-strategy-composite-selected-trades.csv")
     parser.add_argument("--dropped-trades-output", default=".tmp/nq-multi-strategy-composite-dropped-trades.csv")
@@ -1626,6 +1747,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--coverage-max-per-family", type=int, default=3)
     parser.add_argument("--max-coverage-candidates", type=int, default=3)
     parser.add_argument("--coverage-seed-count", type=int, default=2)
+    parser.add_argument("--max-fast-seed-candidates", type=int, default=12)
+    parser.add_argument("--max-research-overlay-candidates", type=int, default=24)
     parser.add_argument("--min-full-year-trades", type=int, default=DEFAULT_MIN_FULL_YEAR_TRADES)
     parser.add_argument("--min-profit-factor", type=float, default=1.25)
     parser.add_argument("--min-net-points", type=float, default=10_000.0)
