@@ -1057,7 +1057,7 @@ def build_html_report(
       </div>
     </section>
     <section>
-      <h2>冻结配置与交易原理</h2>
+      <h2>冻结配置、策略原理与行情特征</h2>
       <div class="note">
         <p><strong>Lightglow:</strong> 使用 Premium/Discount、swing zone、趋势/均值偏离、量价与箱体位置。每个 walk-forward 窗口只用训练期 month x weekday 单元选择 native/reverse/skip，测试年不参与训练。</p>
         <p><strong>Timecell:</strong> 使用已存在 2010-2019 训练的 roll-stable month/hour direction map，只以 <code>risk_weight=0.05</code> 作为覆盖信号纳入预算口径。</p>

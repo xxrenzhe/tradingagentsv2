@@ -40,7 +40,7 @@
 <body>
   <header>
     <h1>NQ Lightglow + Timecell Paper-Readiness Audit</h1>
-    <p class="subtitle">目标是判断研究组合能否进入自动纸盘验证，不是批准实盘。报告冻结当前 Lightglow + Timecell 定义，执行无未来审计、滚动 walk-forward、成本/延迟/滑点压力、风险预算仓位映射和 paper adapter 检查。生成时间：2026-05-13 17:55 UTC。</p>
+    <p class="subtitle">目标是判断研究组合能否进入自动纸盘验证，不是批准实盘。报告冻结当前 Lightglow + Timecell 定义，执行无未来审计、滚动 walk-forward、成本/延迟/滑点压力、风险预算仓位映射和 paper adapter 检查。生成时间：2026-05-13 18:00 UTC。</p>
     <div class="grid"><div class="metric"><small>结论</small><strong>blocked</strong><span>research-only</span></div><div class="metric"><small>原始净点</small><strong>+60,583.62</strong><span>PF 1.406</span></div><div class="metric"><small>预算净点</small><strong>+44,790.42</strong><span>PF 2.909</span></div><div class="metric"><small>WF 窗口</small><strong>4</strong><span>rolling train-&gt;test</span></div><div class="metric"><small>泄漏审计</small><strong>PASS</strong><span>static + runtime</span></div><div class="metric"><small>Blockers</small><strong>4</strong><span>implement adapter and run paper validation</span></div></div>
   </header>
   <main>
@@ -53,7 +53,7 @@
       </div>
     </section>
     <section>
-      <h2>冻结配置与交易原理</h2>
+      <h2>冻结配置、策略原理与行情特征</h2>
       <div class="note">
         <p><strong>Lightglow:</strong> 使用 Premium/Discount、swing zone、趋势/均值偏离、量价与箱体位置。每个 walk-forward 窗口只用训练期 month x weekday 单元选择 native/reverse/skip，测试年不参与训练。</p>
         <p><strong>Timecell:</strong> 使用已存在 2010-2019 训练的 roll-stable month/hour direction map，只以 <code>risk_weight=0.05</code> 作为覆盖信号纳入预算口径。</p>
