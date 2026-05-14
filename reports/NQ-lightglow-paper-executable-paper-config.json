@@ -3,6 +3,8 @@
   "current_signal_path": ".tmp/nq-lightglow-current-paper-signal.csv",
   "dry_run_command": ".venv/bin/python scripts/run_lightglow_optimized_strategy_paper_trader.py --trades .tmp/nq-lightglow-current-paper-signal.csv --symbol MNQ --quantity 1 --contract-month 202606 --max-signal-age-minutes 10 --paper-consecutive-loss-halt 3 --paper-daily-loss-halt-points 50",
   "instrument": "MNQ",
+  "paper_loop_command": ".venv/bin/python scripts/run_lightglow_current_paper_loop.py --bars data/raw/databento/glbx-mdp3-20100606-20260427.ohlcv-1m.csv --current-signal .tmp/nq-lightglow-current-paper-signal.csv --tail-rows 5000 --max-signal-age-minutes 10 --paper-consecutive-loss-halt 3 --paper-daily-loss-halt-points 50",
+  "paper_loop_submit_command": ".venv/bin/python scripts/run_lightglow_current_paper_loop.py --bars data/raw/databento/glbx-mdp3-20100606-20260427.ohlcv-1m.csv --current-signal .tmp/nq-lightglow-current-paper-signal.csv --tail-rows 5000 --max-signal-age-minutes 10 --paper-consecutive-loss-halt 3 --paper-daily-loss-halt-points 50 --submit",
   "paper_phase": "dry_run_first",
   "quantity": 1,
   "readiness_command": ".venv/bin/python scripts/check_lightglow_paper_readiness.py --trades .tmp/nq-lightglow-current-paper-signal.csv --strategy-id nq_lightglow_paper_executable_avoid_long_below_ema60_trend --max-signal-age-minutes 10 --paper-consecutive-loss-halt 3 --paper-daily-loss-halt-points 50",

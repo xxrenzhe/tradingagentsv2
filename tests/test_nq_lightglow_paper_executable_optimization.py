@@ -174,5 +174,6 @@ def test_report_generation_outputs_optimization_artifacts(tmp_path: Path) -> Non
     assert "default --submit remains blocked" in paper_config.read_text(encoding="utf-8")
     assert "export_lightglow_current_paper_signal.py" in paper_config.read_text(encoding="utf-8")
     assert ".tmp/nq-lightglow-current-paper-signal.csv" in paper_config.read_text(encoding="utf-8")
+    assert "run_lightglow_current_paper_loop.py" in paper_config.read_text(encoding="utf-8")
     for path in (markdown, filters, windows, stress, optimized_trades, summary, paper_config):
         assert path.exists()

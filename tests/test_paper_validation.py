@@ -2247,6 +2247,128 @@ def test_lightglow_current_signal_exporter_reads_only_tail_rows(tmp_path):
     assert list(pd.to_datetime(loaded["ts_event"], utc=True)) == list(pd.date_range("2026-05-01T10:07:00Z", periods=3, freq="min"))
 
 
+def test_lightglow_current_paper_loop_refreshes_signal_before_runner(tmp_path, monkeypatch, capsys):
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "run_lightglow_current_paper_loop.py"
+    spec = importlib.util.spec_from_file_location("run_lightglow_current_paper_loop", script_path)
+    script = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(script)
+    calls = []
+
+    def fake_run(command, cwd, text, capture_output, check):
+        calls.append(command)
+        command_text = " ".join(command)
+        if "export_lightglow_current_paper_signal.py" in command_text:
+            stdout = json.dumps({"status": "written", "rows": 1})
+        elif "check_lightglow_paper_readiness.py" in command_text:
+            stdout = json.dumps({"status": "ready", "dry_run_status": "ready", "timed_exit_submit_status": "ready"})
+        else:
+            stdout = json.dumps({"status": "dry_run", "submitted": False})
+        return type("Completed", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+
+    loop_audit = tmp_path / "loop.jsonl"
+    monkeypatch.setattr(script.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_lightglow_current_paper_loop.py",
+            "--bars",
+            str(tmp_path / "bars.csv"),
+            "--current-signal",
+            str(tmp_path / "signal.csv"),
+            "--loop-audit",
+            str(loop_audit),
+            "--max-iterations",
+            "1",
+        ],
+    )
+
+    assert script.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "completed"
+    assert len(calls) == 3
+    assert "export_lightglow_current_paper_signal.py" in " ".join(calls[0])
+    assert "check_lightglow_paper_readiness.py" in " ".join(calls[1])
+    assert "run_lightglow_optimized_strategy_paper_trader.py" in " ".join(calls[2])
+    assert loop_audit.exists()
+
+
+def test_lightglow_current_paper_loop_submit_blocks_when_readiness_blocks(tmp_path, monkeypatch, capsys):
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "run_lightglow_current_paper_loop.py"
+    spec = importlib.util.spec_from_file_location("run_lightglow_current_paper_loop", script_path)
+    script = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(script)
+    calls = []
+
+    def fake_run(command, cwd, text, capture_output, check):
+        calls.append(command)
+        command_text = " ".join(command)
+        if "export_lightglow_current_paper_signal.py" in command_text:
+            stdout = json.dumps({"status": "written", "rows": 1})
+            return type("Completed", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+        stdout = json.dumps({"status": "blocked", "dry_run_status": "ready", "timed_exit_submit_status": "blocked"})
+        return type("Completed", (), {"returncode": 2, "stdout": stdout, "stderr": ""})()
+
+    monkeypatch.setattr(script.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_lightglow_current_paper_loop.py",
+            "--bars",
+            str(tmp_path / "bars.csv"),
+            "--current-signal",
+            str(tmp_path / "signal.csv"),
+            "--loop-audit",
+            str(tmp_path / "loop.jsonl"),
+            "--submit",
+            "--max-iterations",
+            "1",
+        ],
+    )
+
+    assert script.main() == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["events"][0]["runner"]["status"] == "skipped"
+    assert len(calls) == 2
+    assert "run_lightglow_optimized_strategy_paper_trader.py" not in " ".join(" ".join(command) for command in calls)
+
+
+def test_lightglow_current_paper_loop_no_signal_is_successful_idle(tmp_path, monkeypatch, capsys):
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "run_lightglow_current_paper_loop.py"
+    spec = importlib.util.spec_from_file_location("run_lightglow_current_paper_loop", script_path)
+    script = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(script)
+    calls = []
+
+    def fake_run(command, cwd, text, capture_output, check):
+        calls.append(command)
+        return type("Completed", (), {"returncode": 0, "stdout": json.dumps({"status": "no_signal", "rows": 0}), "stderr": ""})()
+
+    monkeypatch.setattr(script.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_lightglow_current_paper_loop.py",
+            "--bars",
+            str(tmp_path / "bars.csv"),
+            "--current-signal",
+            str(tmp_path / "signal.csv"),
+            "--loop-audit",
+            str(tmp_path / "loop.jsonl"),
+            "--max-iterations",
+            "1",
+        ],
+    )
+
+    assert script.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["events"][0]["readiness"]["reason"] == "no_signal"
+    assert payload["events"][0]["runner"]["reason"] == "no_signal"
+    assert len(calls) == 1
+
+
 def test_best_strategy_paper_trader_script_locks_strategy_filters(tmp_path, monkeypatch, capsys):
     script_path = Path(__file__).resolve().parents[1] / "scripts" / "run_mbp_best_strategy_paper_trader.py"
     spec = importlib.util.spec_from_file_location("run_mbp_best_strategy_paper_trader", script_path)

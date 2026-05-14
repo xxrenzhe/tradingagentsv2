@@ -616,6 +616,13 @@ def paper_validation_config(args: argparse.Namespace, decision: dict[str, Any]) 
         "--contract-month 202606 --max-signal-age-minutes 10 "
         "--paper-consecutive-loss-halt 3 --paper-daily-loss-halt-points 50"
     )
+    paper_loop_command = (
+        ".venv/bin/python scripts/run_lightglow_current_paper_loop.py "
+        "--bars data/raw/databento/glbx-mdp3-20100606-20260427.ohlcv-1m.csv "
+        f"--current-signal {current_signal_output} --tail-rows 5000 "
+        "--max-signal-age-minutes 10 --paper-consecutive-loss-halt 3 "
+        "--paper-daily-loss-halt-points 50"
+    )
     blocked_submit_command = dry_run_command + " --submit"
     timed_exit_submit_command = dry_run_command + " --submit --allow-timed-exit-submit"
     readiness_command = (
@@ -637,6 +644,8 @@ def paper_validation_config(args: argparse.Namespace, decision: dict[str, Any]) 
         "selected_alias": PAPER_SELECTED_ALIAS,
         "selected_filter": "avoid_long_below_ema60_trend",
         "paper_phase": "dry_run_first",
+        "paper_loop_command": paper_loop_command,
+        "paper_loop_submit_command": paper_loop_command + " --submit",
         "dry_run_command": dry_run_command,
         "readiness_command": readiness_command,
         "submit_readiness_command": submit_readiness_command,
