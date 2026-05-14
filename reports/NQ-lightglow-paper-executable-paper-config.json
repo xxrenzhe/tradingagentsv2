@@ -1,0 +1,20 @@
+{
+  "blocked_submit_command": ".venv/bin/python scripts/run_lightglow_optimized_strategy_paper_trader.py --trades .tmp/nq-lightglow-paper-executable-optimized-trades.csv --symbol MNQ --quantity 1 --contract-month 202606 --max-signal-age-minutes 10 --submit",
+  "dry_run_command": ".venv/bin/python scripts/run_lightglow_optimized_strategy_paper_trader.py --trades .tmp/nq-lightglow-paper-executable-optimized-trades.csv --symbol MNQ --quantity 1 --contract-month 202606 --max-signal-age-minutes 10",
+  "instrument": "MNQ",
+  "paper_phase": "dry_run_first",
+  "quantity": 1,
+  "risk_controls": {
+    "consecutive_loss_halt": 3,
+    "daily_loss_halt_points": 50,
+    "max_position_contracts": 1,
+    "max_signal_age_minutes": 10,
+    "paper_min_outcomes_before_review": 300
+  },
+  "selected_filter": "avoid_long_below_ema60_trend",
+  "status": "promote_to_paper_candidate",
+  "strategy_id": "nq_lightglow_paper_executable_avoid_long_below_ema60_trend",
+  "submit_blocker": "timed_exit_manager_required in run_lightglow_optimized_strategy_paper_trader.py",
+  "timecell_mode": "shadow_only",
+  "trades_path": ".tmp/nq-lightglow-paper-executable-optimized-trades.csv"
+}
