@@ -464,6 +464,38 @@ TradingView设置:
 
 ---
 
+## 🔎 Paper-Executable 人工校验脚本
+
+`lightglow_paper_executable_validation.pine` 用于在 TradingView 上人工复盘当前 paper-executable Lightglow 策略思想：
+
+```
+图表:
+- NQ 或 MNQ
+- 1分钟周期
+
+核心显示:
+- L/S 入场标记
+- X 时间出场标记
+- 入场到出场的虚线连接
+- 每笔交易的点数 PnL 和美元 PnL 标签
+- Premium / Discount 区域
+- EMA20 / EMA60 趋势过滤线
+```
+
+默认参数对齐当前 paper-executable 研究版本：
+
+```
+Reverse Lightglow PD Signal: true
+Exit After Bars: 2
+Avoid Long Below EMA60 Downtrend: true
+Premium Threshold: 0.95
+Discount Threshold: 0.05
+```
+
+注意：Python 生产导出器使用完整 Lightglow confirmed swing pivot 状态机；TradingView 校验脚本使用 trailing range proxy，目的是辅助人工识别交易点是否合理，不作为生产信号的逐笔一致性证明。
+
+---
+
 ## ⚠️ 重要提示
 
 ### 回测 ≠ 实盘

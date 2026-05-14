@@ -1,0 +1,225 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © TradingAgentsV2
+//
+// Lightglow Paper-Executable Validation
+//
+// Purpose:
+// - Mirror the current paper-executable Lightglow idea for manual TradingView review.
+// - Use a LuxAlgo/Lightglow-style premium/discount range, with the current research-selected reverse direction.
+// - Draw dashed lines from entry to exit and label every closed trade with points and currency PnL.
+//
+// Notes:
+// - The Python production exporter uses confirmed swing pivots from the Lightglow implementation.
+// - Pine cannot perfectly reproduce that full state machine without copying the full source; this validation script
+//   uses a configurable trailing range proxy so a human can inspect whether the same market idea is visually sound.
+// - Apply on NQ/MNQ 1-minute charts for closest alignment.
+
+//@version=5
+strategy("Lightglow Paper Validation",
+     shorttitle="LG Paper Validate",
+     overlay=true,
+     initial_capital=25000,
+     currency=currency.USD,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1,
+     commission_type=strategy.commission.cash_per_contract,
+     commission_value=5,
+     slippage=2,
+     process_orders_on_close=false,
+     calc_on_every_tick=false,
+     calc_on_order_fills=false,
+     max_labels_count=500,
+     max_lines_count=500)
+
+// ============================================================================
+// Inputs
+// ============================================================================
+
+groupSignal = "Signal"
+rangeLength = input.int(100, "Premium/Discount Lookback", minval=20, maxval=500, group=groupSignal)
+premiumThreshold = input.float(0.95, "Premium Threshold", minval=0.50, maxval=1.00, step=0.01, group=groupSignal)
+discountThreshold = input.float(0.05, "Discount Threshold", minval=0.00, maxval=0.50, step=0.01, group=groupSignal)
+reverseLightglowSignal = input.bool(true, "Reverse Lightglow PD Signal", group=groupSignal)
+useNewZoneOnly = input.bool(true, "Only First Bar In Zone", group=groupSignal)
+
+groupFilter = "Filters"
+useEmaTrendFilter = input.bool(true, "Avoid Long Below EMA60 Downtrend", group=groupFilter)
+emaFastLength = input.int(20, "EMA Fast Length", minval=2, maxval=200, group=groupFilter)
+emaMidLength = input.int(60, "EMA Mid Length", minval=5, maxval=300, group=groupFilter)
+useDateFilter = input.bool(true, "Use Date Filter", group=groupFilter)
+startTime = input.time(timestamp("2020-01-01 00:00"), "Start", group=groupFilter)
+endTime = input.time(timestamp("2026-12-31 23:59"), "End", group=groupFilter)
+
+groupExit = "Exit"
+holdBars = input.int(2, "Time Exit After Bars", minval=1, maxval=20, group=groupExit)
+
+groupDisplay = "Display"
+showZones = input.bool(true, "Show Premium/Discount Zones", group=groupDisplay)
+showEma = input.bool(true, "Show EMA Filter", group=groupDisplay)
+showTradeLines = input.bool(true, "Draw Entry-Exit Dashed Lines", group=groupDisplay)
+showPnlLabels = input.bool(true, "Show Trade PnL Labels", group=groupDisplay)
+showSignalMarkers = input.bool(true, "Show Entry/Exit Markers", group=groupDisplay)
+showStats = input.bool(true, "Show Summary Table", group=groupDisplay)
+maxVisualTrades = input.int(200, "Max Visual Trade Labels/Lines", minval=20, maxval=500, group=groupDisplay)
+
+// ============================================================================
+// Premium / Discount Signal
+// ============================================================================
+
+rangeHigh = ta.highest(high, rangeLength)
+rangeLow = ta.lowest(low, rangeLength)
+rangeSize = rangeHigh - rangeLow
+premiumLevel = rangeLow + rangeSize * premiumThreshold
+discountLevel = rangeLow + rangeSize * discountThreshold
+equilibrium = (rangeHigh + rangeLow) * 0.5
+
+inPremium = rangeSize > 0 and close >= premiumLevel
+inDiscount = rangeSize > 0 and close <= discountLevel
+premiumSignal = useNewZoneOnly ? inPremium and not inPremium[1] : inPremium
+discountSignal = useNewZoneOnly ? inDiscount and not inDiscount[1] : inDiscount
+
+lightglowBearish = premiumSignal
+lightglowBullish = discountSignal
+
+rawDirection = lightglowBullish ? 1 : lightglowBearish ? -1 : 0
+tradeDirection = reverseLightglowSignal ? -rawDirection : rawDirection
+
+emaFast = ta.ema(close, emaFastLength)
+emaMid = ta.ema(close, emaMidLength)
+trend20_60 = emaFast - emaMid
+distEma60 = close - emaMid
+avoidLongBelowEma60Trend = tradeDirection > 0 and distEma60 < 0 and trend20_60 < 0
+trendFilterPassed = not useEmaTrendFilter or not avoidLongBelowEma60Trend
+dateFilterPassed = not useDateFilter or (time >= startTime and time <= endTime)
+
+longCondition = tradeDirection > 0 and trendFilterPassed and dateFilterPassed and strategy.position_size == 0
+shortCondition = tradeDirection < 0 and trendFilterPassed and dateFilterPassed and strategy.position_size == 0
+
+// ============================================================================
+// Orders and Trade State
+// ============================================================================
+
+var int entryBar = na
+var int entryIndex = na
+var float entryPrice = na
+var int entryDirection = 0
+var int lastClosedCount = 0
+var array<line> tradeLines = array.new<line>()
+var array<label> pnlLabels = array.new<label>()
+
+if longCondition
+    strategy.entry("LG Long", strategy.long)
+    entryBar := bar_index
+    entryIndex := bar_index
+    entryPrice := close
+    entryDirection := 1
+
+if shortCondition
+    strategy.entry("LG Short", strategy.short)
+    entryBar := bar_index
+    entryIndex := bar_index
+    entryPrice := close
+    entryDirection := -1
+
+barsHeld = na(entryBar) ? 0 : bar_index - entryBar
+exitCondition = strategy.position_size != 0 and barsHeld >= holdBars
+
+if exitCondition
+    strategy.close_all("Time Exit")
+
+// ============================================================================
+// Entry/Exit Visuals
+// ============================================================================
+
+plotshape(showSignalMarkers and longCondition, "Long Entry", shape.triangleup, location.belowbar, color.new(color.lime, 0), size=size.small, text="L")
+plotshape(showSignalMarkers and shortCondition, "Short Entry", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.small, text="S")
+plotshape(showSignalMarkers and exitCondition, "Time Exit", shape.xcross, location.absolute, color.new(color.yellow, 0), size=size.tiny, text="X")
+
+if strategy.closedtrades > lastClosedCount
+    tradeIndex = strategy.closedtrades - 1
+    exitBar = strategy.closedtrades.exit_bar_index(tradeIndex)
+    closedEntryBar = strategy.closedtrades.entry_bar_index(tradeIndex)
+    closedEntryPrice = strategy.closedtrades.entry_price(tradeIndex)
+    closedExitPrice = strategy.closedtrades.exit_price(tradeIndex)
+    tradeSize = strategy.closedtrades.size(tradeIndex)
+    direction = tradeSize > 0 ? 1 : -1
+    pointsPnl = (closedExitPrice - closedEntryPrice) * direction
+    cashPnl = strategy.closedtrades.profit(tradeIndex)
+    isWin = cashPnl >= 0
+    tradeColor = isWin ? color.new(color.lime, 0) : color.new(color.red, 0)
+    labelStyle = isWin ? label.style_label_up : label.style_label_down
+    labelY = isWin ? high : low
+    labelText = "#" + str.tostring(strategy.closedtrades) + "\n" + str.tostring(pointsPnl, "#.##") + " pts\n$" + str.tostring(cashPnl, "#.##")
+
+    if showTradeLines
+        newLine = line.new(closedEntryBar, closedEntryPrice, exitBar, closedExitPrice, xloc=xloc.bar_index, extend=extend.none, color=tradeColor, style=line.style_dashed, width=2)
+        array.push(tradeLines, newLine)
+        if array.size(tradeLines) > maxVisualTrades
+            line.delete(array.shift(tradeLines))
+
+    if showPnlLabels
+        newLabel = label.new(exitBar, labelY, labelText, xloc=xloc.bar_index, color=color.new(color.black, 0), textcolor=tradeColor, style=labelStyle, size=size.small)
+        array.push(pnlLabels, newLabel)
+        if array.size(pnlLabels) > maxVisualTrades
+            label.delete(array.shift(pnlLabels))
+
+    lastClosedCount := strategy.closedtrades
+    entryBar := na
+    entryIndex := na
+    entryPrice := na
+    entryDirection := 0
+
+// ============================================================================
+// Zone and Filter Plots
+// ============================================================================
+
+plot(showZones ? premiumLevel : na, "Premium", color=color.new(color.red, 30), linewidth=1)
+plot(showZones ? discountLevel : na, "Discount", color=color.new(color.green, 30), linewidth=1)
+plot(showZones ? equilibrium : na, "Equilibrium", color=color.new(color.gray, 60), linewidth=1)
+
+premiumTop = plot(showZones ? rangeHigh : na, "Range High", display=display.none)
+premiumBottom = plot(showZones ? premiumLevel : na, "Premium Fill Bottom", display=display.none)
+discountTop = plot(showZones ? discountLevel : na, "Discount Fill Top", display=display.none)
+discountBottom = plot(showZones ? rangeLow : na, "Range Low", display=display.none)
+fill(premiumTop, premiumBottom, color=color.new(color.red, 92), title="Premium Zone")
+fill(discountTop, discountBottom, color=color.new(color.green, 92), title="Discount Zone")
+
+plot(showEma ? emaFast : na, "EMA Fast", color=color.new(color.aqua, 0), linewidth=1)
+plot(showEma ? emaMid : na, "EMA Mid", color=color.new(color.orange, 0), linewidth=1)
+bgcolor(useEmaTrendFilter and avoidLongBelowEma60Trend ? color.new(color.red, 90) : na, title="Long Filter Block")
+
+// ============================================================================
+// Summary Table
+// ============================================================================
+
+if showStats and barstate.islast
+    var table stats = table.new(position.top_right, 2, 8, border_width=1)
+    winRate = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100 : 0.0
+    grossLossAbs = math.abs(strategy.grossloss)
+    profitFactor = grossLossAbs > 0 ? strategy.grossprofit / grossLossAbs : na
+    avgTrade = strategy.closedtrades > 0 ? strategy.netprofit / strategy.closedtrades : 0.0
+
+    table.cell(stats, 0, 0, "Lightglow Paper Validation", text_color=color.white, bgcolor=color.new(color.blue, 25), text_size=size.small)
+    table.cell(stats, 1, 0, reverseLightglowSignal ? "Reverse PD" : "Direct PD", text_color=color.white, bgcolor=color.new(color.blue, 25), text_size=size.small)
+    table.cell(stats, 0, 1, "Closed Trades", text_size=size.small)
+    table.cell(stats, 1, 1, str.tostring(strategy.closedtrades), text_size=size.small)
+    table.cell(stats, 0, 2, "Net Profit", text_size=size.small)
+    table.cell(stats, 1, 2, "$" + str.tostring(strategy.netprofit, "#.##"), text_color=strategy.netprofit >= 0 ? color.lime : color.red, text_size=size.small)
+    table.cell(stats, 0, 3, "Win Rate", text_size=size.small)
+    table.cell(stats, 1, 3, str.tostring(winRate, "#.#") + "%", text_size=size.small)
+    table.cell(stats, 0, 4, "Profit Factor", text_size=size.small)
+    table.cell(stats, 1, 4, na(profitFactor) ? "n/a" : str.tostring(profitFactor, "#.##"), text_size=size.small)
+    table.cell(stats, 0, 5, "Avg Trade", text_size=size.small)
+    table.cell(stats, 1, 5, "$" + str.tostring(avgTrade, "#.##"), text_color=avgTrade >= 0 ? color.lime : color.red, text_size=size.small)
+    table.cell(stats, 0, 6, "Hold Bars", text_size=size.small)
+    table.cell(stats, 1, 6, str.tostring(holdBars), text_size=size.small)
+    table.cell(stats, 0, 7, "EMA60 Filter", text_size=size.small)
+    table.cell(stats, 1, 7, useEmaTrendFilter ? "ON" : "OFF", text_size=size.small)
+
+// ============================================================================
+// Alerts
+// ============================================================================
+
+alertcondition(longCondition, "Lightglow Long", "Lightglow validation LONG on {{ticker}} at {{close}}")
+alertcondition(shortCondition, "Lightglow Short", "Lightglow validation SHORT on {{ticker}} at {{close}}")
+alertcondition(exitCondition, "Lightglow Time Exit", "Lightglow validation time exit on {{ticker}} at {{close}}")
