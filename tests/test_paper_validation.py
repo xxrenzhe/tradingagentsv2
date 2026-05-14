@@ -304,6 +304,289 @@ def test_lightglow_time_exit_submit_sends_close_order_when_explicitly_allowed(tm
     assert close_orders[0][2] == 1
 
 
+def test_lightglow_time_exit_submit_persists_pending_close_before_wait(tmp_path, monkeypatch):
+    trades_path = tmp_path / "lightglow.csv"
+    state_path = tmp_path / "state.json"
+    pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-05-01",
+                "entry_ts": pd.Timestamp.utcnow().isoformat(),
+                "actual_entry_ts": pd.Timestamp.utcnow().isoformat(),
+                "exit_ts": pd.Timestamp.utcnow().isoformat(),
+                "direction": 1,
+                "entry_price": 18025.25,
+                "portfolio_rule": "nq_lightglow_paper_executable_avoid_long_below_ema60_trend",
+                "selected_alias": "lightglow_avoid_long_ema60",
+                "exit_reason": "time",
+                "holding_minutes": 2,
+                "strategy_stop_points": "",
+                "strategy_target_points": "",
+            }
+        ]
+    ).to_csv(trades_path, index=False)
+    broker = IBKRPaperBroker(
+        risk=IBKRPaperRiskConfig(allowed_accounts=("DU123",), allowed_symbols=("MNQ",), require_bracket=True),
+        audit_path=tmp_path / "ibkr.jsonl",
+    )
+    observed_pending = {}
+
+    class FakeSession:
+        def __init__(self, broker):
+            self.broker = broker
+
+        def submit_intent(self, intent, *, dry_run=True, skip_preflight=False):
+            normalized = intent.normalized()
+            return {
+                "status": "submitted",
+                "submitted": True,
+                "intent": asdict(normalized),
+                "risk": {"passed": True, "decision": "risk_approved", "reasons": []},
+                "orders": [{"action": normalized.action, "orderType": normalized.order_type, "totalQuantity": normalized.quantity}],
+                "trades": [{"order_status": {"status": "Submitted"}}],
+            }
+
+    def fake_sleep(seconds):
+        assert seconds > 0
+        observed_pending.update(json.loads(state_path.read_text(encoding="utf-8"))["pending_time_exit_close"])
+
+    def fake_close_submit(intent, *, dry_run=True, current_position=0):
+        normalized = intent.normalized()
+        return {
+            "status": "submitted",
+            "submitted": True,
+            "intent": asdict(normalized),
+            "risk": {"passed": True, "decision": "risk_approved", "reasons": []},
+            "orders": [{"action": normalized.action, "orderType": normalized.order_type, "totalQuantity": normalized.quantity}],
+            "trades": [{"order_status": {"status": "Submitted"}}],
+        }
+
+    monkeypatch.setattr("tradingagents.execution.paper_runner.IBKRPaperTradingSession.from_env", lambda active_broker: FakeSession(active_broker))
+    monkeypatch.setattr("tradingagents.execution.paper_runner.time.sleep", fake_sleep)
+    monkeypatch.setattr(broker, "submit", fake_close_submit)
+    monkeypatch.setattr("tradingagents.execution.paper_runner._without_bracket_requirement", lambda active_broker: active_broker)
+
+    result = run_adaptive_portfolio_paper_once(
+        config=PaperRunnerConfig(
+            trades_path=trades_path,
+            state_path=state_path,
+            account="DU123",
+            submit=True,
+            skip_preflight=True,
+            max_signal_age_minutes=None,
+            stop_loss_points=None,
+            take_profit_points=None,
+            allow_time_exit_submit=True,
+            timed_exit_sleep_scale=0.01,
+        ),
+        broker=broker,
+    )
+
+    assert result["time_exit_management"]["status"] == "close_submitted"
+    assert observed_pending["status"] == "pending"
+    assert observed_pending["close_intent"]["action"] == "SELL"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert "pending_time_exit_close" not in state
+    assert state["last_time_exit_close"]["status"] == "submitted"
+
+
+def test_lightglow_time_exit_submit_recovers_due_pending_close_before_new_signal(tmp_path, monkeypatch):
+    trades_path = tmp_path / "lightglow.csv"
+    state_path = tmp_path / "state.json"
+    pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-05-01",
+                "entry_ts": pd.Timestamp.utcnow().isoformat(),
+                "actual_entry_ts": pd.Timestamp.utcnow().isoformat(),
+                "exit_ts": pd.Timestamp.utcnow().isoformat(),
+                "direction": 1,
+                "entry_price": 18025.25,
+                "portfolio_rule": "nq_lightglow_paper_executable_avoid_long_below_ema60_trend",
+                "selected_alias": "lightglow_avoid_long_ema60",
+                "exit_reason": "time",
+                "holding_minutes": 2,
+                "strategy_stop_points": "",
+                "strategy_target_points": "",
+            }
+        ]
+    ).to_csv(trades_path, index=False)
+    pending_close = {
+        "status": "pending",
+        "mode": "submit_managed",
+        "candidate_key": "old-signal",
+        "holding_minutes": 2,
+        "wait_seconds": 0,
+        "due_at": "2026-05-01T10:32:00+00:00",
+        "close_intent": {
+            "action": "SELL",
+            "quantity": 1,
+            "symbol": "MNQ",
+            "exchange": "CME",
+            "currency": "USD",
+            "last_trade_date_or_contract_month": "202606",
+            "order_type": "MKT",
+            "limit_price": None,
+            "stop_loss_price": None,
+            "take_profit_price": None,
+            "account": "DU123",
+            "strategy_id": "nq_lightglow_paper_executable_avoid_long_below_ema60_trend",
+            "reason": "recover close",
+            "intent_id": "close-intent-existing",
+            "idempotency_key": "close-idempotency-existing",
+        },
+        "signed_position": 1,
+        "attempts": 0,
+    }
+    state_path.write_text(json.dumps({"pending_time_exit_close": pending_close}), encoding="utf-8")
+    broker = IBKRPaperBroker(
+        risk=IBKRPaperRiskConfig(allowed_accounts=("DU123",), allowed_symbols=("MNQ",), require_bracket=True),
+        audit_path=tmp_path / "ibkr.jsonl",
+    )
+    submitted = []
+
+    class EntrySessionShouldNotRun:
+        def __init__(self, broker):
+            self.broker = broker
+
+        def submit_intent(self, intent, *, dry_run=True, skip_preflight=False):
+            raise AssertionError("runner must close pending timed exit before processing new entries")
+
+    def fake_close_submit(intent, *, dry_run=True, current_position=0):
+        normalized = intent.normalized()
+        submitted.append((normalized, dry_run, current_position))
+        return {
+            "status": "submitted",
+            "submitted": True,
+            "intent": asdict(normalized),
+            "risk": {"passed": True, "decision": "risk_approved", "reasons": []},
+            "orders": [{"action": normalized.action, "orderType": normalized.order_type, "totalQuantity": normalized.quantity}],
+            "trades": [{"order_status": {"status": "Submitted"}}],
+        }
+
+    monkeypatch.setattr("tradingagents.execution.paper_runner.IBKRPaperTradingSession.from_env", lambda active_broker: EntrySessionShouldNotRun(active_broker))
+    monkeypatch.setattr("tradingagents.execution.paper_runner.IBKRPaperBroker.submit", lambda self, intent, *, dry_run=True, current_position=0: fake_close_submit(intent, dry_run=dry_run, current_position=current_position))
+
+    result = run_adaptive_portfolio_paper_once(
+        config=PaperRunnerConfig(
+            trades_path=trades_path,
+            state_path=state_path,
+            account="DU123",
+            submit=True,
+            skip_preflight=True,
+            max_signal_age_minutes=None,
+            stop_loss_points=None,
+            take_profit_points=None,
+            allow_time_exit_submit=True,
+            timed_exit_sleep_scale=0.0,
+        ),
+        broker=broker,
+    )
+
+    assert result["status"] == "submitted"
+    assert result["candidate_key"] == "old-signal"
+    assert result["time_exit_management"]["reason"] == "resumed_pending_time_exit_close"
+    assert submitted[0][0].action == "SELL"
+    assert submitted[0][1] is False
+    assert submitted[0][2] == 1
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert "pending_time_exit_close" not in state
+    assert state["last_time_exit_close"]["candidate_key"] == "old-signal"
+
+
+def test_lightglow_time_exit_recovery_bypasses_bracket_requirement_for_close(tmp_path, monkeypatch):
+    trades_path = tmp_path / "lightglow.csv"
+    state_path = tmp_path / "state.json"
+    pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-05-01",
+                "entry_ts": pd.Timestamp.utcnow().isoformat(),
+                "actual_entry_ts": pd.Timestamp.utcnow().isoformat(),
+                "exit_ts": pd.Timestamp.utcnow().isoformat(),
+                "direction": 1,
+                "entry_price": 18025.25,
+                "portfolio_rule": "nq_lightglow_paper_executable_avoid_long_below_ema60_trend",
+                "selected_alias": "lightglow_avoid_long_ema60",
+                "exit_reason": "time",
+                "holding_minutes": 2,
+            }
+        ]
+    ).to_csv(trades_path, index=False)
+    state_path.write_text(
+        json.dumps(
+            {
+                "pending_time_exit_close": {
+                    "status": "pending",
+                    "mode": "submit_managed",
+                    "candidate_key": "old-signal",
+                    "holding_minutes": 2,
+                    "due_at": "2026-05-01T10:32:00+00:00",
+                    "close_intent": {
+                        "action": "SELL",
+                        "quantity": 1,
+                        "symbol": "MNQ",
+                        "exchange": "CME",
+                        "currency": "USD",
+                        "last_trade_date_or_contract_month": "202606",
+                        "order_type": "MKT",
+                        "limit_price": None,
+                        "stop_loss_price": None,
+                        "take_profit_price": None,
+                        "account": "DU123",
+                        "strategy_id": "nq_lightglow_paper_executable_avoid_long_below_ema60_trend",
+                        "reason": "recover close",
+                        "intent_id": "close-intent-existing",
+                        "idempotency_key": "close-idempotency-existing",
+                    },
+                    "signed_position": 1,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    broker = IBKRPaperBroker(
+        risk=IBKRPaperRiskConfig(allowed_accounts=("DU123",), allowed_symbols=("MNQ",), require_bracket=True),
+        audit_path=tmp_path / "ibkr.jsonl",
+    )
+    observed_require_bracket = []
+
+    def fake_submit(self, intent, *, dry_run=True, current_position=0):
+        observed_require_bracket.append(self.risk.require_bracket)
+        normalized = intent.normalized()
+        return {
+            "status": "submitted",
+            "submitted": True,
+            "intent": asdict(normalized),
+            "risk": {"passed": True, "decision": "risk_approved", "reasons": []},
+            "orders": [{"action": normalized.action, "orderType": normalized.order_type, "totalQuantity": normalized.quantity}],
+            "trades": [{"order_status": {"status": "Submitted"}}],
+        }
+
+    monkeypatch.setattr("tradingagents.execution.paper_runner.IBKRPaperBroker.submit", fake_submit)
+
+    result = run_adaptive_portfolio_paper_once(
+        config=PaperRunnerConfig(
+            trades_path=trades_path,
+            state_path=state_path,
+            account="DU123",
+            submit=True,
+            skip_preflight=True,
+            max_signal_age_minutes=None,
+            stop_loss_points=None,
+            take_profit_points=None,
+            allow_time_exit_submit=True,
+            timed_exit_sleep_scale=0.0,
+        ),
+        broker=broker,
+    )
+
+    assert result["status"] == "submitted"
+    assert result["time_exit_management"]["status"] == "close_submitted"
+    assert result["result"]["risk"]["reasons"] == []
+    assert observed_require_bracket == [False]
+
+
 def test_select_trade_sample_filters_and_row_index():
     trades = pd.DataFrame(
         [

@@ -459,6 +459,7 @@ This is a causal optimization of the paper-executable Lightglow-only subset. Tim
 - Filters are selected on train years only and applied to the next test year.
 - No Timecell trades are included in executable performance.
 - Paper execution remains dry-run first; submit requires explicit `--allow-timed-exit-submit` and paper-only timed-exit close management.
+- Timed-exit submit persists a pending close before waiting, so runner restarts handle due closes before new entries.
 - This report does not approve live trading.
 """
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -623,6 +624,7 @@ def paper_validation_config(args: argparse.Namespace, decision: dict[str, Any]) 
         "blocked_submit_command": blocked_submit_command,
         "timed_exit_submit_command": timed_exit_submit_command,
         "submit_blocker": "default --submit remains blocked unless the operator explicitly adds --allow-timed-exit-submit for paper-only managed time exits",
+        "timed_exit_recovery": "entry submit persists pending_time_exit_close in runner state; restarts close due timed exits before processing new entries",
         "risk_controls": {
             "max_signal_age_minutes": 10,
             "max_position_contracts": 1,

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent_gate import AgentGateConfig, AgentStrategyGate
-from .ibkr import IBKRPaperBroker, IBKRPaperTradingSession
+from .ibkr import IBKROrderIntent, IBKRPaperBroker, IBKRPaperTradingSession
 from .paper_validation import build_paper_intent_from_trade, load_trade_samples, select_trade_sample
 from .trade_log import DEFAULT_TRADE_LOG_DIR, append_trade_log
 from .tick_recorder import IBKRTickRecorderConfig, record_ibkr_ticks
@@ -108,6 +108,27 @@ def run_adaptive_portfolio_paper_once(
     gate: AgentStrategyGate | None = None,
 ) -> dict[str, Any]:
     config = config or PaperRunnerConfig()
+    state = _load_state(config.state_path)
+    active_broker = broker or IBKRPaperBroker(audit_path=config.audit_path)
+    pending_broker = _without_bracket_requirement(active_broker) if config.allow_time_exit_submit else active_broker
+    pending_time_exit = _manage_pending_time_exit_close(
+        state_path=config.state_path,
+        state=state,
+        broker=pending_broker,
+        submit=config.submit,
+        allow_submit=config.allow_time_exit_submit,
+    )
+    if pending_time_exit is not None:
+        pending_time_exit["tick_recording"] = _record_ibkr_ticks_safely(
+            broker=active_broker,
+            config=config.tick_recorder,
+            intent_id=pending_time_exit.get("intent", {}).get("intent_id"),
+            candidate_key=str(pending_time_exit.get("candidate_key", "")),
+            strategy_id=pending_time_exit.get("intent", {}).get("strategy_id"),
+        )
+        _append_runner_audit(config.state_path, pending_time_exit)
+        return pending_time_exit
+
     try:
         trades = load_trade_samples(config.trades_path)
     except (FileNotFoundError, ValueError) as exc:
@@ -138,7 +159,6 @@ def run_adaptive_portfolio_paper_once(
         symbol=config.tick_recorder.symbol,
     ).normalized()
     key = _candidate_key(sample, intent.strategy_id)
-    state = _load_state(config.state_path)
     previous = state.get("last_candidate_key")
     if previous == key:
         result = {
@@ -186,7 +206,6 @@ def run_adaptive_portfolio_paper_once(
             _append_runner_audit(config.state_path, result)
             return result
 
-    active_broker = broker or IBKRPaperBroker(audit_path=config.audit_path)
     time_exit_without_bracket = _time_exit_without_bracket_allowed(
         sample,
         stop_loss_points=stop_loss_points,
@@ -218,6 +237,8 @@ def run_adaptive_portfolio_paper_once(
             entry_response=response,
             sample=sample,
             sleep_scale=config.timed_exit_sleep_scale,
+            state_path=config.state_path,
+            candidate_key=key,
         )
     result = {
         "status": response.get("status", "unknown"),
@@ -231,7 +252,9 @@ def run_adaptive_portfolio_paper_once(
     if "time_exit_management" in response:
         result["time_exit_management"] = response["time_exit_management"]
     if response.get("status") in {"dry_run", "submitted"}:
-        _save_state(config.state_path, {"last_candidate_key": key, "last_intent_id": result["intent"].get("intent_id")})
+        updated_state = _load_state(config.state_path)
+        updated_state.update({"last_candidate_key": key, "last_intent_id": result["intent"].get("intent_id")})
+        _save_state(config.state_path, updated_state)
     trade_log_path = _append_trade_log_safely(result, log_dir=config.trade_log_dir)
     if trade_log_path is not None:
         result["trade_log_path"] = str(trade_log_path)
@@ -317,13 +340,12 @@ def _submit_timed_exit_close(
     entry_response: dict[str, Any],
     sample: Any,
     sleep_scale: float,
+    state_path: Path,
+    candidate_key: str,
 ) -> dict[str, Any]:
     holding_minutes = _sample_optional_float(sample, "holding_minutes", None)
     if holding_minutes is None or holding_minutes <= 0:
         return {"enabled": True, "status": "close_skipped", "reason": "missing_holding_minutes"}
-    wait_seconds = max(0.0, float(holding_minutes) * 60.0 * max(0.0, float(sleep_scale)))
-    if wait_seconds:
-        time.sleep(wait_seconds)
     entry_action = str(entry_intent.action).upper()
     close_action = "SELL" if entry_action == "BUY" else "BUY"
     close_intent = type(entry_intent)(
@@ -339,7 +361,33 @@ def _submit_timed_exit_close(
         reason=f"{entry_intent.reason} | timed_exit_close_after_minutes={holding_minutes:g}",
     ).normalized()
     signed_position = entry_intent.quantity if entry_action == "BUY" else -entry_intent.quantity
+    wait_seconds = max(0.0, float(holding_minutes) * 60.0 * max(0.0, float(sleep_scale)))
+    due_at = datetime.now(UTC).timestamp() + wait_seconds
+    pending = {
+        "status": "pending",
+        "mode": "submit_managed",
+        "candidate_key": candidate_key,
+        "holding_minutes": holding_minutes,
+        "wait_seconds": wait_seconds,
+        "due_at": datetime.fromtimestamp(due_at, UTC).isoformat(),
+        "entry_intent": asdict(entry_intent),
+        "entry_status": entry_response.get("status"),
+        "close_intent": asdict(close_intent),
+        "signed_position": signed_position,
+        "created_at": datetime.now(UTC).isoformat(),
+        "attempts": 0,
+    }
+    state = _load_state(state_path)
+    state["pending_time_exit_close"] = pending
+    _save_state(state_path, state)
+    if wait_seconds:
+        time.sleep(wait_seconds)
     close_response = broker.submit(close_intent, dry_run=False, current_position=signed_position)
+    _record_timed_exit_close_result(
+        state_path=state_path,
+        pending=pending,
+        close_response=close_response,
+    )
     return {
         "enabled": True,
         "mode": "submit_managed",
@@ -351,6 +399,112 @@ def _submit_timed_exit_close(
         "close_result": close_response,
         "reason": "time_exit_strategy_without_bracket",
     }
+
+
+def _manage_pending_time_exit_close(
+    *,
+    state_path: Path,
+    state: dict[str, Any],
+    broker: IBKRPaperBroker,
+    submit: bool,
+    allow_submit: bool,
+) -> dict[str, Any] | None:
+    pending = state.get("pending_time_exit_close")
+    if not isinstance(pending, dict):
+        return None
+    intent = pending.get("close_intent") if isinstance(pending.get("close_intent"), dict) else {}
+    result_base = {
+        "candidate_key": pending.get("candidate_key"),
+        "intent": intent,
+        "time_exit_management": {
+            "enabled": True,
+            "mode": pending.get("mode", "submit_managed"),
+            "holding_minutes": pending.get("holding_minutes"),
+            "due_at": pending.get("due_at"),
+            "reason": "resume_pending_time_exit_close",
+        },
+    }
+    if not submit or not allow_submit:
+        return {
+            **result_base,
+            "status": "pending_time_exit_blocked",
+            "submitted": False,
+            "reason": "pending_time_exit_requires_submit_and_allow_time_exit_submit",
+        }
+    due_at = _parse_utc_timestamp(pending.get("due_at"))
+    checked_at = datetime.now(UTC)
+    if due_at is not None and checked_at < due_at:
+        return {
+            **result_base,
+            "status": "time_exit_pending",
+            "submitted": False,
+            "time_exit_management": {
+                **result_base["time_exit_management"],
+                "status": "waiting_for_due_time",
+                "seconds_until_due": (due_at - checked_at).total_seconds(),
+            },
+        }
+    return _submit_pending_timed_exit_close(state_path=state_path, pending=pending, broker=broker)
+
+
+def _submit_pending_timed_exit_close(
+    *,
+    state_path: Path,
+    pending: dict[str, Any],
+    broker: IBKRPaperBroker,
+) -> dict[str, Any]:
+    raw_intent = pending.get("close_intent") if isinstance(pending.get("close_intent"), dict) else {}
+    close_intent = IBKROrderIntent(**{key: raw_intent[key] for key in IBKROrderIntent.__dataclass_fields__ if key in raw_intent}).normalized()
+    signed_position = int(pending.get("signed_position") or (close_intent.quantity if close_intent.action == "SELL" else -close_intent.quantity))
+    close_response = broker.submit(close_intent, dry_run=False, current_position=signed_position)
+    _record_timed_exit_close_result(
+        state_path=state_path,
+        pending=pending,
+        close_response=close_response,
+    )
+    return {
+        "status": "submitted" if close_response.get("status") == "submitted" else close_response.get("status", "unknown"),
+        "submitted": bool(close_response.get("submitted")),
+        "candidate_key": pending.get("candidate_key"),
+        "intent": close_response.get("intent", asdict(close_intent)),
+        "result": close_response,
+        "time_exit_management": {
+            "enabled": True,
+            "mode": "submit_managed",
+            "status": "close_submitted" if close_response.get("status") == "submitted" else close_response.get("status", "unknown"),
+            "holding_minutes": pending.get("holding_minutes"),
+            "due_at": pending.get("due_at"),
+            "close_intent": close_response.get("intent"),
+            "close_result": close_response,
+            "reason": "resumed_pending_time_exit_close",
+        },
+    }
+
+
+def _record_timed_exit_close_result(
+    *,
+    state_path: Path,
+    pending: dict[str, Any],
+    close_response: dict[str, Any],
+) -> None:
+    state = _load_state(state_path)
+    if close_response.get("status") == "submitted":
+        state.pop("pending_time_exit_close", None)
+        state["last_time_exit_close"] = {
+            "candidate_key": pending.get("candidate_key"),
+            "status": "submitted",
+            "closed_at": datetime.now(UTC).isoformat(),
+            "close_intent_id": close_response.get("intent", {}).get("intent_id"),
+        }
+    else:
+        retry_pending = dict(pending)
+        retry_pending["status"] = "close_retry_pending"
+        retry_pending["attempts"] = int(retry_pending.get("attempts") or 0) + 1
+        retry_pending["last_attempt_at"] = datetime.now(UTC).isoformat()
+        retry_pending["last_close_status"] = close_response.get("status", "unknown")
+        retry_pending["last_close_result"] = close_response
+        state["pending_time_exit_close"] = retry_pending
+    _save_state(state_path, state)
 
 
 def _without_bracket_requirement(broker: IBKRPaperBroker) -> IBKRPaperBroker:
