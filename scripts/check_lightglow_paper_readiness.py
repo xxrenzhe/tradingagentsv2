@@ -56,18 +56,29 @@ def main() -> int:
         strategy_id=args.strategy_id,
     )
     preflight = _ready_preflight(args) if args.preflight else {"status": "skipped"}
-    blockers = []
+    execution_blockers = []
     if signal["status"] != "fresh":
-        blockers.append(f"signal_{signal['status']}")
+        execution_blockers.append(f"signal_{signal['status']}")
     if state["pending_time_exit_close"]:
-        blockers.append("pending_time_exit_close_must_be_managed_before_new_entry")
+        execution_blockers.append("pending_time_exit_close_must_be_managed_before_new_entry")
     if risk_halt.get("halted"):
-        blockers.extend(f"risk_halt:{reason}" for reason in risk_halt.get("reasons", []))
+        execution_blockers.extend(f"risk_halt:{reason}" for reason in risk_halt.get("reasons", []))
+    submit_blockers = list(execution_blockers)
     if args.preflight and preflight.get("status") != "ready":
-        blockers.extend(f"preflight:{reason}" for reason in preflight.get("missing_requirements", []))
+        submit_blockers.extend(f"preflight:{reason}" for reason in preflight.get("missing_requirements", []))
+    review_blockers = list(paper_summary["validation_gate"].get("blockers", []))
+    dry_run_status = "ready" if not execution_blockers else "blocked"
+    submit_status = "ready" if not submit_blockers else "blocked"
+    review_status = "ready" if not review_blockers else "blocked"
     result = {
-        "status": "ready" if not blockers else "blocked",
-        "blockers": blockers,
+        "status": dry_run_status,
+        "dry_run_status": dry_run_status,
+        "timed_exit_submit_status": submit_status,
+        "paper_review_status": review_status,
+        "blockers": execution_blockers,
+        "dry_run_blockers": execution_blockers,
+        "timed_exit_submit_blockers": submit_blockers,
+        "paper_review_blockers": review_blockers,
         "strategy_id": args.strategy_id,
         "signal": signal,
         "runner_state": state,
@@ -96,7 +107,7 @@ def main() -> int:
         },
     }
     print(json.dumps(result, indent=2, sort_keys=True, default=str))
-    return 0 if result["status"] == "ready" else 2
+    return 0 if result["dry_run_status"] == "ready" else 2
 
 
 def _signal_status(path: Path, *, max_age_minutes: float) -> dict[str, Any]:

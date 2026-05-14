@@ -617,6 +617,7 @@ def paper_validation_config(args: argparse.Namespace, decision: dict[str, Any]) 
         "--max-signal-age-minutes 10 --paper-consecutive-loss-halt 3 "
         "--paper-daily-loss-halt-points 50"
     )
+    submit_readiness_command = readiness_command + " --preflight"
     return {
         "strategy_id": PAPER_STRATEGY_ID,
         "status": decision["status"],
@@ -629,6 +630,7 @@ def paper_validation_config(args: argparse.Namespace, decision: dict[str, Any]) 
         "paper_phase": "dry_run_first",
         "dry_run_command": dry_run_command,
         "readiness_command": readiness_command,
+        "submit_readiness_command": submit_readiness_command,
         "blocked_submit_command": blocked_submit_command,
         "timed_exit_submit_command": timed_exit_submit_command,
         "submit_blocker": "default --submit remains blocked unless the operator explicitly adds --allow-timed-exit-submit for paper-only managed time exits",

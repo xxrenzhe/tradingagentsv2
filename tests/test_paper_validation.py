@@ -2003,6 +2003,8 @@ def test_lightglow_paper_readiness_checker_blocks_on_pending_close_and_risk_halt
     assert script.main() == 2
     output = capsys.readouterr().out
     assert '"status": "blocked"' in output
+    assert '"dry_run_status": "blocked"' in output
+    assert '"timed_exit_submit_status": "blocked"' in output
     assert "pending_time_exit_close_must_be_managed_before_new_entry" in output
     assert "risk_halt:consecutive_loss_halt:3>=3" in output
     assert "risk_halt:daily_loss_halt:-60.00<=-50.00" in output
@@ -2061,6 +2063,10 @@ def test_lightglow_paper_readiness_checker_ready_without_strict_preflight_or_pap
     assert script.main() == 0
     output = capsys.readouterr().out
     assert '"status": "ready"' in output
+    assert '"dry_run_status": "ready"' in output
+    assert '"timed_exit_submit_status": "ready"' in output
+    assert '"paper_review_status": "blocked"' in output
+    assert "ibkr_submitted_below_min" in output
     assert "timed_exit_submit" in output
 
 
