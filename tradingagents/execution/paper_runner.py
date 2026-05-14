@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .agent_gate import AgentGateConfig, AgentStrategyGate
+from .agent_gate import AgentGateConfig, AgentStrategyGate, outcome_metrics
 from .ibkr import IBKROrderIntent, IBKRPaperBroker, IBKRPaperTradingSession
 from .paper_validation import build_paper_intent_from_trade, load_trade_samples, select_trade_sample
 from .trade_log import DEFAULT_TRADE_LOG_DIR, append_trade_log
@@ -36,6 +36,9 @@ class PaperRunnerConfig:
     allow_time_exit_without_bracket_dry_run: bool = False
     allow_time_exit_submit: bool = False
     timed_exit_sleep_scale: float = 1.0
+    agent_audit_path: Path = Path(".tmp/agent-gate-audit.jsonl")
+    paper_consecutive_loss_halt: int | None = None
+    paper_daily_loss_halt_points: float | None = None
 
 
 @dataclass(frozen=True)
@@ -185,6 +188,25 @@ def run_adaptive_portfolio_paper_once(
         _append_runner_audit(config.state_path, result)
         return result
 
+    risk_halt = _paper_risk_halt(
+        strategy_id=intent.strategy_id,
+        trade_date=str(sample.get("trade_date", "")),
+        audit_path=config.agent_audit_path,
+        consecutive_loss_halt=config.paper_consecutive_loss_halt,
+        daily_loss_halt_points=config.paper_daily_loss_halt_points,
+    )
+    if config.submit and risk_halt["halted"]:
+        result = {
+            "status": "paper_risk_halted",
+            "submitted": False,
+            "candidate_key": key,
+            "paper_risk_halt": risk_halt,
+            "selected_trade": sample.to_dict(),
+            "intent": asdict(intent),
+        }
+        _append_runner_audit(config.state_path, result)
+        return result
+
     gate_config = AgentGateConfig.from_env()
     use_agent_gate = config.require_agent_gate or gate_config.enabled
     gate_result = None
@@ -295,6 +317,82 @@ def _candidate_key(sample: Any, strategy_id: str) -> str:
         str(sample.get("entry_price", "")),
     ]
     return "|".join(parts)
+
+
+def _paper_risk_halt(
+    *,
+    strategy_id: str,
+    trade_date: str,
+    audit_path: Path,
+    consecutive_loss_halt: int | None,
+    daily_loss_halt_points: float | None,
+) -> dict[str, Any]:
+    if consecutive_loss_halt is None and daily_loss_halt_points is None:
+        return {"enabled": False, "halted": False, "reasons": []}
+    events = [
+        event
+        for event in _read_agent_outcomes(audit_path)
+        if event.get("event_type") == "agent_gate_paper_outcome" and _event_strategy_id(event) == strategy_id
+    ]
+    metrics = outcome_metrics(events)
+    day_events = [event for event in events if _event_trade_date(event) == trade_date]
+    day_points = sum(_event_points(event) for event in day_events)
+    reasons: list[str] = []
+    if consecutive_loss_halt is not None and metrics["consecutive_losses"] >= int(consecutive_loss_halt):
+        reasons.append(f"consecutive_loss_halt:{metrics['consecutive_losses']}>={int(consecutive_loss_halt)}")
+    if daily_loss_halt_points is not None and day_points <= -abs(float(daily_loss_halt_points)):
+        reasons.append(f"daily_loss_halt:{day_points:.2f}<=-{abs(float(daily_loss_halt_points)):.2f}")
+    return {
+        "enabled": True,
+        "halted": bool(reasons),
+        "reasons": reasons,
+        "metrics": metrics,
+        "trade_date": trade_date,
+        "daily_points": day_points,
+        "daily_trades": len(day_events),
+        "thresholds": {
+            "consecutive_loss_halt": consecutive_loss_halt,
+            "daily_loss_halt_points": daily_loss_halt_points,
+        },
+    }
+
+
+def _read_agent_outcomes(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    events = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                events.append(value)
+    return events
+
+
+def _event_strategy_id(event: dict[str, Any]) -> str | None:
+    strategy_id = event.get("strategy_id")
+    if strategy_id:
+        return str(strategy_id)
+    intent = event.get("intent")
+    if isinstance(intent, dict) and intent.get("strategy_id"):
+        return str(intent["strategy_id"])
+    return None
+
+
+def _event_trade_date(event: dict[str, Any]) -> str:
+    raw = event.get("trade_date") or event.get("exit_time") or event.get("created_at")
+    timestamp = _parse_utc_timestamp(raw)
+    return timestamp.date().isoformat() if timestamp is not None else str(raw or "")
+
+
+def _event_points(event: dict[str, Any]) -> float:
+    try:
+        return float(event.get("points") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _sample_optional_float(sample: Any, key: str, fallback: float | None) -> float | None:

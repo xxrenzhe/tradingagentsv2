@@ -606,7 +606,8 @@ def paper_validation_config(args: argparse.Namespace, decision: dict[str, Any]) 
     dry_run_command = (
         ".venv/bin/python scripts/run_lightglow_optimized_strategy_paper_trader.py "
         f"--trades {args.trades_output} --symbol MNQ --quantity 1 "
-        "--contract-month 202606 --max-signal-age-minutes 10"
+        "--contract-month 202606 --max-signal-age-minutes 10 "
+        "--paper-consecutive-loss-halt 3 --paper-daily-loss-halt-points 50"
     )
     blocked_submit_command = dry_run_command + " --submit"
     timed_exit_submit_command = dry_run_command + " --submit --allow-timed-exit-submit"

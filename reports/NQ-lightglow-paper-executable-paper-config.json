@@ -1,6 +1,6 @@
 {
-  "blocked_submit_command": ".venv/bin/python scripts/run_lightglow_optimized_strategy_paper_trader.py --trades .tmp/nq-lightglow-paper-executable-optimized-trades.csv --symbol MNQ --quantity 1 --contract-month 202606 --max-signal-age-minutes 10 --submit",
-  "dry_run_command": ".venv/bin/python scripts/run_lightglow_optimized_strategy_paper_trader.py --trades .tmp/nq-lightglow-paper-executable-optimized-trades.csv --symbol MNQ --quantity 1 --contract-month 202606 --max-signal-age-minutes 10",
+  "blocked_submit_command": ".venv/bin/python scripts/run_lightglow_optimized_strategy_paper_trader.py --trades .tmp/nq-lightglow-paper-executable-optimized-trades.csv --symbol MNQ --quantity 1 --contract-month 202606 --max-signal-age-minutes 10 --paper-consecutive-loss-halt 3 --paper-daily-loss-halt-points 50 --submit",
+  "dry_run_command": ".venv/bin/python scripts/run_lightglow_optimized_strategy_paper_trader.py --trades .tmp/nq-lightglow-paper-executable-optimized-trades.csv --symbol MNQ --quantity 1 --contract-month 202606 --max-signal-age-minutes 10 --paper-consecutive-loss-halt 3 --paper-daily-loss-halt-points 50",
   "instrument": "MNQ",
   "paper_phase": "dry_run_first",
   "quantity": 1,
@@ -18,6 +18,6 @@
   "submit_blocker": "default --submit remains blocked unless the operator explicitly adds --allow-timed-exit-submit for paper-only managed time exits",
   "timecell_mode": "shadow_only",
   "timed_exit_recovery": "entry submit persists pending_time_exit_close in runner state; restarts close due timed exits before processing new entries",
-  "timed_exit_submit_command": ".venv/bin/python scripts/run_lightglow_optimized_strategy_paper_trader.py --trades .tmp/nq-lightglow-paper-executable-optimized-trades.csv --symbol MNQ --quantity 1 --contract-month 202606 --max-signal-age-minutes 10 --submit --allow-timed-exit-submit",
+  "timed_exit_submit_command": ".venv/bin/python scripts/run_lightglow_optimized_strategy_paper_trader.py --trades .tmp/nq-lightglow-paper-executable-optimized-trades.csv --symbol MNQ --quantity 1 --contract-month 202606 --max-signal-age-minutes 10 --paper-consecutive-loss-halt 3 --paper-daily-loss-halt-points 50 --submit --allow-timed-exit-submit",
   "trades_path": ".tmp/nq-lightglow-paper-executable-optimized-trades.csv"
 }

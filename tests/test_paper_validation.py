@@ -587,6 +587,226 @@ def test_lightglow_time_exit_recovery_bypasses_bracket_requirement_for_close(tmp
     assert observed_require_bracket == [False]
 
 
+def test_lightglow_submit_blocks_new_entry_after_consecutive_loss_halt(tmp_path, monkeypatch):
+    trades_path = tmp_path / "lightglow.csv"
+    agent_audit = tmp_path / "agent.jsonl"
+    strategy_id = "nq_lightglow_paper_executable_avoid_long_below_ema60_trend"
+    pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-05-01",
+                "entry_ts": pd.Timestamp.utcnow().isoformat(),
+                "actual_entry_ts": pd.Timestamp.utcnow().isoformat(),
+                "exit_ts": pd.Timestamp.utcnow().isoformat(),
+                "direction": 1,
+                "entry_price": 18025.25,
+                "portfolio_rule": strategy_id,
+                "selected_alias": "lightglow_avoid_long_ema60",
+                "exit_reason": "time",
+                "holding_minutes": 2,
+                "strategy_stop_points": "",
+                "strategy_target_points": "",
+            }
+        ]
+    ).to_csv(trades_path, index=False)
+    agent_audit.write_text(
+        "\n".join(
+            json.dumps({"event_type": "agent_gate_paper_outcome", "strategy_id": strategy_id, "trade_date": "2026-05-01", "points": points})
+            for points in (-4.0, -3.0, -2.0)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    class EntrySessionShouldNotRun:
+        def __init__(self, broker):
+            self.broker = broker
+
+        def submit_intent(self, intent, *, dry_run=True, skip_preflight=False):
+            raise AssertionError("risk halt must block new entry before broker submit")
+
+    monkeypatch.setattr("tradingagents.execution.paper_runner.IBKRPaperTradingSession.from_env", lambda active_broker: EntrySessionShouldNotRun(active_broker))
+
+    result = run_adaptive_portfolio_paper_once(
+        config=PaperRunnerConfig(
+            trades_path=trades_path,
+            state_path=tmp_path / "state.json",
+            account="DU123",
+            submit=True,
+            skip_preflight=True,
+            max_signal_age_minutes=None,
+            stop_loss_points=None,
+            take_profit_points=None,
+            allow_time_exit_submit=True,
+            timed_exit_sleep_scale=0.0,
+            agent_audit_path=agent_audit,
+            paper_consecutive_loss_halt=3,
+            paper_daily_loss_halt_points=50,
+        ),
+        broker=IBKRPaperBroker(risk=IBKRPaperRiskConfig(allowed_accounts=("DU123",), allowed_symbols=("MNQ",))),
+    )
+
+    assert result["status"] == "paper_risk_halted"
+    assert "consecutive_loss_halt:3>=3" in result["paper_risk_halt"]["reasons"]
+
+
+def test_lightglow_submit_blocks_new_entry_after_daily_loss_halt(tmp_path, monkeypatch):
+    trades_path = tmp_path / "lightglow.csv"
+    agent_audit = tmp_path / "agent.jsonl"
+    strategy_id = "nq_lightglow_paper_executable_avoid_long_below_ema60_trend"
+    pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-05-01",
+                "entry_ts": pd.Timestamp.utcnow().isoformat(),
+                "actual_entry_ts": pd.Timestamp.utcnow().isoformat(),
+                "exit_ts": pd.Timestamp.utcnow().isoformat(),
+                "direction": 1,
+                "entry_price": 18025.25,
+                "portfolio_rule": strategy_id,
+                "selected_alias": "lightglow_avoid_long_ema60",
+                "exit_reason": "time",
+                "holding_minutes": 2,
+                "strategy_stop_points": "",
+                "strategy_target_points": "",
+            }
+        ]
+    ).to_csv(trades_path, index=False)
+    agent_audit.write_text(
+        json.dumps({"event_type": "agent_gate_paper_outcome", "strategy_id": strategy_id, "trade_date": "2026-05-01", "points": -51.0}) + "\n",
+        encoding="utf-8",
+    )
+
+    class EntrySessionShouldNotRun:
+        def __init__(self, broker):
+            self.broker = broker
+
+        def submit_intent(self, intent, *, dry_run=True, skip_preflight=False):
+            raise AssertionError("daily risk halt must block new entry before broker submit")
+
+    monkeypatch.setattr("tradingagents.execution.paper_runner.IBKRPaperTradingSession.from_env", lambda active_broker: EntrySessionShouldNotRun(active_broker))
+
+    result = run_adaptive_portfolio_paper_once(
+        config=PaperRunnerConfig(
+            trades_path=trades_path,
+            state_path=tmp_path / "state.json",
+            account="DU123",
+            submit=True,
+            skip_preflight=True,
+            max_signal_age_minutes=None,
+            stop_loss_points=None,
+            take_profit_points=None,
+            allow_time_exit_submit=True,
+            timed_exit_sleep_scale=0.0,
+            agent_audit_path=agent_audit,
+            paper_consecutive_loss_halt=3,
+            paper_daily_loss_halt_points=50,
+        ),
+        broker=IBKRPaperBroker(risk=IBKRPaperRiskConfig(allowed_accounts=("DU123",), allowed_symbols=("MNQ",))),
+    )
+
+    assert result["status"] == "paper_risk_halted"
+    assert "daily_loss_halt:-51.00<=-50.00" in result["paper_risk_halt"]["reasons"]
+
+
+def test_lightglow_risk_halt_does_not_block_pending_time_exit_close(tmp_path, monkeypatch):
+    trades_path = tmp_path / "lightglow.csv"
+    state_path = tmp_path / "state.json"
+    agent_audit = tmp_path / "agent.jsonl"
+    strategy_id = "nq_lightglow_paper_executable_avoid_long_below_ema60_trend"
+    pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-05-01",
+                "entry_ts": pd.Timestamp.utcnow().isoformat(),
+                "actual_entry_ts": pd.Timestamp.utcnow().isoformat(),
+                "exit_ts": pd.Timestamp.utcnow().isoformat(),
+                "direction": 1,
+                "entry_price": 18025.25,
+                "portfolio_rule": strategy_id,
+                "selected_alias": "lightglow_avoid_long_ema60",
+                "exit_reason": "time",
+                "holding_minutes": 2,
+            }
+        ]
+    ).to_csv(trades_path, index=False)
+    agent_audit.write_text(
+        "\n".join(
+            json.dumps({"event_type": "agent_gate_paper_outcome", "strategy_id": strategy_id, "trade_date": "2026-05-01", "points": points})
+            for points in (-20.0, -20.0, -20.0)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    state_path.write_text(
+        json.dumps(
+            {
+                "pending_time_exit_close": {
+                    "status": "pending",
+                    "mode": "submit_managed",
+                    "candidate_key": "old-signal",
+                    "holding_minutes": 2,
+                    "due_at": "2026-05-01T10:32:00+00:00",
+                    "close_intent": {
+                        "action": "SELL",
+                        "quantity": 1,
+                        "symbol": "MNQ",
+                        "exchange": "CME",
+                        "currency": "USD",
+                        "last_trade_date_or_contract_month": "202606",
+                        "order_type": "MKT",
+                        "account": "DU123",
+                        "strategy_id": strategy_id,
+                        "reason": "recover close",
+                        "intent_id": "close-intent-existing",
+                        "idempotency_key": "close-idempotency-existing",
+                    },
+                    "signed_position": 1,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    submitted = []
+
+    def fake_submit(self, intent, *, dry_run=True, current_position=0):
+        normalized = intent.normalized()
+        submitted.append(normalized.action)
+        return {
+            "status": "submitted",
+            "submitted": True,
+            "intent": asdict(normalized),
+            "risk": {"passed": True, "decision": "risk_approved", "reasons": []},
+            "orders": [{"action": normalized.action, "orderType": normalized.order_type, "totalQuantity": normalized.quantity}],
+            "trades": [{"order_status": {"status": "Submitted"}}],
+        }
+
+    monkeypatch.setattr("tradingagents.execution.paper_runner.IBKRPaperBroker.submit", fake_submit)
+
+    result = run_adaptive_portfolio_paper_once(
+        config=PaperRunnerConfig(
+            trades_path=trades_path,
+            state_path=state_path,
+            account="DU123",
+            submit=True,
+            skip_preflight=True,
+            max_signal_age_minutes=None,
+            stop_loss_points=None,
+            take_profit_points=None,
+            allow_time_exit_submit=True,
+            timed_exit_sleep_scale=0.0,
+            agent_audit_path=agent_audit,
+            paper_consecutive_loss_halt=3,
+            paper_daily_loss_halt_points=50,
+        ),
+        broker=IBKRPaperBroker(risk=IBKRPaperRiskConfig(allowed_accounts=("DU123",), allowed_symbols=("MNQ",))),
+    )
+
+    assert result["status"] == "submitted"
+    assert result["time_exit_management"]["reason"] == "resumed_pending_time_exit_close"
+    assert submitted == ["SELL"]
+
+
 def test_select_trade_sample_filters_and_row_index():
     trades = pd.DataFrame(
         [

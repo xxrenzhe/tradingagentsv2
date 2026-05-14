@@ -57,6 +57,9 @@ def main() -> int:
     parser.add_argument("--max-signal-age-minutes", type=float, default=10.0)
     parser.add_argument("--allow-stale-signal-submit", action="store_true")
     parser.add_argument("--audit-path", default=None)
+    parser.add_argument("--agent-audit", default=".tmp/agent-gate-audit.jsonl")
+    parser.add_argument("--paper-consecutive-loss-halt", type=int, default=3)
+    parser.add_argument("--paper-daily-loss-halt-points", type=float, default=50.0)
     parser.add_argument("--record-ticks", action="store_true")
     parser.add_argument("--tick-output-dir", default=".tmp/ibkr-paper-ticks")
     parser.add_argument("--tick-interval-seconds", type=float, default=1.0)
@@ -102,6 +105,9 @@ def main() -> int:
         allow_time_exit_without_bracket_dry_run=True,
         allow_time_exit_submit=args.allow_timed_exit_submit,
         timed_exit_sleep_scale=args.timed_exit_sleep_scale,
+        agent_audit_path=Path(args.agent_audit),
+        paper_consecutive_loss_halt=args.paper_consecutive_loss_halt,
+        paper_daily_loss_halt_points=args.paper_daily_loss_halt_points,
     )
 
     if args.daemon:
