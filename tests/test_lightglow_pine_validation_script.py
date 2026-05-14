@@ -17,3 +17,6 @@ def test_lightglow_paper_validation_pine_contains_manual_trade_review_features()
     assert 'signalMode = input.string("Sample While In Zone"' in script
     assert "premiumThreshold = input.float(0.90" in script
     assert "discountThreshold = input.float(0.10" in script
+    assert "strategy.opentrades.entry_bar_index(0)" in script
+    assert "var int entryBar" not in script
+    assert "showRawSignals = input.bool(false" in script

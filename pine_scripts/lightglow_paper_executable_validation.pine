@@ -59,6 +59,7 @@ showEma = input.bool(true, "Show EMA Filter", group=groupDisplay)
 showTradeLines = input.bool(true, "Draw Entry-Exit Dashed Lines", group=groupDisplay)
 showPnlLabels = input.bool(true, "Show Trade PnL Labels", group=groupDisplay)
 showSignalMarkers = input.bool(true, "Show Entry/Exit Markers", group=groupDisplay)
+showRawSignals = input.bool(false, "Show Raw PD Signals", group=groupDisplay)
 showStats = input.bool(true, "Show Summary Table", group=groupDisplay)
 maxVisualTrades = input.int(200, "Max Visual Trade Labels/Lines", minval=20, maxval=500, group=groupDisplay)
 
@@ -100,30 +101,18 @@ shortCondition = tradeDirection < 0 and trendFilterPassed and dateFilterPassed a
 // Orders and Trade State
 // ============================================================================
 
-var int entryBar = na
-var int entryIndex = na
-var float entryPrice = na
-var int entryDirection = 0
 var int lastClosedCount = 0
 var array<line> tradeLines = array.new<line>()
 var array<label> pnlLabels = array.new<label>()
 
 if longCondition
     strategy.entry("LG Long", strategy.long)
-    entryBar := bar_index
-    entryIndex := bar_index
-    entryPrice := close
-    entryDirection := 1
 
 if shortCondition
     strategy.entry("LG Short", strategy.short)
-    entryBar := bar_index
-    entryIndex := bar_index
-    entryPrice := close
-    entryDirection := -1
 
-barsHeld = na(entryBar) ? 0 : bar_index - entryBar
-exitCondition = strategy.position_size != 0 and barsHeld >= holdBars
+barsHeld = strategy.opentrades > 0 ? bar_index - strategy.opentrades.entry_bar_index(0) : 0
+exitCondition = strategy.opentrades > 0 and barsHeld >= holdBars
 
 if exitCondition
     strategy.close_all("Time Exit")
@@ -135,6 +124,9 @@ if exitCondition
 plotshape(showSignalMarkers and longCondition, "Long Entry", shape.triangleup, location.belowbar, color.new(color.lime, 0), size=size.small, text="L")
 plotshape(showSignalMarkers and shortCondition, "Short Entry", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.small, text="S")
 plotshape(showSignalMarkers and exitCondition, "Time Exit", shape.xcross, location.abovebar, color.new(color.yellow, 0), size=size.tiny, text="X")
+plotshape(showRawSignals and premiumSignal, "Raw Premium Signal", shape.circle, location.abovebar, color.new(color.red, 45), size=size.tiny, text="P")
+plotshape(showRawSignals and discountSignal, "Raw Discount Signal", shape.circle, location.belowbar, color.new(color.lime, 45), size=size.tiny, text="D")
+plotshape(showRawSignals and avoidLongBelowEma60Trend, "Long Blocked By EMA60", shape.square, location.belowbar, color.new(color.orange, 15), size=size.tiny, text="B")
 
 if strategy.closedtrades > lastClosedCount
     tradeIndex = strategy.closedtrades - 1
@@ -165,10 +157,6 @@ if strategy.closedtrades > lastClosedCount
             label.delete(array.shift(pnlLabels))
 
     lastClosedCount := strategy.closedtrades
-    entryBar := na
-    entryIndex := na
-    entryPrice := na
-    entryDirection := 0
 
 // ============================================================================
 // Zone and Filter Plots
