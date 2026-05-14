@@ -53,7 +53,14 @@ startTime = input.time(timestamp("2020-01-01 00:00"), "Start", group=groupFilter
 endTime = input.time(timestamp("2026-12-31 23:59"), "End", group=groupFilter)
 
 groupExit = "Exit"
+exitMode = input.string("Trend Hold", "Exit Mode", options=["Trend Hold", "Fixed Bars"], group=groupExit)
 holdBars = input.int(2, "Time Exit After Bars", minval=1, maxval=20, group=groupExit)
+maxHoldBars = input.int(120, "Trend Max Hold Bars", minval=5, maxval=500, group=groupExit)
+atrLength = input.int(14, "ATR Length", minval=2, maxval=100, group=groupExit)
+initialStopAtr = input.float(1.8, "Initial Stop ATR", minval=0.25, maxval=10.0, step=0.25, group=groupExit)
+trailStopAtr = input.float(2.4, "Trailing Stop ATR", minval=0.25, maxval=12.0, step=0.25, group=groupExit)
+breakevenTriggerAtr = input.float(1.2, "Breakeven Trigger ATR", minval=0.25, maxval=10.0, step=0.25, group=groupExit)
+exitOnEmaBreak = input.bool(true, "Exit On EMA Trend Break", group=groupExit)
 
 groupDisplay = "Display"
 showZones = input.bool(true, "Show Premium/Discount Zones", group=groupDisplay)
@@ -118,6 +125,7 @@ tradeDirection = reverseLightglowSignal ? -rawDirection : rawDirection
 
 emaFast = ta.ema(close, emaFastLength)
 emaMid = ta.ema(close, emaMidLength)
+atr = ta.atr(atrLength)
 trend20_60 = emaFast - emaMid
 distEma60 = close - emaMid
 avoidLongBelowEma60Trend = tradeDirection > 0 and distEma60 < 0 and trend20_60 < 0
@@ -134,6 +142,8 @@ shortCondition = tradeDirection < 0 and trendFilterPassed and dateFilterPassed a
 // ============================================================================
 
 var int lastClosedCount = 0
+var float entryAtr = na
+var float bestFavorablePrice = na
 var array<line> tradeLines = array.new<line>()
 var array<label> pnlLabels = array.new<label>()
 
@@ -143,11 +153,50 @@ if longCondition
 if shortCondition
     strategy.entry("LG Short", strategy.short)
 
+newLongPosition = strategy.position_size > 0 and strategy.position_size[1] <= 0
+newShortPosition = strategy.position_size < 0 and strategy.position_size[1] >= 0
+flatPosition = strategy.position_size == 0
+
+if newLongPosition
+    entryAtr := atr
+    bestFavorablePrice := high
+else if newShortPosition
+    entryAtr := atr
+    bestFavorablePrice := low
+else if strategy.position_size > 0
+    bestFavorablePrice := na(bestFavorablePrice) ? high : math.max(bestFavorablePrice, high)
+else if strategy.position_size < 0
+    bestFavorablePrice := na(bestFavorablePrice) ? low : math.min(bestFavorablePrice, low)
+else if flatPosition
+    entryAtr := na
+    bestFavorablePrice := na
+
 barsHeld = strategy.opentrades > 0 ? bar_index - strategy.opentrades.entry_bar_index(0) : 0
-exitCondition = strategy.opentrades > 0 and barsHeld >= holdBars
+riskAtr = na(entryAtr) ? atr : entryAtr
+longInitialStop = strategy.position_avg_price - riskAtr * initialStopAtr
+longTrailStop = bestFavorablePrice - riskAtr * trailStopAtr
+longBreakevenStop = bestFavorablePrice - strategy.position_avg_price >= riskAtr * breakevenTriggerAtr ? strategy.position_avg_price : longInitialStop
+longProtectiveStop = math.max(longInitialStop, math.max(longTrailStop, longBreakevenStop))
+shortInitialStop = strategy.position_avg_price + riskAtr * initialStopAtr
+shortTrailStop = bestFavorablePrice + riskAtr * trailStopAtr
+shortBreakevenStop = strategy.position_avg_price - bestFavorablePrice >= riskAtr * breakevenTriggerAtr ? strategy.position_avg_price : shortInitialStop
+shortProtectiveStop = math.min(shortInitialStop, math.min(shortTrailStop, shortBreakevenStop))
+
+if exitMode == "Trend Hold" and strategy.position_size > 0
+    strategy.exit("LG Long Risk", from_entry="LG Long", stop=longProtectiveStop)
+
+if exitMode == "Trend Hold" and strategy.position_size < 0
+    strategy.exit("LG Short Risk", from_entry="LG Short", stop=shortProtectiveStop)
+
+fixedTimeExitCondition = exitMode == "Fixed Bars" and strategy.opentrades > 0 and barsHeld >= holdBars
+trendMaxHoldExitCondition = exitMode == "Trend Hold" and strategy.opentrades > 0 and barsHeld >= maxHoldBars
+longEmaBreakExit = exitMode == "Trend Hold" and exitOnEmaBreak and strategy.position_size > 0 and close < emaMid and emaFast < emaMid
+shortEmaBreakExit = exitMode == "Trend Hold" and exitOnEmaBreak and strategy.position_size < 0 and close > emaMid and emaFast > emaMid
+trendBreakExitCondition = longEmaBreakExit or shortEmaBreakExit
+exitCondition = fixedTimeExitCondition or trendMaxHoldExitCondition or trendBreakExitCondition
 
 if exitCondition
-    strategy.close_all("Time Exit")
+    strategy.close_all(fixedTimeExitCondition ? "Time Exit" : trendMaxHoldExitCondition ? "Max Hold Exit" : "EMA Break Exit")
     lastExitBar := bar_index
 
 // ============================================================================
@@ -156,7 +205,9 @@ if exitCondition
 
 plotshape(showSignalMarkers and longCondition, "Long Entry", shape.triangleup, location.belowbar, color.new(color.lime, 0), size=size.small, text="L")
 plotshape(showSignalMarkers and shortCondition, "Short Entry", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.small, text="S")
-plotshape(showSignalMarkers and exitCondition, "Time Exit", shape.xcross, location.abovebar, color.new(color.yellow, 0), size=size.tiny, text="X")
+plotshape(showSignalMarkers and fixedTimeExitCondition, "Time Exit", shape.xcross, location.abovebar, color.new(color.yellow, 0), size=size.tiny, text="X")
+plotshape(showSignalMarkers and trendMaxHoldExitCondition, "Max Hold Exit", shape.xcross, location.abovebar, color.new(color.orange, 0), size=size.tiny, text="M")
+plotshape(showSignalMarkers and trendBreakExitCondition, "EMA Break Exit", shape.xcross, location.abovebar, color.new(color.fuchsia, 0), size=size.tiny, text="E")
 plotshape(showRawSignals and rawPremiumSignal, "Raw Premium Signal", shape.circle, location.abovebar, color.new(color.red, 45), size=size.tiny, text="P")
 plotshape(showRawSignals and rawDiscountSignal, "Raw Discount Signal", shape.circle, location.belowbar, color.new(color.lime, 45), size=size.tiny, text="D")
 plotshape(showRawSignals and premiumSignal, "Armed Premium Trigger", shape.diamond, location.abovebar, color.new(color.red, 0), size=size.tiny, text="AP")
@@ -192,6 +243,7 @@ if strategy.closedtrades > lastClosedCount
         if array.size(pnlLabels) > maxVisualTrades
             label.delete(array.shift(pnlLabels))
 
+    lastExitBar := exitBar
     lastClosedCount := strategy.closedtrades
 
 // ============================================================================
@@ -211,6 +263,8 @@ fill(discountTop, discountBottom, color=color.new(color.green, 92), title="Disco
 
 plot(showEma ? emaFast : na, "EMA Fast", color=color.new(color.aqua, 0), linewidth=1)
 plot(showEma ? emaMid : na, "EMA Mid", color=color.new(color.orange, 0), linewidth=1)
+plot(exitMode == "Trend Hold" and strategy.position_size > 0 ? longProtectiveStop : na, "Long Protective Stop", color=color.new(color.lime, 10), linewidth=1, style=plot.style_linebr)
+plot(exitMode == "Trend Hold" and strategy.position_size < 0 ? shortProtectiveStop : na, "Short Protective Stop", color=color.new(color.red, 10), linewidth=1, style=plot.style_linebr)
 bgcolor(useEmaTrendFilter and avoidLongBelowEma60Trend ? color.new(color.red, 90) : na, title="Long Filter Block")
 
 // ============================================================================
@@ -218,7 +272,7 @@ bgcolor(useEmaTrendFilter and avoidLongBelowEma60Trend ? color.new(color.red, 90
 // ============================================================================
 
 if showStats and barstate.islast
-    var table stats = table.new(position.top_right, 2, 11, border_width=1)
+    var table stats = table.new(position.top_right, 2, 15, border_width=1)
     winRate = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100 : 0.0
     grossLossAbs = math.abs(strategy.grossloss)
     profitFactor = grossLossAbs > 0 ? strategy.grossprofit / grossLossAbs : na
@@ -236,16 +290,24 @@ if showStats and barstate.islast
     table.cell(stats, 1, 4, na(profitFactor) ? "n/a" : str.tostring(profitFactor, "#.##"), text_size=size.small)
     table.cell(stats, 0, 5, "Avg Trade", text_size=size.small)
     table.cell(stats, 1, 5, "$" + str.tostring(avgTrade, "#.##"), text_color=avgTrade >= 0 ? color.lime : color.red, text_size=size.small)
-    table.cell(stats, 0, 6, "Hold Bars", text_size=size.small)
-    table.cell(stats, 1, 6, str.tostring(holdBars), text_size=size.small)
-    table.cell(stats, 0, 7, "Signal Mode", text_size=size.small)
-    table.cell(stats, 1, 7, signalMode, text_size=size.small)
-    table.cell(stats, 0, 8, "Re-Arm", text_size=size.small)
-    table.cell(stats, 1, 8, rearmMode, text_size=size.small)
-    table.cell(stats, 0, 9, "Cooldown Bars", text_size=size.small)
-    table.cell(stats, 1, 9, str.tostring(cooldownBars), text_size=size.small)
-    table.cell(stats, 0, 10, "EMA60 Filter", text_size=size.small)
-    table.cell(stats, 1, 10, useEmaTrendFilter ? "ON" : "OFF", text_size=size.small)
+    table.cell(stats, 0, 6, "Exit Mode", text_size=size.small)
+    table.cell(stats, 1, 6, exitMode, text_size=size.small)
+    table.cell(stats, 0, 7, "Hold / Max Bars", text_size=size.small)
+    table.cell(stats, 1, 7, str.tostring(holdBars) + " / " + str.tostring(maxHoldBars), text_size=size.small)
+    table.cell(stats, 0, 8, "ATR Stop / Trail", text_size=size.small)
+    table.cell(stats, 1, 8, str.tostring(initialStopAtr, "#.##") + " / " + str.tostring(trailStopAtr, "#.##"), text_size=size.small)
+    table.cell(stats, 0, 9, "Signal Mode", text_size=size.small)
+    table.cell(stats, 1, 9, signalMode, text_size=size.small)
+    table.cell(stats, 0, 10, "Re-Arm", text_size=size.small)
+    table.cell(stats, 1, 10, rearmMode, text_size=size.small)
+    table.cell(stats, 0, 11, "Cooldown Bars", text_size=size.small)
+    table.cell(stats, 1, 11, str.tostring(cooldownBars), text_size=size.small)
+    table.cell(stats, 0, 12, "EMA60 Filter", text_size=size.small)
+    table.cell(stats, 1, 12, useEmaTrendFilter ? "ON" : "OFF", text_size=size.small)
+    table.cell(stats, 0, 13, "EMA Exit", text_size=size.small)
+    table.cell(stats, 1, 13, exitOnEmaBreak ? "ON" : "OFF", text_size=size.small)
+    table.cell(stats, 0, 14, "Breakeven ATR", text_size=size.small)
+    table.cell(stats, 1, 14, str.tostring(breakevenTriggerAtr, "#.##"), text_size=size.small)
 
 // ============================================================================
 // Alerts
@@ -253,4 +315,4 @@ if showStats and barstate.islast
 
 alertcondition(longCondition, "Lightglow Long", "Lightglow validation LONG on {{ticker}} at {{close}}")
 alertcondition(shortCondition, "Lightglow Short", "Lightglow validation SHORT on {{ticker}} at {{close}}")
-alertcondition(exitCondition, "Lightglow Time Exit", "Lightglow validation time exit on {{ticker}} at {{close}}")
+alertcondition(exitCondition, "Lightglow Manual Exit", "Lightglow validation manual exit on {{ticker}} at {{close}}")
