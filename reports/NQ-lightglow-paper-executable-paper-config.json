@@ -4,6 +4,7 @@
   "instrument": "MNQ",
   "paper_phase": "dry_run_first",
   "quantity": 1,
+  "readiness_command": ".venv/bin/python scripts/check_lightglow_paper_readiness.py --trades .tmp/nq-lightglow-paper-executable-optimized-trades.csv --strategy-id nq_lightglow_paper_executable_avoid_long_below_ema60_trend --max-signal-age-minutes 10 --paper-consecutive-loss-halt 3 --paper-daily-loss-halt-points 50",
   "risk_controls": {
     "consecutive_loss_halt": 3,
     "daily_loss_halt_points": 50,

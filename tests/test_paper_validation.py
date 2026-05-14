@@ -1939,6 +1939,131 @@ def test_lightglow_optimized_runner_passes_timed_exit_submit_flags(tmp_path, mon
     assert '"close_submitted"' in output
 
 
+def test_lightglow_paper_readiness_checker_blocks_on_pending_close_and_risk_halt(tmp_path, monkeypatch, capsys):
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "check_lightglow_paper_readiness.py"
+    spec = importlib.util.spec_from_file_location("check_lightglow_paper_readiness", script_path)
+    script = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(script)
+    strategy_id = "nq_lightglow_paper_executable_avoid_long_below_ema60_trend"
+    trades_path = tmp_path / "trades.csv"
+    state_path = tmp_path / "state.json"
+    agent_audit = tmp_path / "agent.jsonl"
+    ibkr_audit = tmp_path / "ibkr.jsonl"
+    now = pd.Timestamp.utcnow().isoformat()
+    pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-05-01",
+                "entry_ts": now,
+                "actual_entry_ts": now,
+                "exit_ts": now,
+                "direction": 1,
+                "entry_price": 18025.25,
+                "portfolio_rule": strategy_id,
+                "selected_alias": "lightglow_avoid_long_ema60",
+                "exit_reason": "time",
+                "holding_minutes": 2,
+            }
+        ]
+    ).to_csv(trades_path, index=False)
+    state_path.write_text(
+        json.dumps({"pending_time_exit_close": {"candidate_key": "old-signal", "due_at": "2026-05-01T10:32:00+00:00"}}),
+        encoding="utf-8",
+    )
+    today = pd.Timestamp.utcnow().date().isoformat()
+    agent_audit.write_text(
+        "\n".join(
+            json.dumps({"event_type": "agent_gate_paper_outcome", "strategy_id": strategy_id, "trade_date": today, "points": points})
+            for points in (-20.0, -20.0, -20.0)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    ibkr_audit.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "check_lightglow_paper_readiness.py",
+            "--trades",
+            str(trades_path),
+            "--state-path",
+            str(state_path),
+            "--agent-audit",
+            str(agent_audit),
+            "--ibkr-audit",
+            str(ibkr_audit),
+            "--strategy-id",
+            strategy_id,
+            "--min-paper-outcomes",
+            "0",
+        ],
+    )
+
+    assert script.main() == 2
+    output = capsys.readouterr().out
+    assert '"status": "blocked"' in output
+    assert "pending_time_exit_close_must_be_managed_before_new_entry" in output
+    assert "risk_halt:consecutive_loss_halt:3>=3" in output
+    assert "risk_halt:daily_loss_halt:-60.00<=-50.00" in output
+
+
+def test_lightglow_paper_readiness_checker_ready_without_strict_preflight_or_paper_sample(tmp_path, monkeypatch, capsys):
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "check_lightglow_paper_readiness.py"
+    spec = importlib.util.spec_from_file_location("check_lightglow_paper_readiness", script_path)
+    script = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(script)
+    strategy_id = "nq_lightglow_paper_executable_avoid_long_below_ema60_trend"
+    trades_path = tmp_path / "trades.csv"
+    state_path = tmp_path / "state.json"
+    agent_audit = tmp_path / "agent.jsonl"
+    ibkr_audit = tmp_path / "ibkr.jsonl"
+    now = pd.Timestamp.utcnow().isoformat()
+    pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-05-01",
+                "entry_ts": now,
+                "actual_entry_ts": now,
+                "exit_ts": now,
+                "direction": 1,
+                "entry_price": 18025.25,
+                "portfolio_rule": strategy_id,
+                "selected_alias": "lightglow_avoid_long_ema60",
+                "exit_reason": "time",
+                "holding_minutes": 2,
+            }
+        ]
+    ).to_csv(trades_path, index=False)
+    state_path.write_text("{}", encoding="utf-8")
+    agent_audit.write_text("", encoding="utf-8")
+    ibkr_audit.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "check_lightglow_paper_readiness.py",
+            "--trades",
+            str(trades_path),
+            "--state-path",
+            str(state_path),
+            "--agent-audit",
+            str(agent_audit),
+            "--ibkr-audit",
+            str(ibkr_audit),
+            "--strategy-id",
+            strategy_id,
+            "--min-paper-outcomes",
+            "0",
+        ],
+    )
+
+    assert script.main() == 0
+    output = capsys.readouterr().out
+    assert '"status": "ready"' in output
+    assert "timed_exit_submit" in output
+
+
 def test_best_strategy_paper_trader_script_locks_strategy_filters(tmp_path, monkeypatch, capsys):
     script_path = Path(__file__).resolve().parents[1] / "scripts" / "run_mbp_best_strategy_paper_trader.py"
     spec = importlib.util.spec_from_file_location("run_mbp_best_strategy_paper_trader", script_path)
