@@ -903,13 +903,36 @@ def best_worst_charts(trades: pd.DataFrame, bars: pd.DataFrame) -> str:
     worst = trades.loc[trades["net_points"].idxmin()]
     return "".join(
         [
-            trade_panel("最佳交易 K线", best, bars),
-            trade_panel("最差交易 K线", worst, bars),
+            trade_panel("原始冻结组合最佳交易 K线", best, bars),
+            trade_panel("原始冻结组合最差交易 K线（审计样本）", worst, bars),
         ]
     )
 
 
-def trade_panel(title: str, trade: pd.Series, bars: pd.DataFrame) -> str:
+def paper_executable_trades(trades: pd.DataFrame) -> pd.DataFrame:
+    """Trades that the current paper plan can plausibly validate with integer contracts."""
+    if trades.empty or "strategy_source" not in trades.columns:
+        return trades.iloc[0:0].copy()
+    executable = trades[trades["strategy_source"].astype(str).eq(LIGHTGLOW_SOURCE)].copy()
+    executable["risk_weight"] = executable.get("risk_weight", 1.0)
+    return executable
+
+
+def executable_best_worst_charts(trades: pd.DataFrame, bars: pd.DataFrame) -> str:
+    executable = paper_executable_trades(trades)
+    if executable.empty:
+        return '<p class="empty">No paper-executable trade samples after excluding shadow-only components.</p>'
+    best = executable.loc[executable["net_points"].idxmax()]
+    worst = executable.loc[executable["net_points"].idxmin()]
+    return "".join(
+        [
+            trade_panel("纸盘可执行 Lightglow 最佳交易 K线", best, bars, note="Timecell is excluded here because it is shadow-only at 0.05x."),
+            trade_panel("纸盘可执行 Lightglow 最差交易 K线", worst, bars, note="This is the worst currently executable paper-validation sample, not the raw composite tail."),
+        ]
+    )
+
+
+def trade_panel(title: str, trade: pd.Series, bars: pd.DataFrame, note: str = "") -> str:
     entry_ts = pd.to_datetime(trade["entry_ts"], utc=True)
     exit_ts = pd.to_datetime(trade["exit_ts"], utc=True)
     start_pos = max(0, int(bars["ts"].searchsorted(entry_ts, side="left")) - 80)
@@ -923,6 +946,7 @@ def trade_panel(title: str, trade: pd.Series, bars: pd.DataFrame) -> str:
     <figure class="chart">
       <figcaption>{esc(title)}</figcaption>
       <p class="muted">{esc(meta)}</p>
+      {f'<p class="muted">{esc(note)}</p>' if note else ''}
       {candlestick_svg(window, trade)}
     </figure>
     """
@@ -1151,7 +1175,14 @@ def build_html_report(
     <section>
       <h2>资金曲线与 K线样本</h2>
       {line_svg(pd.DataFrame({"x": range(1, len(composite_trades) + 1), "equity": composite_trades["net_points"].cumsum()}), title="组合原始净点曲线")}
+      <div class="note risk">
+        <p><strong>为什么原始最差交易仍然显示：</strong>这张图保留冻结组合的真实尾部风险，用于审计，而不是表示已经批准这类 Timecell 逆趋势长单进入纸盘执行。</p>
+        <p><strong>纸盘执行口径：</strong>当前计划只允许 Lightglow 用 MNQ 小仓位验证；Timecell 因 <code>0.05x</code> 无法映射为整数合约且反手做空未被 OOS 证明，只能 shadow-record。下面单独展示纸盘可执行 Lightglow 样本。</p>
+      </div>
+      <h3>冻结原始组合审计样本</h3>
       {best_worst_charts(composite_trades, bars)}
+      <h3>纸盘可执行 Lightglow 样本</h3>
+      {executable_best_worst_charts(composite_trades, bars)}
     </section>
     <section>
       <h2>纸盘验证计划</h2>

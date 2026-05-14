@@ -149,6 +149,15 @@ def test_same_bar_and_risk_budget_guards() -> None:
     assert timecell["mnq_equivalent"] < 1
 
 
+def test_paper_executable_samples_exclude_shadow_timecell() -> None:
+    trades = _composite_trades()
+    executable = paper_script.paper_executable_trades(trades)
+
+    assert not executable.empty
+    assert set(executable["strategy_source"]) == {paper_script.LIGHTGLOW_SOURCE}
+    assert paper_script.TIMECELL_SOURCE not in set(executable["strategy_source"])
+
+
 def test_loss_learning_selected_rule_must_work_oos_to_be_positive() -> None:
     bars = _bars("2020-01-01 00:00", periods=7000)
     trades = _composite_trades()
@@ -207,6 +216,10 @@ def test_report_generation_writes_outputs(tmp_path: Path) -> None:
     assert "亏损交易学习" in html
     assert "反手做空诊断" in html
     assert "泄漏审计" in html
+    assert "原始冻结组合最差交易 K线（审计样本）" in html
+    assert "纸盘可执行 Lightglow 最差交易 K线" in html
+    assert "为什么原始最差交易仍然显示" in html
+    assert "Timecell 因 <code>0.05x</code> 无法映射为整数合约" in html
     assert result["readiness"]["status"] == "blocked"
     assert result["reverse_trade_verdict"] in {"reverse_not_selected", "reverse_not_proven", "reverse_positive_candidate"}
     for path in (markdown, summary, wf, wf_trades, stress, leakage, loss_learning, reverse_diagnostic, plan):
