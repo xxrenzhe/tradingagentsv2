@@ -486,13 +486,16 @@ TradingView设置:
 
 ```
 Reverse Lightglow PD Signal: true
+Signal Sampling: Sample While In Zone
 Exit After Bars: 2
 Avoid Long Below EMA60 Downtrend: true
-Premium Threshold: 0.95
-Discount Threshold: 0.05
+Premium Threshold: 0.90
+Discount Threshold: 0.10
 ```
 
-注意：Python 生产导出器使用完整 Lightglow confirmed swing pivot 状态机；TradingView 校验脚本使用 trailing range proxy，目的是辅助人工识别交易点是否合理，不作为生产信号的逐笔一致性证明。
+如果图上只有极少数交易，优先检查 `Signal Sampling`。`Sample While In Zone` 会在持仓结束后继续对仍处于 premium/discount 区域的行情取样，适合人工复盘多日期样本；`First Bar In Zone` 只取第一次进入极端区的 K 线，交易会明显减少。
+
+注意：Python 生产导出器使用完整 Lightglow confirmed swing pivot 状态机；TradingView 校验脚本使用 trailing range proxy，目的是辅助人工识别交易点是否合理，不作为生产信号的逐笔一致性证明。若要更接近早期极端区设置，可手动改回 `Premium Threshold = 0.95`、`Discount Threshold = 0.05`。
 
 ---
 

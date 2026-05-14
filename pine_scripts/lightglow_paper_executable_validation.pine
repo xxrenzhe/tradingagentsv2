@@ -37,10 +37,10 @@ strategy("Lightglow Paper Validation",
 
 groupSignal = "Signal"
 rangeLength = input.int(100, "Premium/Discount Lookback", minval=20, maxval=500, group=groupSignal)
-premiumThreshold = input.float(0.95, "Premium Threshold", minval=0.50, maxval=1.00, step=0.01, group=groupSignal)
-discountThreshold = input.float(0.05, "Discount Threshold", minval=0.00, maxval=0.50, step=0.01, group=groupSignal)
+premiumThreshold = input.float(0.90, "Premium Threshold", minval=0.50, maxval=1.00, step=0.01, group=groupSignal)
+discountThreshold = input.float(0.10, "Discount Threshold", minval=0.00, maxval=0.50, step=0.01, group=groupSignal)
 reverseLightglowSignal = input.bool(true, "Reverse Lightglow PD Signal", group=groupSignal)
-useNewZoneOnly = input.bool(true, "Only First Bar In Zone", group=groupSignal)
+signalMode = input.string("Sample While In Zone", "Signal Sampling", options=["Sample While In Zone", "First Bar In Zone"], group=groupSignal)
 
 groupFilter = "Filters"
 useEmaTrendFilter = input.bool(true, "Avoid Long Below EMA60 Downtrend", group=groupFilter)
@@ -75,8 +75,9 @@ equilibrium = (rangeHigh + rangeLow) * 0.5
 
 inPremium = rangeSize > 0 and close >= premiumLevel
 inDiscount = rangeSize > 0 and close <= discountLevel
-premiumSignal = useNewZoneOnly ? inPremium and not inPremium[1] : inPremium
-discountSignal = useNewZoneOnly ? inDiscount and not inDiscount[1] : inDiscount
+useFirstBarOnly = signalMode == "First Bar In Zone"
+premiumSignal = useFirstBarOnly ? inPremium and not inPremium[1] : inPremium
+discountSignal = useFirstBarOnly ? inDiscount and not inDiscount[1] : inDiscount
 
 lightglowBearish = premiumSignal
 lightglowBullish = discountSignal

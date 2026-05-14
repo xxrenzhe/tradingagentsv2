@@ -14,3 +14,6 @@ def test_lightglow_paper_validation_pine_contains_manual_trade_review_features()
     assert "holdBars = input.int(2" in script
     assert "avoidLongBelowEma60Trend" in script
     assert "reverseLightglowSignal = input.bool(true" in script
+    assert 'signalMode = input.string("Sample While In Zone"' in script
+    assert "premiumThreshold = input.float(0.90" in script
+    assert "discountThreshold = input.float(0.10" in script
