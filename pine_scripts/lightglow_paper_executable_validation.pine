@@ -133,7 +133,7 @@ if exitCondition
 
 plotshape(showSignalMarkers and longCondition, "Long Entry", shape.triangleup, location.belowbar, color.new(color.lime, 0), size=size.small, text="L")
 plotshape(showSignalMarkers and shortCondition, "Short Entry", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.small, text="S")
-plotshape(showSignalMarkers and exitCondition, "Time Exit", shape.xcross, location.absolute, color.new(color.yellow, 0), size=size.tiny, text="X")
+plotshape(showSignalMarkers and exitCondition, "Time Exit", shape.xcross, location.abovebar, color.new(color.yellow, 0), size=size.tiny, text="X")
 
 if strategy.closedtrades > lastClosedCount
     tradeIndex = strategy.closedtrades - 1
