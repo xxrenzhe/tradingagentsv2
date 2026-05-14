@@ -40,7 +40,9 @@ rangeLength = input.int(100, "Premium/Discount Lookback", minval=20, maxval=500,
 premiumThreshold = input.float(0.90, "Premium Threshold", minval=0.50, maxval=1.00, step=0.01, group=groupSignal)
 discountThreshold = input.float(0.10, "Discount Threshold", minval=0.00, maxval=0.50, step=0.01, group=groupSignal)
 reverseLightglowSignal = input.bool(true, "Reverse Lightglow PD Signal", group=groupSignal)
-signalMode = input.string("Sample While In Zone", "Signal Sampling", options=["Sample While In Zone", "First Bar In Zone"], group=groupSignal)
+signalMode = input.string("Armed Zone Trigger", "Signal Sampling", options=["Armed Zone Trigger", "First Bar In Zone", "Sample While In Zone"], group=groupSignal)
+rearmMode = input.string("Rearm At Equilibrium", "Zone Re-Arm", options=["Rearm At Equilibrium", "Rearm Outside Zone", "Every Flat Bar"], group=groupSignal)
+cooldownBars = input.int(10, "Cooldown Bars After Exit", minval=0, maxval=200, group=groupSignal)
 
 groupFilter = "Filters"
 useEmaTrendFilter = input.bool(true, "Avoid Long Below EMA60 Downtrend", group=groupFilter)
@@ -77,8 +79,36 @@ equilibrium = (rangeHigh + rangeLow) * 0.5
 inPremium = rangeSize > 0 and close >= premiumLevel
 inDiscount = rangeSize > 0 and close <= discountLevel
 useFirstBarOnly = signalMode == "First Bar In Zone"
-premiumSignal = useFirstBarOnly ? inPremium and not inPremium[1] : inPremium
-discountSignal = useFirstBarOnly ? inDiscount and not inDiscount[1] : inDiscount
+useArmedZoneTrigger = signalMode == "Armed Zone Trigger"
+rawPremiumSignal = useFirstBarOnly ? inPremium and not inPremium[1] : inPremium
+rawDiscountSignal = useFirstBarOnly ? inDiscount and not inDiscount[1] : inDiscount
+
+var bool premiumArmed = true
+var bool discountArmed = true
+var int lastExitBar = na
+
+isFlat = strategy.position_size == 0
+if rearmMode == "Every Flat Bar" and isFlat
+    premiumArmed := true
+    discountArmed := true
+else if rearmMode == "Rearm Outside Zone"
+    if not inPremium
+        premiumArmed := true
+    if not inDiscount
+        discountArmed := true
+else
+    if close <= equilibrium
+        premiumArmed := true
+    if close >= equilibrium
+        discountArmed := true
+
+premiumSignal = useArmedZoneTrigger ? rawPremiumSignal and premiumArmed : rawPremiumSignal
+discountSignal = useArmedZoneTrigger ? rawDiscountSignal and discountArmed : rawDiscountSignal
+
+if premiumSignal
+    premiumArmed := false
+if discountSignal
+    discountArmed := false
 
 lightglowBearish = premiumSignal
 lightglowBullish = discountSignal
@@ -93,9 +123,11 @@ distEma60 = close - emaMid
 avoidLongBelowEma60Trend = tradeDirection > 0 and distEma60 < 0 and trend20_60 < 0
 trendFilterPassed = not useEmaTrendFilter or not avoidLongBelowEma60Trend
 dateFilterPassed = not useDateFilter or (time >= startTime and time <= endTime)
+cooldownPassed = na(lastExitBar) or bar_index - lastExitBar >= cooldownBars
+cooldownBlockedSignal = tradeDirection != 0 and trendFilterPassed and dateFilterPassed and strategy.position_size == 0 and not cooldownPassed
 
-longCondition = tradeDirection > 0 and trendFilterPassed and dateFilterPassed and strategy.position_size == 0
-shortCondition = tradeDirection < 0 and trendFilterPassed and dateFilterPassed and strategy.position_size == 0
+longCondition = tradeDirection > 0 and trendFilterPassed and dateFilterPassed and cooldownPassed and strategy.position_size == 0
+shortCondition = tradeDirection < 0 and trendFilterPassed and dateFilterPassed and cooldownPassed and strategy.position_size == 0
 
 // ============================================================================
 // Orders and Trade State
@@ -116,6 +148,7 @@ exitCondition = strategy.opentrades > 0 and barsHeld >= holdBars
 
 if exitCondition
     strategy.close_all("Time Exit")
+    lastExitBar := bar_index
 
 // ============================================================================
 // Entry/Exit Visuals
@@ -124,9 +157,12 @@ if exitCondition
 plotshape(showSignalMarkers and longCondition, "Long Entry", shape.triangleup, location.belowbar, color.new(color.lime, 0), size=size.small, text="L")
 plotshape(showSignalMarkers and shortCondition, "Short Entry", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.small, text="S")
 plotshape(showSignalMarkers and exitCondition, "Time Exit", shape.xcross, location.abovebar, color.new(color.yellow, 0), size=size.tiny, text="X")
-plotshape(showRawSignals and premiumSignal, "Raw Premium Signal", shape.circle, location.abovebar, color.new(color.red, 45), size=size.tiny, text="P")
-plotshape(showRawSignals and discountSignal, "Raw Discount Signal", shape.circle, location.belowbar, color.new(color.lime, 45), size=size.tiny, text="D")
+plotshape(showRawSignals and rawPremiumSignal, "Raw Premium Signal", shape.circle, location.abovebar, color.new(color.red, 45), size=size.tiny, text="P")
+plotshape(showRawSignals and rawDiscountSignal, "Raw Discount Signal", shape.circle, location.belowbar, color.new(color.lime, 45), size=size.tiny, text="D")
+plotshape(showRawSignals and premiumSignal, "Armed Premium Trigger", shape.diamond, location.abovebar, color.new(color.red, 0), size=size.tiny, text="AP")
+plotshape(showRawSignals and discountSignal, "Armed Discount Trigger", shape.diamond, location.belowbar, color.new(color.lime, 0), size=size.tiny, text="AD")
 plotshape(showRawSignals and avoidLongBelowEma60Trend, "Long Blocked By EMA60", shape.square, location.belowbar, color.new(color.orange, 15), size=size.tiny, text="B")
+plotshape(showRawSignals and cooldownBlockedSignal, "Blocked By Cooldown", shape.square, location.abovebar, color.new(color.gray, 15), size=size.tiny, text="C")
 
 if strategy.closedtrades > lastClosedCount
     tradeIndex = strategy.closedtrades - 1
@@ -182,7 +218,7 @@ bgcolor(useEmaTrendFilter and avoidLongBelowEma60Trend ? color.new(color.red, 90
 // ============================================================================
 
 if showStats and barstate.islast
-    var table stats = table.new(position.top_right, 2, 8, border_width=1)
+    var table stats = table.new(position.top_right, 2, 11, border_width=1)
     winRate = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100 : 0.0
     grossLossAbs = math.abs(strategy.grossloss)
     profitFactor = grossLossAbs > 0 ? strategy.grossprofit / grossLossAbs : na
@@ -202,8 +238,14 @@ if showStats and barstate.islast
     table.cell(stats, 1, 5, "$" + str.tostring(avgTrade, "#.##"), text_color=avgTrade >= 0 ? color.lime : color.red, text_size=size.small)
     table.cell(stats, 0, 6, "Hold Bars", text_size=size.small)
     table.cell(stats, 1, 6, str.tostring(holdBars), text_size=size.small)
-    table.cell(stats, 0, 7, "EMA60 Filter", text_size=size.small)
-    table.cell(stats, 1, 7, useEmaTrendFilter ? "ON" : "OFF", text_size=size.small)
+    table.cell(stats, 0, 7, "Signal Mode", text_size=size.small)
+    table.cell(stats, 1, 7, signalMode, text_size=size.small)
+    table.cell(stats, 0, 8, "Re-Arm", text_size=size.small)
+    table.cell(stats, 1, 8, rearmMode, text_size=size.small)
+    table.cell(stats, 0, 9, "Cooldown Bars", text_size=size.small)
+    table.cell(stats, 1, 9, str.tostring(cooldownBars), text_size=size.small)
+    table.cell(stats, 0, 10, "EMA60 Filter", text_size=size.small)
+    table.cell(stats, 1, 10, useEmaTrendFilter ? "ON" : "OFF", text_size=size.small)
 
 // ============================================================================
 // Alerts
