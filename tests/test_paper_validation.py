@@ -223,6 +223,87 @@ def test_lightglow_time_exit_submit_still_requires_bracket_or_explicit_wrapper_b
     assert "bracket_required" in result["result"]["risk"]["reasons"]
 
 
+def test_lightglow_time_exit_submit_sends_close_order_when_explicitly_allowed(tmp_path, monkeypatch):
+    trades_path = tmp_path / "lightglow.csv"
+    pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-05-01",
+                "entry_ts": pd.Timestamp.utcnow().isoformat(),
+                "actual_entry_ts": pd.Timestamp.utcnow().isoformat(),
+                "exit_ts": pd.Timestamp.utcnow().isoformat(),
+                "direction": 1,
+                "entry_price": 18025.25,
+                "portfolio_rule": "nq_lightglow_paper_executable_avoid_long_below_ema60_trend",
+                "selected_alias": "lightglow_avoid_long_ema60",
+                "exit_reason": "time",
+                "holding_minutes": 2,
+                "strategy_stop_points": "",
+                "strategy_target_points": "",
+            }
+        ]
+    ).to_csv(trades_path, index=False)
+    broker = IBKRPaperBroker(
+        risk=IBKRPaperRiskConfig(allowed_accounts=("DU123",), allowed_symbols=("MNQ",), require_bracket=True),
+        audit_path=tmp_path / "ibkr.jsonl",
+    )
+    close_orders = []
+
+    class FakeSession:
+        def __init__(self, broker):
+            self.broker = broker
+
+        def submit_intent(self, intent, *, dry_run=True, skip_preflight=False):
+            normalized = intent.normalized()
+            return {
+                "status": "submitted",
+                "submitted": True,
+                "intent": asdict(normalized),
+                "risk": {"passed": True, "decision": "risk_approved", "reasons": []},
+                "orders": [{"action": normalized.action, "orderType": normalized.order_type, "totalQuantity": normalized.quantity}],
+                "trades": [{"order_status": {"status": "Submitted"}}],
+            }
+
+    def fake_close_submit(intent, *, dry_run=True, current_position=0):
+        normalized = intent.normalized()
+        close_orders.append((normalized, dry_run, current_position))
+        return {
+            "status": "submitted",
+            "submitted": True,
+            "intent": asdict(normalized),
+            "risk": {"passed": True, "decision": "risk_approved", "reasons": []},
+            "orders": [{"action": normalized.action, "orderType": normalized.order_type, "totalQuantity": normalized.quantity}],
+            "trades": [{"order_status": {"status": "Submitted"}}],
+        }
+
+    monkeypatch.setattr("tradingagents.execution.paper_runner.IBKRPaperTradingSession.from_env", lambda active_broker: FakeSession(active_broker))
+    monkeypatch.setattr(broker, "submit", fake_close_submit)
+    monkeypatch.setattr("tradingagents.execution.paper_runner._without_bracket_requirement", lambda active_broker: active_broker)
+
+    result = run_adaptive_portfolio_paper_once(
+        config=PaperRunnerConfig(
+            trades_path=trades_path,
+            state_path=tmp_path / "state.json",
+            account="DU123",
+            submit=True,
+            skip_preflight=True,
+            max_signal_age_minutes=None,
+            stop_loss_points=None,
+            take_profit_points=None,
+            allow_time_exit_submit=True,
+            timed_exit_sleep_scale=0.0,
+        ),
+        broker=broker,
+    )
+
+    assert result["status"] == "submitted"
+    assert result["time_exit_management"]["status"] == "close_submitted"
+    assert result["time_exit_management"]["close_intent"]["action"] == "SELL"
+    assert result["time_exit_management"]["close_result"]["risk"]["passed"] is True
+    assert close_orders[0][1] is False
+    assert close_orders[0][2] == 1
+
+
 def test_select_trade_sample_filters_and_row_index():
     trades = pd.DataFrame(
         [
@@ -1299,6 +1380,60 @@ def test_adaptive_portfolio_paper_trader_script_outputs_dry_run(tmp_path, monkey
     assert '"status": "dry_run"' in output
     assert '"strategy_id": "adaptive_rule"' in output
     assert '"tick_recording"' in output
+
+
+def test_lightglow_optimized_runner_passes_timed_exit_submit_flags(tmp_path, monkeypatch, capsys):
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "run_lightglow_optimized_strategy_paper_trader.py"
+    spec = importlib.util.spec_from_file_location("run_lightglow_optimized_strategy_paper_trader", script_path)
+    script = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(script)
+    trades_path = tmp_path / "trades.csv"
+    pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-05-01",
+                "entry_ts": pd.Timestamp.utcnow().isoformat(),
+                "actual_entry_ts": pd.Timestamp.utcnow().isoformat(),
+                "exit_ts": pd.Timestamp.utcnow().isoformat(),
+                "direction": 1,
+                "entry_price": 18025.25,
+                "portfolio_rule": "nq_lightglow_paper_executable_avoid_long_below_ema60_trend",
+                "selected_alias": "lightglow_avoid_long_ema60",
+                "exit_reason": "time",
+                "holding_minutes": 2,
+            }
+        ]
+    ).to_csv(trades_path, index=False)
+    captured = {}
+
+    def fake_run_once(**kwargs):
+        captured.update(kwargs)
+        return {"status": "submitted", "submitted": True, "time_exit_management": {"status": "close_submitted"}}
+
+    monkeypatch.setattr(script, "run_adaptive_portfolio_paper_once", fake_run_once)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_lightglow_optimized_strategy_paper_trader.py",
+            "--trades",
+            str(trades_path),
+            "--state-path",
+            str(tmp_path / "state.json"),
+            "--submit",
+            "--allow-timed-exit-submit",
+            "--timed-exit-sleep-scale",
+            "0",
+        ],
+    )
+
+    assert script.main() == 0
+    config = captured["config"]
+    assert config.submit is True
+    assert config.allow_time_exit_submit is True
+    assert config.timed_exit_sleep_scale == 0
+    output = capsys.readouterr().out
+    assert '"close_submitted"' in output
 
 
 def test_best_strategy_paper_trader_script_locks_strategy_filters(tmp_path, monkeypatch, capsys):

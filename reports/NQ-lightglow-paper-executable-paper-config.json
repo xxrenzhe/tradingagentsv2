@@ -15,7 +15,8 @@
   "selected_filter": "avoid_long_below_ema60_trend",
   "status": "promote_to_paper_candidate",
   "strategy_id": "nq_lightglow_paper_executable_avoid_long_below_ema60_trend",
-  "submit_blocker": "submit still requires explicit --allow-entry-only-submit until a real timed-exit close-order daemon is enabled",
+  "submit_blocker": "default --submit remains blocked unless the operator explicitly adds --allow-timed-exit-submit for paper-only managed time exits",
   "timecell_mode": "shadow_only",
+  "timed_exit_submit_command": ".venv/bin/python scripts/run_lightglow_optimized_strategy_paper_trader.py --trades .tmp/nq-lightglow-paper-executable-optimized-trades.csv --symbol MNQ --quantity 1 --contract-month 202606 --max-signal-age-minutes 10 --submit --allow-timed-exit-submit",
   "trades_path": ".tmp/nq-lightglow-paper-executable-optimized-trades.csv"
 }

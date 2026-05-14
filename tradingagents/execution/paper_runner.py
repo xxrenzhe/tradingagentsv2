@@ -34,6 +34,8 @@ class PaperRunnerConfig:
     trade_log_dir: Path = DEFAULT_TRADE_LOG_DIR
     tick_recorder: IBKRTickRecorderConfig = field(default_factory=IBKRTickRecorderConfig)
     allow_time_exit_without_bracket_dry_run: bool = False
+    allow_time_exit_submit: bool = False
+    timed_exit_sleep_scale: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -191,6 +193,7 @@ def run_adaptive_portfolio_paper_once(
         take_profit_points=take_profit_points,
         submit=config.submit,
         allow_dry_run=config.allow_time_exit_without_bracket_dry_run,
+        allow_submit=config.allow_time_exit_submit,
     )
     execution_broker = _without_bracket_requirement(active_broker) if time_exit_without_bracket else active_broker
     if config.submit:
@@ -204,10 +207,18 @@ def run_adaptive_portfolio_paper_once(
     if time_exit_without_bracket:
         response["time_exit_management"] = {
             "enabled": True,
-            "mode": "dry_run_only",
+            "mode": "submit_managed" if config.submit else "dry_run_only",
             "holding_minutes": _sample_optional_float(sample, "holding_minutes", None),
             "reason": "time_exit_strategy_without_bracket",
         }
+    if time_exit_without_bracket and config.submit and response.get("status") == "submitted":
+        response["time_exit_management"] = _submit_timed_exit_close(
+            broker=execution_broker,
+            entry_intent=intent,
+            entry_response=response,
+            sample=sample,
+            sleep_scale=config.timed_exit_sleep_scale,
+        )
     result = {
         "status": response.get("status", "unknown"),
         "submitted": bool(response.get("submitted")),
@@ -283,8 +294,11 @@ def _time_exit_without_bracket_allowed(
     take_profit_points: float | None,
     submit: bool,
     allow_dry_run: bool,
+    allow_submit: bool,
 ) -> bool:
-    if submit or not allow_dry_run:
+    if submit and not allow_submit:
+        return False
+    if not submit and not allow_dry_run:
         return False
     if stop_loss_points is not None or take_profit_points is not None:
         return False
@@ -294,6 +308,49 @@ def _time_exit_without_bracket_allowed(
     selected_alias = str(sample.get("selected_alias", "") or "").lower()
     is_lightglow = "lightglow" in strategy or "lightglow" in selected_alias
     return exit_reason == "time" and holding_minutes is not None and holding_minutes > 0 and is_lightglow
+
+
+def _submit_timed_exit_close(
+    *,
+    broker: IBKRPaperBroker,
+    entry_intent: Any,
+    entry_response: dict[str, Any],
+    sample: Any,
+    sleep_scale: float,
+) -> dict[str, Any]:
+    holding_minutes = _sample_optional_float(sample, "holding_minutes", None)
+    if holding_minutes is None or holding_minutes <= 0:
+        return {"enabled": True, "status": "close_skipped", "reason": "missing_holding_minutes"}
+    wait_seconds = max(0.0, float(holding_minutes) * 60.0 * max(0.0, float(sleep_scale)))
+    if wait_seconds:
+        time.sleep(wait_seconds)
+    entry_action = str(entry_intent.action).upper()
+    close_action = "SELL" if entry_action == "BUY" else "BUY"
+    close_intent = type(entry_intent)(
+        action=close_action,
+        quantity=entry_intent.quantity,
+        symbol=entry_intent.symbol,
+        exchange=entry_intent.exchange,
+        currency=entry_intent.currency,
+        last_trade_date_or_contract_month=entry_intent.last_trade_date_or_contract_month,
+        order_type="MKT",
+        account=entry_intent.account,
+        strategy_id=entry_intent.strategy_id,
+        reason=f"{entry_intent.reason} | timed_exit_close_after_minutes={holding_minutes:g}",
+    ).normalized()
+    signed_position = entry_intent.quantity if entry_action == "BUY" else -entry_intent.quantity
+    close_response = broker.submit(close_intent, dry_run=False, current_position=signed_position)
+    return {
+        "enabled": True,
+        "mode": "submit_managed",
+        "status": "close_submitted" if close_response.get("status") == "submitted" else close_response.get("status", "unknown"),
+        "holding_minutes": holding_minutes,
+        "wait_seconds": wait_seconds,
+        "entry_status": entry_response.get("status"),
+        "close_intent": close_response.get("intent"),
+        "close_result": close_response,
+        "reason": "time_exit_strategy_without_bracket",
+    }
 
 
 def _without_bracket_requirement(broker: IBKRPaperBroker) -> IBKRPaperBroker:

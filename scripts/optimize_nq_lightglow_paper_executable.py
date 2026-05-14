@@ -458,7 +458,7 @@ This is a causal optimization of the paper-executable Lightglow-only subset. Tim
 
 - Filters are selected on train years only and applied to the next test year.
 - No Timecell trades are included in executable performance.
-- Paper execution remains dry-run first; submit is blocked until the timed-exit manager is available.
+- Paper execution remains dry-run first; submit requires explicit `--allow-timed-exit-submit` and paper-only timed-exit close management.
 - This report does not approve live trading.
 """
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -608,6 +608,7 @@ def paper_validation_config(args: argparse.Namespace, decision: dict[str, Any]) 
         "--contract-month 202606 --max-signal-age-minutes 10"
     )
     blocked_submit_command = dry_run_command + " --submit"
+    timed_exit_submit_command = dry_run_command + " --submit --allow-timed-exit-submit"
     return {
         "strategy_id": PAPER_STRATEGY_ID,
         "status": decision["status"],
@@ -620,7 +621,8 @@ def paper_validation_config(args: argparse.Namespace, decision: dict[str, Any]) 
         "paper_phase": "dry_run_first",
         "dry_run_command": dry_run_command,
         "blocked_submit_command": blocked_submit_command,
-        "submit_blocker": "submit still requires explicit --allow-entry-only-submit until a real timed-exit close-order daemon is enabled",
+        "timed_exit_submit_command": timed_exit_submit_command,
+        "submit_blocker": "default --submit remains blocked unless the operator explicitly adds --allow-timed-exit-submit for paper-only managed time exits",
         "risk_controls": {
             "max_signal_age_minutes": 10,
             "max_position_contracts": 1,

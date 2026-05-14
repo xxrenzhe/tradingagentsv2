@@ -18,5 +18,5 @@ This is a causal optimization of the paper-executable Lightglow-only subset. Tim
 
 - Filters are selected on train years only and applied to the next test year.
 - No Timecell trades are included in executable performance.
-- Paper execution remains dry-run first; submit is blocked until the timed-exit manager is available.
+- Paper execution remains dry-run first; submit requires explicit `--allow-timed-exit-submit` and paper-only timed-exit close management.
 - This report does not approve live trading.

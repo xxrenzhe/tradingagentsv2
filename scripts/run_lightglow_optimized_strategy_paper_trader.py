@@ -46,6 +46,12 @@ def main() -> int:
         action="store_true",
         help="Allow entry-only submit for controlled operator tests. This does not implement the 2-bar time exit.",
     )
+    parser.add_argument(
+        "--allow-timed-exit-submit",
+        action="store_true",
+        help="Allow submit with automatic opposite close order after holding_minutes. Use only in paper.",
+    )
+    parser.add_argument("--timed-exit-sleep-scale", type=float, default=1.0)
     parser.add_argument("--skip-preflight", action="store_true")
     parser.add_argument("--agent-gate", action="store_true", help="Require multi-agent review before submit/dry-run.")
     parser.add_argument("--max-signal-age-minutes", type=float, default=10.0)
@@ -61,7 +67,7 @@ def main() -> int:
     parser.add_argument("--no-status-snapshot", action="store_true")
     args = parser.parse_args()
 
-    if args.submit and not args.allow_entry_only_submit:
+    if args.submit and not (args.allow_entry_only_submit or args.allow_timed_exit_submit):
         result = {
             "status": "blocked",
             "submitted": False,
@@ -94,6 +100,8 @@ def main() -> int:
             enabled=args.record_ticks,
         ),
         allow_time_exit_without_bracket_dry_run=True,
+        allow_time_exit_submit=args.allow_timed_exit_submit,
+        timed_exit_sleep_scale=args.timed_exit_sleep_scale,
     )
 
     if args.daemon:
