@@ -134,6 +134,95 @@ def test_build_paper_intent_allows_time_exit_without_bracket():
     assert "take_profit_points=none" in intent.reason
 
 
+def test_lightglow_time_exit_dry_run_can_bypass_bracket_requirement(tmp_path):
+    trades_path = tmp_path / "lightglow.csv"
+    state_path = tmp_path / "runner-state.json"
+    pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-05-01",
+                "entry_ts": "2026-05-01 10:30:00+00:00",
+                "actual_entry_ts": "2026-05-01 10:30:00+00:00",
+                "exit_ts": "2026-05-01 10:32:00+00:00",
+                "direction": 1,
+                "entry_price": 18025.25,
+                "portfolio_rule": "nq_lightglow_paper_executable_avoid_long_below_ema60_trend",
+                "selected_alias": "lightglow_avoid_long_ema60",
+                "exit_reason": "time",
+                "holding_minutes": 2,
+                "strategy_stop_points": "",
+                "strategy_target_points": "",
+            }
+        ]
+    ).to_csv(trades_path, index=False)
+    broker = IBKRPaperBroker(
+        risk=IBKRPaperRiskConfig(allowed_accounts=("DU123",), allowed_symbols=("MNQ",), require_bracket=True),
+        audit_path=tmp_path / "ibkr.jsonl",
+    )
+
+    result = run_adaptive_portfolio_paper_once(
+        config=PaperRunnerConfig(
+            trades_path=trades_path,
+            state_path=state_path,
+            account="DU123",
+            stop_loss_points=None,
+            take_profit_points=None,
+            allow_time_exit_without_bracket_dry_run=True,
+        ),
+        broker=broker,
+    )
+
+    assert result["status"] == "dry_run"
+    assert result["result"]["risk"]["passed"] is True
+    assert result["time_exit_management"]["enabled"] is True
+    assert result["intent"]["stop_loss_price"] is None
+    assert result["intent"]["take_profit_price"] is None
+
+
+def test_lightglow_time_exit_submit_still_requires_bracket_or_explicit_wrapper_block(tmp_path):
+    trades_path = tmp_path / "lightglow.csv"
+    pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-05-01",
+                "entry_ts": pd.Timestamp.utcnow().isoformat(),
+                "actual_entry_ts": pd.Timestamp.utcnow().isoformat(),
+                "exit_ts": pd.Timestamp.utcnow().isoformat(),
+                "direction": 1,
+                "entry_price": 18025.25,
+                "portfolio_rule": "nq_lightglow_paper_executable_avoid_long_below_ema60_trend",
+                "selected_alias": "lightglow_avoid_long_ema60",
+                "exit_reason": "time",
+                "holding_minutes": 2,
+                "strategy_stop_points": "",
+                "strategy_target_points": "",
+            }
+        ]
+    ).to_csv(trades_path, index=False)
+    broker = IBKRPaperBroker(
+        risk=IBKRPaperRiskConfig(allowed_accounts=("DU123",), allowed_symbols=("MNQ",), require_bracket=True),
+        audit_path=tmp_path / "ibkr.jsonl",
+    )
+
+    result = run_adaptive_portfolio_paper_once(
+        config=PaperRunnerConfig(
+            trades_path=trades_path,
+            state_path=tmp_path / "state.json",
+            account="DU123",
+            submit=True,
+            skip_preflight=True,
+            max_signal_age_minutes=None,
+            stop_loss_points=None,
+            take_profit_points=None,
+            allow_time_exit_without_bracket_dry_run=True,
+        ),
+        broker=broker,
+    )
+
+    assert result["status"] == "risk_rejected"
+    assert "bracket_required" in result["result"]["risk"]["reasons"]
+
+
 def test_select_trade_sample_filters_and_row_index():
     trades = pd.DataFrame(
         [

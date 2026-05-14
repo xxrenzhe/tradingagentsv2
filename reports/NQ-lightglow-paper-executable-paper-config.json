@@ -11,10 +11,11 @@
     "max_signal_age_minutes": 10,
     "paper_min_outcomes_before_review": 300
   },
+  "selected_alias": "lightglow_avoid_long_ema60",
   "selected_filter": "avoid_long_below_ema60_trend",
   "status": "promote_to_paper_candidate",
   "strategy_id": "nq_lightglow_paper_executable_avoid_long_below_ema60_trend",
-  "submit_blocker": "timed_exit_manager_required in run_lightglow_optimized_strategy_paper_trader.py",
+  "submit_blocker": "submit still requires explicit --allow-entry-only-submit until a real timed-exit close-order daemon is enabled",
   "timecell_mode": "shadow_only",
   "trades_path": ".tmp/nq-lightglow-paper-executable-optimized-trades.csv"
 }

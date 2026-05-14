@@ -18,6 +18,8 @@ assert SPEC.loader is not None
 sys.modules["optimize_nq_lightglow_paper_executable"] = module
 SPEC.loader.exec_module(module)
 
+from tradingagents.execution.paper_validation import load_trade_samples
+
 
 def _bars(path: Path) -> None:
     ts = pd.date_range("2022-01-01", periods=2200, freq="min", tz="UTC")
@@ -114,6 +116,22 @@ def test_walk_forward_selects_on_train_and_applies_to_future_years() -> None:
     assert (windows["optimized_net_points"] >= windows["base_net_points"]).all()
 
 
+def test_prepare_paper_runner_trades_adds_required_schema(tmp_path: Path) -> None:
+    trades = _trades()
+    trades = trades[trades["strategy_source"].eq(module.LIGHTGLOW_SOURCE)].copy()
+    trades["entry_ts"] = pd.to_datetime(trades["entry_ts"], utc=True)
+    trades["exit_ts"] = pd.to_datetime(trades["exit_ts"], utc=True)
+    prepared = module.prepare_paper_runner_trades(trades.head(3))
+    output = tmp_path / "paper.csv"
+    prepared.to_csv(output, index=False)
+
+    loaded = load_trade_samples(output)
+
+    assert {"portfolio_rule", "selected_alias", "trade_date", "actual_entry_ts", "holding_minutes"}.issubset(loaded.columns)
+    assert set(loaded["portfolio_rule"]) == {module.PAPER_STRATEGY_ID}
+    assert set(loaded["selected_alias"]) == {module.PAPER_SELECTED_ALIAS}
+
+
 def test_report_generation_outputs_optimization_artifacts(tmp_path: Path) -> None:
     trades_path = tmp_path / "trades.csv"
     bars_path = tmp_path / "bars.pkl"
@@ -152,6 +170,6 @@ def test_report_generation_outputs_optimization_artifacts(tmp_path: Path) -> Non
     assert "baseline_oos" in result
     assert result["paper_config"] == str(paper_config)
     assert "--trades " + str(optimized_trades) in paper_config.read_text(encoding="utf-8")
-    assert "timed_exit_manager_required" in paper_config.read_text(encoding="utf-8")
+    assert "real timed-exit close-order daemon" in paper_config.read_text(encoding="utf-8")
     for path in (markdown, filters, windows, stress, optimized_trades, summary, paper_config):
         assert path.exists()

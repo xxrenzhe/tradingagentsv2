@@ -5,7 +5,7 @@ import math
 import subprocess
 import sys
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -33,6 +33,7 @@ class PaperRunnerConfig:
     audit_path: Path | None = None
     trade_log_dir: Path = DEFAULT_TRADE_LOG_DIR
     tick_recorder: IBKRTickRecorderConfig = field(default_factory=IBKRTickRecorderConfig)
+    allow_time_exit_without_bracket_dry_run: bool = False
 
 
 @dataclass(frozen=True)
@@ -184,14 +185,29 @@ def run_adaptive_portfolio_paper_once(
             return result
 
     active_broker = broker or IBKRPaperBroker(audit_path=config.audit_path)
+    time_exit_without_bracket = _time_exit_without_bracket_allowed(
+        sample,
+        stop_loss_points=stop_loss_points,
+        take_profit_points=take_profit_points,
+        submit=config.submit,
+        allow_dry_run=config.allow_time_exit_without_bracket_dry_run,
+    )
+    execution_broker = _without_bracket_requirement(active_broker) if time_exit_without_bracket else active_broker
     if config.submit:
-        response = IBKRPaperTradingSession.from_env(active_broker).submit_intent(
+        response = IBKRPaperTradingSession.from_env(execution_broker).submit_intent(
             intent,
             dry_run=False,
             skip_preflight=config.skip_preflight,
         )
     else:
-        response = active_broker.submit(intent, dry_run=True)
+        response = execution_broker.submit(intent, dry_run=True)
+    if time_exit_without_bracket:
+        response["time_exit_management"] = {
+            "enabled": True,
+            "mode": "dry_run_only",
+            "holding_minutes": _sample_optional_float(sample, "holding_minutes", None),
+            "reason": "time_exit_strategy_without_bracket",
+        }
     result = {
         "status": response.get("status", "unknown"),
         "submitted": bool(response.get("submitted")),
@@ -201,6 +217,8 @@ def run_adaptive_portfolio_paper_once(
         "intent": response.get("intent", asdict(intent)),
         "result": response,
     }
+    if "time_exit_management" in response:
+        result["time_exit_management"] = response["time_exit_management"]
     if response.get("status") in {"dry_run", "submitted"}:
         _save_state(config.state_path, {"last_candidate_key": key, "last_intent_id": result["intent"].get("intent_id")})
     trade_log_path = _append_trade_log_safely(result, log_dir=config.trade_log_dir)
@@ -256,6 +274,35 @@ def _sample_optional_float(sample: Any, key: str, fallback: float | None) -> flo
     if not math.isfinite(number):
         return fallback
     return number
+
+
+def _time_exit_without_bracket_allowed(
+    sample: Any,
+    *,
+    stop_loss_points: float | None,
+    take_profit_points: float | None,
+    submit: bool,
+    allow_dry_run: bool,
+) -> bool:
+    if submit or not allow_dry_run:
+        return False
+    if stop_loss_points is not None or take_profit_points is not None:
+        return False
+    exit_reason = str(sample.get("exit_reason", "") or "").lower()
+    holding_minutes = _sample_optional_float(sample, "holding_minutes", None)
+    strategy = str(sample.get("portfolio_rule", "") or "").lower()
+    selected_alias = str(sample.get("selected_alias", "") or "").lower()
+    is_lightglow = "lightglow" in strategy or "lightglow" in selected_alias
+    return exit_reason == "time" and holding_minutes is not None and holding_minutes > 0 and is_lightglow
+
+
+def _without_bracket_requirement(broker: IBKRPaperBroker) -> IBKRPaperBroker:
+    return IBKRPaperBroker(
+        connection=broker.connection,
+        risk=replace(broker.risk, require_bracket=False),
+        ib=broker.ib,
+        audit_path=broker.audit_path,
+    )
 
 
 def _load_state(path: Path) -> dict[str, Any]:

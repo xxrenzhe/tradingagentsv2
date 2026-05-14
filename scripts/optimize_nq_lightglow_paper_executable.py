@@ -31,6 +31,8 @@ DEFAULT_FILTERS = ".tmp/nq-lightglow-paper-executable-filter-results.csv"
 DEFAULT_TRADES_OUTPUT = ".tmp/nq-lightglow-paper-executable-optimized-trades.csv"
 DEFAULT_SUMMARY = ".tmp/nq-lightglow-paper-executable-optimization-summary.json"
 DEFAULT_PAPER_CONFIG = "reports/NQ-lightglow-paper-executable-paper-config.json"
+PAPER_STRATEGY_ID = "nq_lightglow_paper_executable_avoid_long_below_ema60_trend"
+PAPER_SELECTED_ALIAS = "lightglow_avoid_long_ema60"
 
 
 @dataclass(frozen=True)
@@ -385,6 +387,28 @@ def oos_baseline_trades(trades: pd.DataFrame, optimized: pd.DataFrame) -> pd.Dat
     return trades[trades["year"].isin(years)].copy()
 
 
+def prepare_paper_runner_trades(trades: pd.DataFrame) -> pd.DataFrame:
+    frame = trades.copy()
+    if frame.empty:
+        return frame
+    entry_ts = pd.to_datetime(frame["entry_ts"], utc=True)
+    exit_ts = pd.to_datetime(frame["exit_ts"], utc=True)
+    frame["trade_date"] = entry_ts.dt.date.astype(str)
+    frame["portfolio_rule"] = PAPER_STRATEGY_ID
+    frame["selected_alias"] = PAPER_SELECTED_ALIAS
+    frame["strategy_name"] = PAPER_STRATEGY_ID
+    frame["strategy_alias"] = PAPER_SELECTED_ALIAS
+    frame["actual_entry_ts"] = entry_ts.astype(str)
+    frame["holding_minutes"] = ((exit_ts - entry_ts).dt.total_seconds() / 60.0).round().astype(int)
+    frame["source_timeframe_minutes"] = 1
+    frame["source_signal"] = "lightglow_composite_action_map"
+    frame["source_direction_mode"] = "selected_action"
+    frame["timecell_mode"] = "shadow_only"
+    frame["strategy_stop_points"] = pd.NA
+    frame["strategy_target_points"] = pd.NA
+    return frame
+
+
 def best_worst_panels(title_prefix: str, trades: pd.DataFrame, bars: pd.DataFrame) -> str:
     if trades.empty:
         return '<p class="empty">No trades.</p>'
@@ -543,13 +567,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     stress = stress_table(optimized)
     decision = promotion_decision(windows, stress, optimized)
     baseline_oos = oos_baseline_trades(trades, optimized)
+    paper_trades = prepare_paper_runner_trades(optimized)
     generated_at = args.generated_at or pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
     Path(args.filters_output).parent.mkdir(parents=True, exist_ok=True)
     filters.to_csv(args.filters_output, index=False)
     windows.to_csv(args.window_output, index=False)
     stress.to_csv(args.stress_output, index=False)
-    optimized.to_csv(args.trades_output, index=False)
+    paper_trades.to_csv(args.trades_output, index=False)
     write_html(Path(args.report), trades, optimized, filters, windows, stress, decision, bars, generated_at)
     write_markdown(Path(args.markdown), decision, summarize_trades(baseline_oos), summarize_trades(optimized))
     paper_config = paper_validation_config(args, decision)
@@ -584,17 +609,18 @@ def paper_validation_config(args: argparse.Namespace, decision: dict[str, Any]) 
     )
     blocked_submit_command = dry_run_command + " --submit"
     return {
-        "strategy_id": "nq_lightglow_paper_executable_avoid_long_below_ema60_trend",
+        "strategy_id": PAPER_STRATEGY_ID,
         "status": decision["status"],
         "instrument": "MNQ",
         "quantity": 1,
         "trades_path": args.trades_output,
         "timecell_mode": "shadow_only",
+        "selected_alias": PAPER_SELECTED_ALIAS,
         "selected_filter": "avoid_long_below_ema60_trend",
         "paper_phase": "dry_run_first",
         "dry_run_command": dry_run_command,
         "blocked_submit_command": blocked_submit_command,
-        "submit_blocker": "timed_exit_manager_required in run_lightglow_optimized_strategy_paper_trader.py",
+        "submit_blocker": "submit still requires explicit --allow-entry-only-submit until a real timed-exit close-order daemon is enabled",
         "risk_controls": {
             "max_signal_age_minutes": 10,
             "max_position_contracts": 1,

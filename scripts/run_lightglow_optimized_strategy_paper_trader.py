@@ -93,6 +93,7 @@ def main() -> int:
             max_ticks=args.max_ticks,
             enabled=args.record_ticks,
         ),
+        allow_time_exit_without_bracket_dry_run=True,
     )
 
     if args.daemon:
