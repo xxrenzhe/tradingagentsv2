@@ -169,8 +169,10 @@ def test_report_generation_outputs_optimization_artifacts(tmp_path: Path) -> Non
     assert result["optimized"]["trades"] > 0
     assert "baseline_oos" in result
     assert result["paper_config"] == str(paper_config)
-    assert "--trades " + str(optimized_trades) in paper_config.read_text(encoding="utf-8")
+    assert str(optimized_trades) in paper_config.read_text(encoding="utf-8")
     assert "--allow-timed-exit-submit" in paper_config.read_text(encoding="utf-8")
     assert "default --submit remains blocked" in paper_config.read_text(encoding="utf-8")
+    assert "export_lightglow_current_paper_signal.py" in paper_config.read_text(encoding="utf-8")
+    assert ".tmp/nq-lightglow-current-paper-signal.csv" in paper_config.read_text(encoding="utf-8")
     for path in (markdown, filters, windows, stress, optimized_trades, summary, paper_config):
         assert path.exists()

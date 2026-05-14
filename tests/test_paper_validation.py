@@ -16,7 +16,7 @@ from tradingagents.execution.live_paper_trader import (
 from tradingagents.execution.live_signal import LiveSignalConfig, build_live_signal_row, write_live_signal
 from tradingagents.execution.paper_runner import PaperDaemonConfig, PaperRunnerConfig, run_adaptive_portfolio_paper_daemon, run_adaptive_portfolio_paper_once
 from tradingagents.execution.paper_report import PaperValidationGateConfig
-from tradingagents.execution.paper_validation import build_paper_intent_from_trade, select_trade_sample
+from tradingagents.execution.paper_validation import build_paper_intent_from_trade, load_trade_samples, select_trade_sample
 from tradingagents.execution.tick_recorder import IBKRTickRecorderConfig
 from tradingagents.execution.trade_log import append_execution_fill_log
 
@@ -2068,6 +2068,183 @@ def test_lightglow_paper_readiness_checker_ready_without_strict_preflight_or_pap
     assert '"paper_review_status": "blocked"' in output
     assert "ibkr_submitted_below_min" in output
     assert "timed_exit_submit" in output
+
+
+def test_lightglow_current_signal_exporter_writes_paper_schema_from_completed_bar(tmp_path, monkeypatch, capsys):
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "export_lightglow_current_paper_signal.py"
+    spec = importlib.util.spec_from_file_location("export_lightglow_current_paper_signal", script_path)
+    script = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(script)
+    bars_path = tmp_path / "bars.csv"
+    output_path = tmp_path / "signal.csv"
+    ts = pd.date_range("2026-05-01T10:00:00Z", periods=4, freq="min")
+    pd.DataFrame(
+        {
+            "ts": ts,
+            "symbol": "NQ",
+            "Open": [100.0, 101.0, 102.0, 103.0],
+            "High": [101.0, 102.0, 103.0, 104.0],
+            "Low": [99.0, 100.0, 101.0, 102.0],
+            "Close": [100.5, 101.5, 102.5, 103.5],
+            "Volume": [100, 100, 100, 100],
+        }
+    ).to_csv(bars_path, index=False)
+
+    def fake_signals(frame):
+        out = frame.copy()
+        out["premium_discount_reversal"] = [0, 0, -1, 0]
+        return out
+
+    monkeypatch.setattr(script, "build_lightglow_signals", fake_signals)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "export_lightglow_current_paper_signal.py",
+            "--bars",
+            str(bars_path),
+            "--now",
+            "2026-05-01T10:03:30+00:00",
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    assert script.main() == 0
+    output = capsys.readouterr().out
+    assert '"status": "written"' in output
+    loaded = load_trade_samples(output_path)
+    assert len(loaded) == 1
+    row = loaded.iloc[0]
+    assert row["portfolio_rule"] == "nq_lightglow_paper_executable_avoid_long_below_ema60_trend"
+    assert row["selected_alias"] == "lightglow_avoid_long_ema60"
+    assert int(row["direction"]) == 1
+    assert pd.Timestamp(row["actual_entry_ts"]) == pd.Timestamp("2026-05-01T10:03:00+00:00")
+    assert int(row["holding_minutes"]) == 2
+
+
+def test_lightglow_current_signal_exporter_writes_empty_file_when_latest_bar_has_no_signal(tmp_path, monkeypatch, capsys):
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "export_lightglow_current_paper_signal.py"
+    spec = importlib.util.spec_from_file_location("export_lightglow_current_paper_signal", script_path)
+    script = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(script)
+    bars_path = tmp_path / "bars.csv"
+    output_path = tmp_path / "signal.csv"
+    ts = pd.date_range("2026-05-01T10:00:00Z", periods=4, freq="min")
+    pd.DataFrame(
+        {
+            "ts": ts,
+            "symbol": "NQ",
+            "Open": [100.0, 101.0, 102.0, 103.0],
+            "High": [101.0, 102.0, 103.0, 104.0],
+            "Low": [99.0, 100.0, 101.0, 102.0],
+            "Close": [100.5, 101.5, 102.5, 103.5],
+            "Volume": [100, 100, 100, 100],
+        }
+    ).to_csv(bars_path, index=False)
+
+    def fake_signals(frame):
+        out = frame.copy()
+        out["premium_discount_reversal"] = 0
+        return out
+
+    monkeypatch.setattr(script, "build_lightglow_signals", fake_signals)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "export_lightglow_current_paper_signal.py",
+            "--bars",
+            str(bars_path),
+            "--now",
+            "2026-05-01T10:03:30+00:00",
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    assert script.main() == 0
+    output = capsys.readouterr().out
+    assert '"status": "no_signal"' in output
+    assert output_path.exists()
+    assert pd.read_csv(output_path).empty
+
+
+def test_lightglow_current_signal_exporter_accepts_databento_ohlcv_columns(tmp_path, monkeypatch, capsys):
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "export_lightglow_current_paper_signal.py"
+    spec = importlib.util.spec_from_file_location("export_lightglow_current_paper_signal", script_path)
+    script = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(script)
+    bars_path = tmp_path / "databento.csv"
+    output_path = tmp_path / "signal.csv"
+    ts = pd.date_range("2026-05-01T10:00:00Z", periods=4, freq="min")
+    pd.DataFrame(
+        {
+            "ts_event": ts,
+            "rtype": 33,
+            "publisher_id": 1,
+            "instrument_id": 1,
+            "open": [100.0, 101.0, 102.0, 103.0],
+            "high": [101.0, 102.0, 103.0, 104.0],
+            "low": [99.0, 100.0, 101.0, 102.0],
+            "close": [100.5, 101.5, 102.5, 103.5],
+            "volume": [100, 100, 100, 100],
+            "symbol": "NQM6",
+        }
+    ).to_csv(bars_path, index=False)
+
+    def fake_signals(frame):
+        out = frame.copy()
+        out["premium_discount_reversal"] = [0, 0, 1, 0]
+        return out
+
+    monkeypatch.setattr(script, "build_lightglow_signals", fake_signals)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "export_lightglow_current_paper_signal.py",
+            "--bars",
+            str(bars_path),
+            "--now",
+            "2026-05-01T10:03:30+00:00",
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    assert script.main() == 0
+    assert '"status": "written"' in capsys.readouterr().out
+    loaded = load_trade_samples(output_path)
+    assert int(loaded.iloc[0]["direction"]) == -1
+
+
+def test_lightglow_current_signal_exporter_reads_only_tail_rows(tmp_path):
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "export_lightglow_current_paper_signal.py"
+    spec = importlib.util.spec_from_file_location("export_lightglow_current_paper_signal", script_path)
+    script = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(script)
+    bars_path = tmp_path / "databento.csv"
+    rows = []
+    for index in range(10):
+        rows.append(
+            {
+                "ts_event": pd.Timestamp("2026-05-01T10:00:00Z") + pd.Timedelta(minutes=index),
+                "symbol": "NQM6",
+                "open": 100.0 + index,
+                "high": 101.0 + index,
+                "low": 99.0 + index,
+                "close": 100.5 + index,
+                "volume": 100,
+            }
+        )
+    pd.DataFrame(rows).to_csv(bars_path, index=False)
+
+    loaded = script._read_csv_tail(bars_path, 3)
+
+    assert len(loaded) == 3
+    assert list(pd.to_datetime(loaded["ts_event"], utc=True)) == list(pd.date_range("2026-05-01T10:07:00Z", periods=3, freq="min"))
 
 
 def test_best_strategy_paper_trader_script_locks_strategy_filters(tmp_path, monkeypatch, capsys):

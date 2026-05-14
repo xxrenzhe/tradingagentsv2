@@ -603,9 +603,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def paper_validation_config(args: argparse.Namespace, decision: dict[str, Any]) -> dict[str, Any]:
+    current_signal_output = ".tmp/nq-lightglow-current-paper-signal.csv"
+    signal_export_command = (
+        ".venv/bin/python scripts/export_lightglow_current_paper_signal.py "
+        "--bars data/raw/databento/glbx-mdp3-20100606-20260427.ohlcv-1m.csv "
+        "--tail-rows 5000 "
+        f"--output {current_signal_output}"
+    )
     dry_run_command = (
         ".venv/bin/python scripts/run_lightglow_optimized_strategy_paper_trader.py "
-        f"--trades {args.trades_output} --symbol MNQ --quantity 1 "
+        f"--trades {current_signal_output} --symbol MNQ --quantity 1 "
         "--contract-month 202606 --max-signal-age-minutes 10 "
         "--paper-consecutive-loss-halt 3 --paper-daily-loss-halt-points 50"
     )
@@ -613,7 +620,7 @@ def paper_validation_config(args: argparse.Namespace, decision: dict[str, Any]) 
     timed_exit_submit_command = dry_run_command + " --submit --allow-timed-exit-submit"
     readiness_command = (
         ".venv/bin/python scripts/check_lightglow_paper_readiness.py "
-        f"--trades {args.trades_output} --strategy-id {PAPER_STRATEGY_ID} "
+        f"--trades {current_signal_output} --strategy-id {PAPER_STRATEGY_ID} "
         "--max-signal-age-minutes 10 --paper-consecutive-loss-halt 3 "
         "--paper-daily-loss-halt-points 50"
     )
@@ -624,6 +631,8 @@ def paper_validation_config(args: argparse.Namespace, decision: dict[str, Any]) 
         "instrument": "MNQ",
         "quantity": 1,
         "trades_path": args.trades_output,
+        "current_signal_path": current_signal_output,
+        "signal_export_command": signal_export_command,
         "timecell_mode": "shadow_only",
         "selected_alias": PAPER_SELECTED_ALIAS,
         "selected_filter": "avoid_long_below_ema60_trend",
