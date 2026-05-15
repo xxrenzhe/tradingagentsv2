@@ -55,11 +55,31 @@ FAMILY_DIRECTIONS: dict[str, int] = {
     "trend_pullback_short_asia_europe": -1,
     "trend_transition_short_asia_rth": -1,
     "trend_transition_short_asia": -1,
+    "smc_discount_choch_long": 1,
+    "smc_premium_choch_short": -1,
+    "smc_bos_fvg_long": 1,
+    "smc_bos_fvg_short": -1,
+    "smc_ob_retest_long": 1,
+    "smc_ob_retest_short": -1,
+    "smc_trend_transition_long": 1,
+    "smc_trend_transition_short": -1,
+    "smc_trend_pullback_long": 1,
+    "smc_trend_pullback_short": -1,
 }
 FAMILY_TARGET_BASE: dict[str, str] = {
     "trend_pullback_short_asia_europe": "trend_pullback_short",
     "trend_transition_short_asia_rth": "trend_transition_short",
     "trend_transition_short_asia": "trend_transition_short",
+    "smc_discount_choch_long": "bottom_reclaim_long",
+    "smc_premium_choch_short": "top_reject_short",
+    "smc_bos_fvg_long": "trend_transition_long",
+    "smc_bos_fvg_short": "trend_transition_short",
+    "smc_ob_retest_long": "trend_pullback_long",
+    "smc_ob_retest_short": "trend_pullback_short",
+    "smc_trend_transition_long": "trend_transition_long",
+    "smc_trend_transition_short": "trend_transition_short",
+    "smc_trend_pullback_long": "trend_pullback_long",
+    "smc_trend_pullback_short": "trend_pullback_short",
 }
 
 PINE_DEFAULT_FAMILIES = ("top_breakout_long", "trend_ignition_long")
@@ -337,6 +357,68 @@ def add_all_lightglow_signal_columns(frame: pd.DataFrame, config: BoundaryLightg
         & (momentum < momentum.shift(1))
         & (body_atr >= 0.18)
     )
+    internal_high = high.rolling(10, min_periods=10).max().shift(1)
+    internal_low = low.rolling(10, min_periods=10).min().shift(1)
+    swing_high = high.rolling(50, min_periods=50).max().shift(1)
+    swing_low = low.rolling(50, min_periods=50).min().shift(1)
+    bullish_choch = (close > internal_high) & (close.shift(1) <= internal_high.shift(1))
+    bearish_choch = (close < internal_low) & (close.shift(1) >= internal_low.shift(1))
+    bullish_bos = (close > swing_high) & (close.shift(1) <= swing_high.shift(1))
+    bearish_bos = (close < swing_low) & (close.shift(1) >= swing_low.shift(1))
+    bullish_fvg = low > high.shift(2)
+    bearish_fvg = high < low.shift(2)
+    recent_bullish_fvg = bullish_fvg.rolling(5, min_periods=1).max().astype(bool)
+    recent_bearish_fvg = bearish_fvg.rolling(5, min_periods=1).max().astype(bool)
+    last_bearish_high = high.where(close < open_).ffill().shift(1)
+    last_bearish_low = low.where(close < open_).ffill().shift(1)
+    last_bullish_high = high.where(close > open_).ffill().shift(1)
+    last_bullish_low = low.where(close > open_).ffill().shift(1)
+    discount_zone = output["range_pos"] <= 0.35
+    premium_zone = output["range_pos"] >= 0.65
+    bullish_ob_retest = (
+        trend_up
+        & (low <= last_bearish_high)
+        & (low >= last_bearish_low - atr * 0.30)
+        & (close > open_)
+        & (close > ema20)
+        & (close_location >= 0.55)
+    )
+    bearish_ob_retest = (
+        trend_down
+        & (high >= last_bullish_low)
+        & (high <= last_bullish_high + atr * 0.30)
+        & (close < open_)
+        & (close < ema20)
+        & (close_location <= 0.45)
+    )
+    smc_discount_choch_long = (
+        (discount_zone | output["sweep_below_range"])
+        & bullish_choch
+        & (close_location >= 0.60)
+        & (momentum > momentum.shift(1))
+        & (body_atr >= 0.20)
+    )
+    smc_premium_choch_short = (
+        (premium_zone | output["sweep_above_range"])
+        & bearish_choch
+        & (close_location <= 0.40)
+        & (momentum < momentum.shift(1))
+        & (body_atr >= 0.20)
+    )
+    smc_bos_fvg_long = (
+        bullish_bos
+        & recent_bullish_fvg
+        & (close > open_)
+        & (momentum > 0)
+        & (volume_z >= config.transition_volume_z_min)
+    )
+    smc_bos_fvg_short = (
+        bearish_bos
+        & recent_bearish_fvg
+        & (close < open_)
+        & (momentum < 0)
+        & (volume_z >= config.transition_volume_z_min)
+    )
     reversal_impulse_long = (
         (output["range_pos"] <= config.ignition_range_pos_long_max)
         & (close > open_)
@@ -380,6 +462,16 @@ def add_all_lightglow_signal_columns(frame: pd.DataFrame, config: BoundaryLightg
         "trend_pullback_short_asia_europe": trend_pullback_short & output["session"].isin(["asia", "europe"]),
         "trend_transition_short_asia_rth": trend_transition_short & output["session"].isin(["asia", "us_rth"]),
         "trend_transition_short_asia": trend_transition_short & output["session"].eq("asia"),
+        "smc_discount_choch_long": smc_discount_choch_long,
+        "smc_premium_choch_short": smc_premium_choch_short,
+        "smc_bos_fvg_long": smc_bos_fvg_long,
+        "smc_bos_fvg_short": smc_bos_fvg_short,
+        "smc_ob_retest_long": bullish_ob_retest,
+        "smc_ob_retest_short": bearish_ob_retest,
+        "smc_trend_transition_long": trend_transition_long & (bullish_bos | bullish_choch | recent_bullish_fvg),
+        "smc_trend_transition_short": trend_transition_short & (bearish_bos | bearish_choch | recent_bearish_fvg),
+        "smc_trend_pullback_long": trend_pullback_long & bullish_ob_retest,
+        "smc_trend_pullback_short": trend_pullback_short & bearish_ob_retest,
     }
     for family, condition in raw_conditions.items():
         condition = condition.fillna(False)
@@ -665,6 +757,35 @@ def build_combo_specs(args: argparse.Namespace) -> list[ComboSpec]:
                 "trend_transition_short_asia",
             ),
         ),
+        ("smc_reversal", ("smc_discount_choch_long", "smc_premium_choch_short")),
+        ("smc_bos_fvg", ("smc_bos_fvg_long", "smc_bos_fvg_short")),
+        ("smc_ob_retest", ("smc_ob_retest_long", "smc_ob_retest_short")),
+        ("smc_trend_filtered", ("smc_trend_transition_long", "smc_trend_pullback_long", "smc_trend_transition_short", "smc_trend_pullback_short")),
+        (
+            "smc_long_bias",
+            (
+                "smc_discount_choch_long",
+                "smc_bos_fvg_long",
+                "smc_ob_retest_long",
+                "smc_trend_transition_long",
+                "smc_trend_pullback_long",
+            ),
+        ),
+        (
+            "smc_strict_bidirectional",
+            (
+                "smc_discount_choch_long",
+                "smc_bos_fvg_long",
+                "smc_ob_retest_long",
+                "smc_trend_transition_long",
+                "smc_trend_pullback_long",
+                "smc_premium_choch_short",
+                "smc_bos_fvg_short",
+                "smc_ob_retest_short",
+                "smc_trend_transition_short",
+                "smc_trend_pullback_short",
+            ),
+        ),
         ("all_lightglow", ALL_LIGHTGLOW_BASE_FAMILIES),
     ]
     specs: list[ComboSpec] = []
@@ -843,6 +964,7 @@ def write_markdown_report(
     screenshot_rows = results[results["strategy"].astype(str).str.contains("fast_boundary_reversal|screenshot_reversal", regex=True)].head(10)
     phase_rows = results[results["strategy"].astype(str).str.contains("phase_", regex=False)].head(10)
     selective_rows = results[results["strategy"].astype(str).str.contains("selective_bidirectional", regex=False)].head(10)
+    smc_rows = results[results["strategy"].astype(str).str.contains("smc_", regex=False)].head(10)
     sixty_min_rows = results[results["macd_timeframe"].eq(60)].head(10)
     lines.extend(
         [
@@ -864,6 +986,12 @@ def write_markdown_report(
             "These rows keep the long-biased best-candidate family set and add only high-quality short continuation/transition/breakdown structures, avoiding broad top-picking shorts.",
             "",
             markdown_table(selective_rows, columns),
+            "",
+            "## Lightglow SMC-Filtered Candidates",
+            "",
+            "These rows translate the Lightglow/LuxAlgo SMC concepts into non-lookahead filters: internal/swing BOS or CHoCH, premium/discount location, recent fair value gaps, and order-block retests.",
+            "",
+            markdown_table(smc_rows, columns),
             "",
             "## 60m MACD Candidates",
             "",

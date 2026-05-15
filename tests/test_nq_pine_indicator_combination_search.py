@@ -181,3 +181,29 @@ def test_all_lightglow_excludes_session_gated_aliases() -> None:
     assert "trend_pullback_short_asia_europe" not in MODULE.ALL_LIGHTGLOW_BASE_FAMILIES
     assert "trend_transition_short_asia_rth" not in MODULE.ALL_LIGHTGLOW_BASE_FAMILIES
     assert "trend_transition_short_asia" not in MODULE.ALL_LIGHTGLOW_BASE_FAMILIES
+
+
+def test_build_combo_specs_includes_smc_filtered_families() -> None:
+    args = type(
+        "Args",
+        (),
+        {
+            "macd_timeframes": [1],
+            "macd_filters": ["cross_recent_5"],
+            "stop_atr_buffers": [1.25],
+            "target_rs": [2.5],
+            "max_hold_bars_grid": [30],
+            "risk_control_modes": [False],
+        },
+    )()
+
+    specs = MODULE.build_combo_specs(args)
+    spec_by_name = {spec.name: spec for spec in specs}
+    smc = spec_by_name["smc_strict_bidirectional_macd1_cross_recent_5_stop1.25_r2.5_h30_norisk"]
+
+    assert MODULE.FAMILY_DIRECTIONS["smc_discount_choch_long"] == 1
+    assert MODULE.FAMILY_DIRECTIONS["smc_premium_choch_short"] == -1
+    assert MODULE.FAMILY_TARGET_BASE["smc_ob_retest_long"] == "trend_pullback_long"
+    assert MODULE.FAMILY_TARGET_BASE["smc_bos_fvg_short"] == "trend_transition_short"
+    assert "smc_trend_transition_long" in smc.families
+    assert "smc_trend_transition_short" in smc.families
