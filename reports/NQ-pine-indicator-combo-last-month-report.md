@@ -3,7 +3,7 @@
 - Data: `2026-03-27` to `2026-04-28` from `data/raw/databento`; latest observed bar `2026-04-27 23:59:00+00:00`.
 - Pine inputs: `pine_scripts/nq_lightglow_timecell_composite_paper_readiness.pine` and `pine_scripts/CM_MacD_Ult_MTF.pine`.
 - Cost model: 1.50 NQ points round trip, matching Pine slippage/commission assumptions used by the Lightglow strategy.
-- Search size: 18144 combinations across Lightglow signal families, CM MACD MTF filters, stops, targets, holds, and risk controls.
+- Search size: 24192 combinations across Lightglow signal families, CM MACD MTF filters, stops, targets, holds, and risk controls.
 
 ## Best Strategy
 
@@ -35,8 +35,8 @@
 | trend_pullback_macd60_trend_hist_stop1.25_r1.8_h30_risk | 72 | 731.8569 | 2.2659 | 0.5694 | 10.1647 | 146.9279 | -70.7887 | 624.8017 |
 | trend_pullback_macd60_trend_hist_stop1.25_r2.5_h30_risk | 72 | 731.8569 | 2.2659 | 0.5694 | 10.1647 | 146.9279 | -70.7887 | 624.8017 |
 | trend_pullback_macd5_hist_slope_stop0.8_r1.2_h60_norisk | 56 | 451.3295 | 1.8646 | 0.5893 | 8.0595 | 87.6537 | -65.4648 | 619.5379 |
-| long_bias_macd1_cross_recent_5_stop0.8_r2.5_h30_norisk | 232 | 948.8247 | 1.4855 | 0.5043 | 4.0898 | 180.6742 | -99.7755 | 613.7412 |
-| long_bias_macd15_cross_recent_5_stop1.25_r2.5_h90_norisk | 22 | 319.4641 | 3.7644 | 0.7273 | 14.5211 | 41.6921 | -41.6921 | 611.9414 |
+| phase_long_macd5_trend_stop1.25_r1.8_h60_norisk | 367 | 1499.9108 | 1.3940 | 0.5395 | 4.0870 | 281.8701 | -84.3002 | 619.1165 |
+| phase_long_macd5_trend_hist_stop1.25_r1.8_h60_norisk | 367 | 1499.9108 | 1.3940 | 0.5395 | 4.0870 | 281.8701 | -84.3002 | 619.1165 |
 
 ## Screenshot-Inspired Early Reversal Candidates
 
@@ -54,6 +54,23 @@ These rows emphasize boundary sweep/reclaim/reject behavior plus MACD histogram 
 | screenshot_reversal_macd5_trend_stop0.8_r2.5_h30_risk | 32 | 155.0840 | 1.7027 | 0.5312 | 4.8464 | 49.4038 | -33.4039 | 259.2180 |
 | screenshot_reversal_macd5_trend_hist_stop0.8_r2.5_h30_norisk | 32 | 155.0840 | 1.7027 | 0.5312 | 4.8464 | 49.4038 | -33.4039 | 259.2180 |
 | screenshot_reversal_macd5_trend_hist_stop0.8_r2.5_h30_risk | 32 | 155.0840 | 1.7027 | 0.5312 | 4.8464 | 49.4038 | -33.4039 | 259.2180 |
+
+## Bidirectional Phase Trend Candidates
+
+These rows target fast but staged upside and downside moves using EMA phase state, micro breakouts/breakdowns, pullback reclaim/failure, and early MACD histogram filters.
+
+| strategy | trades | net_points | profit_factor | win_rate | avg_points | max_drawdown_points | worst_trade_points | score |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| phase_long_macd5_trend_stop1.25_r1.8_h60_norisk | 367 | 1499.9108 | 1.3940 | 0.5395 | 4.0870 | 281.8701 | -84.3002 | 619.1165 |
+| phase_long_macd5_trend_hist_stop1.25_r1.8_h60_norisk | 367 | 1499.9108 | 1.3940 | 0.5395 | 4.0870 | 281.8701 | -84.3002 | 619.1165 |
+| phase_long_macd5_trend_stop1.25_r2.5_h90_norisk | 355 | 1449.0602 | 1.3793 | 0.5437 | 4.0819 | 284.5606 | -84.3002 | 595.9104 |
+| phase_long_macd5_trend_hist_stop1.25_r2.5_h90_norisk | 355 | 1449.0602 | 1.3793 | 0.5437 | 4.0819 | 284.5606 | -84.3002 | 595.9104 |
+| phase_trend_macd5_trend_stop1.25_r2.5_h60_norisk | 672 | 1724.6146 | 1.2314 | 0.5060 | 2.5664 | 337.1655 | -79.9099 | 587.6745 |
+| phase_trend_macd5_trend_hist_stop1.25_r2.5_h60_norisk | 672 | 1724.6146 | 1.2314 | 0.5060 | 2.5664 | 337.1655 | -79.9099 | 587.6745 |
+| phase_trend_macd5_trend_stop1.25_r2.5_h90_norisk | 649 | 2022.9036 | 1.2786 | 0.5131 | 3.1170 | 398.2407 | -79.9099 | 587.6545 |
+| phase_trend_macd5_trend_hist_stop1.25_r2.5_h90_norisk | 649 | 2022.9036 | 1.2786 | 0.5131 | 3.1170 | 398.2407 | -79.9099 | 587.6545 |
+| phase_long_macd5_trend_stop1.25_r2.5_h60_norisk | 359 | 1363.8993 | 1.3582 | 0.5404 | 3.7992 | 277.4733 | -84.3002 | 576.5012 |
+| phase_long_macd5_trend_hist_stop1.25_r2.5_h60_norisk | 359 | 1363.8993 | 1.3582 | 0.5404 | 3.7992 | 277.4733 | -84.3002 | 576.5012 |
 
 ## 60m MACD Candidates
 

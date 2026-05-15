@@ -47,6 +47,10 @@ FAMILY_DIRECTIONS: dict[str, int] = {
     "reversal_impulse_short": -1,
     "fast_reversal_long": 1,
     "fast_reversal_short": -1,
+    "phase_up_breakout_long": 1,
+    "phase_up_pullback_long": 1,
+    "phase_down_breakdown_short": -1,
+    "phase_down_pullback_short": -1,
 }
 
 PINE_DEFAULT_FAMILIES = ("top_breakout_long", "trend_ignition_long")
@@ -252,6 +256,58 @@ def add_all_lightglow_signal_columns(frame: pd.DataFrame, config: BoundaryLightg
         & (close < close.shift(1))
         & (output["body_atr"] >= 0.20)
     )
+    ema20_slope = ema20 - ema20.shift(5)
+    ema60_slope = ema60 - ema60.shift(12)
+    phase_up = (
+        (close > ema20)
+        & (close > ema60)
+        & ((ema20 >= ema60) | ((ema20_slope > 0) & (ema60_slope >= 0)))
+        & (ema20_slope > 0)
+    )
+    phase_down = (
+        (close < ema20)
+        & (close < ema60)
+        & ((ema20 <= ema60) | ((ema20_slope < 0) & (ema60_slope <= 0)))
+        & (ema20_slope < 0)
+    )
+    micro_high = high.rolling(3, min_periods=3).max().shift(1)
+    micro_low = low.rolling(3, min_periods=3).min().shift(1)
+    phase_up_breakout_long = (
+        phase_up
+        & (close > output["micro_breakout_high"])
+        & (close > micro_high)
+        & (close > open_)
+        & (momentum > momentum.shift(1))
+        & (body_atr >= config.body_atr_threshold * 0.45)
+    )
+    phase_down_breakdown_short = (
+        phase_down
+        & (close < output["micro_breakdown_low"])
+        & (close < micro_low)
+        & (close < open_)
+        & (momentum < momentum.shift(1))
+        & (body_atr >= config.body_atr_threshold * 0.45)
+    )
+    phase_up_pullback_long = (
+        phase_up
+        & (low <= ema20 + atr * config.pullback_ema_atr_buffer)
+        & (low >= ema60 - atr * config.pullback_ema_atr_buffer * 1.4)
+        & (close > ema20)
+        & (close > high.shift(1))
+        & (close > open_)
+        & (momentum > momentum.shift(1))
+        & (body_atr >= 0.18)
+    )
+    phase_down_pullback_short = (
+        phase_down
+        & (high >= ema20 - atr * config.pullback_ema_atr_buffer)
+        & (high <= ema60 + atr * config.pullback_ema_atr_buffer * 1.4)
+        & (close < ema20)
+        & (close < low.shift(1))
+        & (close < open_)
+        & (momentum < momentum.shift(1))
+        & (body_atr >= 0.18)
+    )
     reversal_impulse_long = (
         (output["range_pos"] <= config.ignition_range_pos_long_max)
         & (close > open_)
@@ -288,6 +344,10 @@ def add_all_lightglow_signal_columns(frame: pd.DataFrame, config: BoundaryLightg
         "reversal_impulse_short": reversal_impulse_short & output["session"].eq("us_late"),
         "fast_reversal_long": fast_reversal_long,
         "fast_reversal_short": fast_reversal_short,
+        "phase_up_breakout_long": phase_up_breakout_long,
+        "phase_up_pullback_long": phase_up_pullback_long,
+        "phase_down_breakdown_short": phase_down_breakdown_short,
+        "phase_down_pullback_short": phase_down_pullback_short,
     }
     for family, condition in raw_conditions.items():
         condition = condition.fillna(False)
@@ -493,6 +553,20 @@ def build_combo_specs(args: argparse.Namespace) -> list[ComboSpec]:
         ("trend_pullback", ("trend_pullback_long", "trend_pullback_short")),
         ("trend_transition", ("trend_transition_long", "trend_transition_short")),
         ("reversal_impulse", ("reversal_impulse_long", "reversal_impulse_short")),
+        ("phase_trend", ("phase_up_breakout_long", "phase_up_pullback_long", "phase_down_breakdown_short", "phase_down_pullback_short")),
+        ("phase_long", ("phase_up_breakout_long", "phase_up_pullback_long")),
+        ("phase_short", ("phase_down_breakdown_short", "phase_down_pullback_short")),
+        (
+            "phase_plus_fast",
+            (
+                "phase_up_breakout_long",
+                "phase_up_pullback_long",
+                "phase_down_breakdown_short",
+                "phase_down_pullback_short",
+                "fast_reversal_long",
+                "fast_reversal_short",
+            ),
+        ),
         ("long_bias", ("top_breakout_long", "trend_ignition_long", "trend_pullback_long", "trend_transition_long", "reversal_impulse_long")),
         ("short_bias", ("bottom_breakdown_short", "top_reject_short", "trend_pullback_short", "trend_transition_short", "reversal_impulse_short")),
         ("all_lightglow", tuple(FAMILY_DIRECTIONS)),
@@ -671,6 +745,7 @@ def write_markdown_report(
         )
     lines.extend(["", "## Top Ranked Combinations", "", markdown_table(top, columns)])
     screenshot_rows = results[results["strategy"].astype(str).str.contains("fast_boundary_reversal|screenshot_reversal", regex=True)].head(10)
+    phase_rows = results[results["strategy"].astype(str).str.contains("phase_", regex=False)].head(10)
     sixty_min_rows = results[results["macd_timeframe"].eq(60)].head(10)
     lines.extend(
         [
@@ -680,6 +755,12 @@ def write_markdown_report(
             "These rows emphasize boundary sweep/reclaim/reject behavior plus MACD histogram repair/deceleration, intended to enter before waiting for a full delayed MACD line cross.",
             "",
             markdown_table(screenshot_rows, columns),
+            "",
+            "## Bidirectional Phase Trend Candidates",
+            "",
+            "These rows target fast but staged upside and downside moves using EMA phase state, micro breakouts/breakdowns, pullback reclaim/failure, and early MACD histogram filters.",
+            "",
+            markdown_table(phase_rows, columns),
             "",
             "## 60m MACD Candidates",
             "",

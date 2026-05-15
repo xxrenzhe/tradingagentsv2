@@ -60,7 +60,7 @@
     <section>
       <h2>Performance Snapshot</h2>
       <div class="metrics"><div class="metric"><span>Trades</span><strong>218</strong></div><div class="metric"><span>Net Points</span><strong>1,732.10</strong></div><div class="metric"><span>Profit Factor</span><strong>2.05</strong></div><div class="metric"><span>Win Rate</span><strong>55.0%</strong></div><div class="metric"><span>Avg / Trade</span><strong>7.95</strong></div><div class="metric"><span>Max DD</span><strong>133.54</strong></div><div class="metric"><span>Worst Trade</span><strong>-109.49</strong></div><div class="metric"><span>Best Trade</span><strong>250.81</strong></div></div>
-      <p class="note">Cost model is already embedded in <code>net_points</code>. Candidate is long-biased and uses the Lightglow signal families <code>top_breakout_long</code>, <code>trend_ignition_long</code>, <code>trend_pullback_long</code>, <code>trend_transition_long</code>, and <code>reversal_impulse_long</code> with a recent 1m MACD cross filter.</p>
+      <p class="note">Cost model is already embedded in <code>net_points</code>. The report follows the current top-ranked row by default, so it can promote a bidirectional phase-trend candidate when the search ranks it above the prior long-biased baseline.</p>
     </section>
     <section class="grid2">
       

@@ -19,6 +19,14 @@ def test_best_candidate_html_report_contains_core_sections(tmp_path: Path) -> No
     ranking = pd.DataFrame(
         [
             {
+                "strategy": "phase_trend_macd60_hist_deceleration_stop0.8_r1.8_h60_norisk",
+                "families": "phase_up_breakout_long+phase_down_breakdown_short",
+                "macd_filter": "hist_deceleration",
+                "stop_atr_buffer": 0.8,
+                "target_r": 1.8,
+                "max_hold_bars": 60,
+            },
+            {
                 "strategy": MODULE.BEST_STRATEGY,
                 "families": "top_breakout_long+trend_transition_long",
                 "macd_filter": "cross_recent_5",
@@ -67,7 +75,7 @@ def test_best_candidate_html_report_contains_core_sections(tmp_path: Path) -> No
     MODULE._write_report(output, ranking, trades, bars)
 
     html = output.read_text(encoding="utf-8")
-    assert MODULE.BEST_STRATEGY in html
+    assert "phase_trend_macd60_hist_deceleration_stop0.8_r1.8_h60_norisk" in html
     assert "Performance Snapshot" in html
     assert "Equity Curve By Trade" in html
     assert "K-line Trade Replay" in html
@@ -77,3 +85,48 @@ def test_best_candidate_html_report_contains_core_sections(tmp_path: Path) -> No
     assert "OUT +6.50 pts" in html
     assert "Breakdown By Signal Family" in html
     assert "Trade Log" in html
+
+
+def test_best_candidate_html_report_can_pin_legacy_strategy(tmp_path: Path) -> None:
+    ranking = pd.DataFrame(
+        [
+            {
+                "strategy": "phase_trend_macd60_hist_deceleration_stop0.8_r1.8_h60_norisk",
+                "families": "phase_up_breakout_long+phase_down_breakdown_short",
+                "macd_filter": "hist_deceleration",
+                "stop_atr_buffer": 0.8,
+                "target_r": 1.8,
+                "max_hold_bars": 60,
+            },
+            {
+                "strategy": MODULE.BEST_STRATEGY,
+                "families": "top_breakout_long+trend_transition_long",
+                "macd_filter": "cross_recent_5",
+                "stop_atr_buffer": 1.25,
+                "target_r": 2.5,
+                "max_hold_bars": 30,
+            },
+        ]
+    )
+    trades = pd.DataFrame(
+        [
+            {
+                "entry_ts": "2026-03-27 01:29:00+00:00",
+                "exit_ts": "2026-03-27 01:59:00+00:00",
+                "signal_family": "trend_transition_long",
+                "session": "asia",
+                "direction": 1,
+                "entry_price": 23864.0,
+                "exit_price": 23872.0,
+                "exit_reason": "max_hold",
+                "bars_held": 30,
+                "net_points": 6.5,
+            }
+        ]
+    )
+    output = tmp_path / "report.html"
+
+    MODULE._write_report(output, ranking, trades, pd.DataFrame(), MODULE.BEST_STRATEGY)
+
+    html = output.read_text(encoding="utf-8")
+    assert MODULE.BEST_STRATEGY in html

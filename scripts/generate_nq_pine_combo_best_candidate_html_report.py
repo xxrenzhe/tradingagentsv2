@@ -18,6 +18,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from search_nq_bar_2r_walkforward import load_continuous_nq_bars  # noqa: E402
 
+DEFAULT_STRATEGY = "rank_1"
 BEST_STRATEGY = "long_bias_macd1_cross_recent_5_stop1.25_r2.5_h30_norisk"
 RANKING_PATH = ROOT_DIR / "reports/NQ-pine-indicator-combo-last-month-ranking.csv"
 TRADES_PATH = ROOT_DIR / "reports/NQ-pine-indicator-combo-last-month-best-trades.csv"
@@ -257,8 +258,26 @@ def _trade_kline_svg(bars: pd.DataFrame, trades: pd.DataFrame) -> str:
 """
 
 
-def _write_report(output: Path, ranking: pd.DataFrame, trades: pd.DataFrame, bars: pd.DataFrame | None = None) -> None:
-    strategy = ranking.loc[ranking["strategy"].eq(BEST_STRATEGY)].iloc[0]
+def _select_strategy(ranking: pd.DataFrame, strategy_name: str = DEFAULT_STRATEGY) -> pd.Series:
+    if ranking.empty:
+        raise ValueError("ranking is empty")
+    if strategy_name == DEFAULT_STRATEGY:
+        return ranking.iloc[0]
+    matches = ranking.loc[ranking["strategy"].eq(strategy_name)]
+    if matches.empty:
+        raise ValueError(f"strategy not found in ranking: {strategy_name}")
+    return matches.iloc[0]
+
+
+def _write_report(
+    output: Path,
+    ranking: pd.DataFrame,
+    trades: pd.DataFrame,
+    bars: pd.DataFrame | None = None,
+    strategy_name: str = DEFAULT_STRATEGY,
+) -> None:
+    strategy = _select_strategy(ranking, strategy_name)
+    selected_strategy = str(strategy["strategy"])
     trades = trades.copy()
     trades["entry_ts"] = pd.to_datetime(trades["entry_ts"], utc=True)
     trades["exit_ts"] = pd.to_datetime(trades["exit_ts"], utc=True)
@@ -367,13 +386,13 @@ def _write_report(output: Path, ranking: pd.DataFrame, trades: pd.DataFrame, bar
   <header>
     <div class="tag">NQ 1m · Databento Recent Month · Best Robust Candidate</div>
     <h1>NQ Pine Combo Best Candidate Report</h1>
-    <p class="subtitle"><code>{html.escape(BEST_STRATEGY)}</code><br />Families: <code>{html.escape(str(strategy["families"]))}</code> · MACD filter: <code>{html.escape(str(strategy["macd_filter"]))}</code> · Stop ATR buffer: <code>{strategy["stop_atr_buffer"]}</code> · Target: <code>{strategy["target_r"]}R</code> · Max hold: <code>{strategy["max_hold_bars"]} bars</code></p>
+    <p class="subtitle"><code>{html.escape(selected_strategy)}</code><br />Families: <code>{html.escape(str(strategy["families"]))}</code> · MACD filter: <code>{html.escape(str(strategy["macd_filter"]))}</code> · Stop ATR buffer: <code>{strategy["stop_atr_buffer"]}</code> · Target: <code>{strategy["target_r"]}R</code> · Max hold: <code>{strategy["max_hold_bars"]} bars</code></p>
   </header>
   <main>
     <section>
       <h2>Performance Snapshot</h2>
       <div class="metrics">{card_html}</div>
-      <p class="note">Cost model is already embedded in <code>net_points</code>. Candidate is long-biased and uses the Lightglow signal families <code>top_breakout_long</code>, <code>trend_ignition_long</code>, <code>trend_pullback_long</code>, <code>trend_transition_long</code>, and <code>reversal_impulse_long</code> with a recent 1m MACD cross filter.</p>
+      <p class="note">Cost model is already embedded in <code>net_points</code>. The report follows the current top-ranked row by default, so it can promote a bidirectional phase-trend candidate when the search ranks it above the prior long-biased baseline.</p>
     </section>
     <section class="grid2">
       {_svg_line(equity_values, title="Equity Curve By Trade (net points)", stroke="var(--green)")}
@@ -422,6 +441,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bars-cache", default=".tmp/nq-pine-combo-best-candidate-bars.pkl")
     parser.add_argument("--chunk-size", type=int, default=200_000)
     parser.add_argument("--min-volume", type=float, default=1.0)
+    parser.add_argument("--strategy", default=DEFAULT_STRATEGY, help="Strategy name to describe, or rank_1 for the top ranking row.")
     return parser.parse_args()
 
 
@@ -430,7 +450,7 @@ def main() -> None:
     ranking = pd.read_csv(args.ranking)
     trades = pd.read_csv(args.trades)
     bars = _load_bars_for_trades(trades, args.bars_cache, args.chunk_size, args.min_volume)
-    _write_report(Path(args.output), ranking, trades, bars)
+    _write_report(Path(args.output), ranking, trades, bars, args.strategy)
     print(f"wrote {args.output}")
 
 

@@ -73,3 +73,36 @@ def test_build_combo_specs_includes_screenshot_fast_reversal_and_hist_repair() -
 
     assert any("screenshot_reversal_macd60_hist_repair" in name for name in names)
     assert any("fast_boundary_reversal_macd60_hist_repair" in name for name in names)
+
+
+def test_phase_trend_families_are_bidirectional() -> None:
+    assert MODULE.FAMILY_DIRECTIONS["phase_up_breakout_long"] == 1
+    assert MODULE.FAMILY_DIRECTIONS["phase_up_pullback_long"] == 1
+    assert MODULE.FAMILY_DIRECTIONS["phase_down_breakdown_short"] == -1
+    assert MODULE.FAMILY_DIRECTIONS["phase_down_pullback_short"] == -1
+
+
+def test_build_combo_specs_includes_bidirectional_phase_trend() -> None:
+    args = type(
+        "Args",
+        (),
+        {
+            "macd_timeframes": [60],
+            "macd_filters": ["hist_deceleration"],
+            "stop_atr_buffers": [0.8],
+            "target_rs": [1.8],
+            "max_hold_bars_grid": [60],
+            "risk_control_modes": [False],
+        },
+    )()
+
+    specs = MODULE.build_combo_specs(args)
+    phase_specs = [spec for spec in specs if spec.name.startswith("phase_trend_macd60_hist_deceleration")]
+
+    assert len(phase_specs) == 1
+    assert phase_specs[0].families == (
+        "phase_up_breakout_long",
+        "phase_up_pullback_long",
+        "phase_down_breakdown_short",
+        "phase_down_pullback_short",
+    )
