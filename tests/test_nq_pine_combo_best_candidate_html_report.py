@@ -44,13 +44,36 @@ def test_best_candidate_html_report_contains_core_sections(tmp_path: Path) -> No
             }
         ]
     )
+    bars = pd.DataFrame(
+        [
+            {
+                "ts": "2026-03-27 01:29:00+00:00",
+                "Open": 23860.0,
+                "High": 23874.0,
+                "Low": 23858.0,
+                "Close": 23868.0,
+            },
+            {
+                "ts": "2026-03-27 01:59:00+00:00",
+                "Open": 23870.0,
+                "High": 23875.0,
+                "Low": 23866.0,
+                "Close": 23872.0,
+            },
+        ]
+    )
     output = tmp_path / "report.html"
 
-    MODULE._write_report(output, ranking, trades)
+    MODULE._write_report(output, ranking, trades, bars)
 
     html = output.read_text(encoding="utf-8")
     assert MODULE.BEST_STRATEGY in html
     assert "Performance Snapshot" in html
     assert "Equity Curve By Trade" in html
+    assert "K-line Trade Replay" in html
+    assert "trade-entry" in html
+    assert "trade-exit" in html
+    assert "LONG IN" in html
+    assert "OUT +6.50 pts" in html
     assert "Breakdown By Signal Family" in html
     assert "Trade Log" in html

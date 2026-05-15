@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,14 @@ import pandas as pd
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from search_nq_bar_2r_walkforward import load_continuous_nq_bars  # noqa: E402
+
 BEST_STRATEGY = "long_bias_macd1_cross_recent_5_stop1.25_r2.5_h30_norisk"
 RANKING_PATH = ROOT_DIR / "reports/NQ-pine-indicator-combo-last-month-ranking.csv"
 TRADES_PATH = ROOT_DIR / "reports/NQ-pine-indicator-combo-last-month-best-trades.csv"
@@ -115,7 +124,140 @@ def _svg_line(values: list[float], *, title: str, stroke: str, fill: str = "none
 """
 
 
-def _write_report(output: Path, ranking: pd.DataFrame, trades: pd.DataFrame) -> None:
+def _load_bars_for_trades(trades: pd.DataFrame, cache: str, chunk_size: int, min_volume: float) -> pd.DataFrame:
+    start = pd.to_datetime(trades["entry_ts"], utc=True).min().floor("D")
+    end = (pd.to_datetime(trades["exit_ts"], utc=True).max() + pd.Timedelta(days=1)).ceil("D")
+    args = argparse.Namespace(
+        start_date=start.strftime("%Y-%m-%d"),
+        end_date=end.strftime("%Y-%m-%d"),
+        cache=cache,
+        chunk_size=chunk_size,
+        min_volume=min_volume,
+    )
+    return load_continuous_nq_bars(args).sort_values("ts").reset_index(drop=True)
+
+
+def _trade_kline_svg(bars: pd.DataFrame, trades: pd.DataFrame) -> str:
+    if bars.empty or trades.empty:
+        return "<p>No K-line data available.</p>"
+    width = 1380
+    height = 720
+    pad_left = 68
+    pad_right = 34
+    pad_top = 30
+    pad_bottom = 72
+    plot_w = width - pad_left - pad_right
+    plot_h = height - pad_top - pad_bottom
+
+    bars = bars.copy().reset_index(drop=True)
+    for column in ["Open", "High", "Low", "Close"]:
+        bars[column] = pd.to_numeric(bars[column], errors="coerce")
+    bars = bars.dropna(subset=["Open", "High", "Low", "Close"]).reset_index(drop=True)
+    if bars.empty:
+        return "<p>No K-line data available.</p>"
+    price_min = min(float(bars["Low"].min()), float(trades[["entry_price", "exit_price"]].min().min()))
+    price_max = max(float(bars["High"].max()), float(trades[["entry_price", "exit_price"]].max().max()))
+    padding = max((price_max - price_min) * 0.06, 1.0)
+    price_min -= padding
+    price_max += padding
+    price_span = price_max - price_min
+
+    ts_values = pd.to_datetime(bars["ts"], utc=True)
+    ts_to_index = {ts.value: idx for idx, ts in enumerate(ts_values)}
+
+    def x_for_index(index: int) -> float:
+        return pad_left + index / max(len(bars) - 1, 1) * plot_w
+
+    def y_for_price(price: float) -> float:
+        return pad_top + (price_max - price) / price_span * plot_h
+
+    def index_for_ts(ts: pd.Timestamp) -> int:
+        value = ts.value
+        if value in ts_to_index:
+            return ts_to_index[value]
+        pos = ts_values.searchsorted(ts)
+        return int(max(0, min(len(bars) - 1, pos)))
+
+    max_bars_to_draw = 2600
+    step = max(1, len(bars) // max_bars_to_draw)
+    candle_parts: list[str] = []
+    candle_width = max(1.0, plot_w / max(len(bars) / step, 1) * 0.62)
+    for index in range(0, len(bars), step):
+        row = bars.iloc[index]
+        x = x_for_index(index)
+        y_high = y_for_price(float(row["High"]))
+        y_low = y_for_price(float(row["Low"]))
+        y_open = y_for_price(float(row["Open"]))
+        y_close = y_for_price(float(row["Close"]))
+        up = float(row["Close"]) >= float(row["Open"])
+        color = "#2dd4bf" if up else "#fb7185"
+        body_y = min(y_open, y_close)
+        body_h = max(abs(y_close - y_open), 1.2)
+        candle_parts.append(
+            f'<line x1="{x:.1f}" y1="{y_high:.1f}" x2="{x:.1f}" y2="{y_low:.1f}" stroke="{color}" stroke-width="1.1" opacity="0.72" />'
+            f'<rect x="{x - candle_width / 2:.1f}" y="{body_y:.1f}" width="{candle_width:.1f}" height="{body_h:.1f}" rx="1" fill="{color}" opacity="0.72" />'
+        )
+
+    trade_parts: list[str] = []
+    label_rows: list[str] = []
+    for trade_no, row in enumerate(trades.itertuples(index=False), start=1):
+        entry_ts = pd.Timestamp(row.entry_ts)
+        exit_ts = pd.Timestamp(row.exit_ts)
+        entry_index = index_for_ts(entry_ts)
+        exit_index = index_for_ts(exit_ts)
+        entry_x = x_for_index(entry_index)
+        exit_x = x_for_index(exit_index)
+        entry_y = y_for_price(float(row.entry_price))
+        exit_y = y_for_price(float(row.exit_price))
+        is_long = int(row.direction) > 0
+        net = float(row.net_points)
+        pnl_color = "#34d399" if net >= 0 else "#fb7185"
+        direction_text = "LONG" if is_long else "SHORT"
+        marker = "▲" if is_long else "▼"
+        entry_label_y = entry_y - 12 if is_long else entry_y + 18
+        exit_label_y = exit_y - 12 if net >= 0 else exit_y + 18
+        trade_parts.append(
+            f'<line class="trade-link" x1="{entry_x:.1f}" y1="{entry_y:.1f}" x2="{exit_x:.1f}" y2="{exit_y:.1f}" stroke="{pnl_color}" stroke-width="1.4" opacity="0.62" />'
+            f'<circle class="trade-entry" cx="{entry_x:.1f}" cy="{entry_y:.1f}" r="4.2" fill="#38bdf8" stroke="#e0f2fe" stroke-width="1.2" />'
+            f'<text x="{entry_x + 5:.1f}" y="{entry_label_y:.1f}" fill="#bae6fd" font-size="10">#{trade_no} {direction_text} IN {float(row.entry_price):,.2f}</text>'
+            f'<circle class="trade-exit" cx="{exit_x:.1f}" cy="{exit_y:.1f}" r="4.5" fill="{pnl_color}" stroke="#fff7ed" stroke-width="1.1" />'
+            f'<text x="{exit_x + 5:.1f}" y="{exit_label_y:.1f}" fill="{pnl_color}" font-size="10">{marker} OUT {net:+.2f} pts</text>'
+        )
+        label_rows.append(
+            f"<tr><td>{trade_no}</td><td>{html.escape(entry_ts.strftime('%m-%d %H:%M'))}</td><td>{direction_text}</td><td>{float(row.entry_price):,.2f}</td><td>{html.escape(exit_ts.strftime('%m-%d %H:%M'))}</td><td>{float(row.exit_price):,.2f}</td><td class=\"{'gain' if net >= 0 else 'loss'}\">{net:+.2f}</td></tr>"
+        )
+
+    grid_lines = []
+    for frac in [0.0, 0.25, 0.5, 0.75, 1.0]:
+        y = pad_top + frac * plot_h
+        price = price_max - frac * price_span
+        grid_lines.append(f'<line x1="{pad_left}" y1="{y:.1f}" x2="{width - pad_right}" y2="{y:.1f}" stroke="#1f3653" stroke-width="1" />')
+        grid_lines.append(f'<text x="12" y="{y + 4:.1f}" fill="#94a3b8" font-size="12">{price:,.0f}</text>')
+    for frac in [0.0, 0.25, 0.5, 0.75, 1.0]:
+        x = pad_left + frac * plot_w
+        idx = int(frac * (len(bars) - 1))
+        label = ts_values.iloc[idx].strftime("%m-%d")
+        grid_lines.append(f'<line x1="{x:.1f}" y1="{pad_top}" x2="{x:.1f}" y2="{height - pad_bottom}" stroke="#132842" stroke-width="1" />')
+        grid_lines.append(f'<text x="{x - 18:.1f}" y="{height - 34}" fill="#94a3b8" font-size="12">{label}</text>')
+
+    return f"""
+<div class="kline-wrap">
+  <svg class="kline-svg" viewBox="0 0 {width} {height}" role="img" aria-label="NQ 1-minute K-line chart with trade entry and exit markers">
+    <rect x="0" y="0" width="{width}" height="{height}" rx="20" fill="#07111f" />
+    {''.join(grid_lines)}
+    <g class="candles">{''.join(candle_parts)}</g>
+    <g class="trade-markers">{''.join(trade_parts)}</g>
+    <text x="{pad_left}" y="22" fill="#e5edf8" font-size="15" font-weight="700">NQ 1m K-line with all {len(trades)} trades: blue = entry, green/red = exit PnL, line = entry-to-exit path</text>
+  </svg>
+  <details>
+    <summary>Marker index table</summary>
+    <div class="table-wrap mini"><table><thead><tr><th>#</th><th>Entry</th><th>Side</th><th>Entry Px</th><th>Exit</th><th>Exit Px</th><th>PnL pts</th></tr></thead><tbody>{''.join(label_rows)}</tbody></table></div>
+  </details>
+</div>
+"""
+
+
+def _write_report(output: Path, ranking: pd.DataFrame, trades: pd.DataFrame, bars: pd.DataFrame | None = None) -> None:
     strategy = ranking.loc[ranking["strategy"].eq(BEST_STRATEGY)].iloc[0]
     trades = trades.copy()
     trades["entry_ts"] = pd.to_datetime(trades["entry_ts"], utc=True)
@@ -129,6 +271,9 @@ def _write_report(output: Path, ranking: pd.DataFrame, trades: pd.DataFrame) -> 
     session = _group_summary(trades, ["session"])
     family = _group_summary(trades, ["signal_family"])
     exits = _group_summary(trades, ["exit_reason"])
+    if bars is None:
+        bars = pd.DataFrame()
+    kline_chart = _trade_kline_svg(bars, trades)
 
     cards = [
         ("Trades", _fmt(int(summary["trades"]))),
@@ -207,6 +352,13 @@ def _write_report(output: Path, ranking: pd.DataFrame, trades: pd.DataFrame) -> 
     th {{ color:#cbd5e1; background:#0a1728; position:sticky; top:0; }}
     tr:nth-child(even) td {{ background:rgba(255,255,255,.018); }}
     .note {{ color:var(--muted); line-height:1.6; }}
+    .kline-wrap {{ overflow-x:auto; }}
+    .kline-svg {{ min-width:1180px; width:100%; height:auto; border:1px solid var(--line); border-radius:22px; background:#07111f; }}
+    details {{ margin-top:12px; color:var(--muted); }}
+    summary {{ cursor:pointer; color:#cbd5e1; font-weight:700; }}
+    .mini table {{ min-width:900px; }}
+    .gain {{ color:var(--green); font-weight:700; }}
+    .loss {{ color:var(--red); font-weight:700; }}
     code {{ padding:2px 6px; border-radius:7px; background:#06101d; color:#a5f3fc; }}
     @media (max-width: 860px) {{ .metrics, .grid2 {{ grid-template-columns:1fr; }} main {{ padding:14px; }} }}
   </style>
@@ -226,6 +378,11 @@ def _write_report(output: Path, ranking: pd.DataFrame, trades: pd.DataFrame) -> 
     <section class="grid2">
       {_svg_line(equity_values, title="Equity Curve By Trade (net points)", stroke="var(--green)")}
       {_svg_line(drawdown_values, title="Drawdown Curve (negative points)", stroke="var(--red)")}
+    </section>
+    <section>
+      <h2>K-line Trade Replay</h2>
+      <p class="note">Each trade is plotted directly on the NQ 1-minute candles: blue dot marks entry, green/red dot marks exit, labels show long/short side, entry/exit price, and net PnL points after costs.</p>
+      {kline_chart}
     </section>
     <section>
       <h2>Breakdown By Signal Family</h2>
@@ -262,6 +419,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ranking", default=str(RANKING_PATH))
     parser.add_argument("--trades", default=str(TRADES_PATH))
     parser.add_argument("--output", default=str(REPORT_PATH))
+    parser.add_argument("--bars-cache", default=".tmp/nq-pine-combo-best-candidate-bars.pkl")
+    parser.add_argument("--chunk-size", type=int, default=200_000)
+    parser.add_argument("--min-volume", type=float, default=1.0)
     return parser.parse_args()
 
 
@@ -269,7 +429,8 @@ def main() -> None:
     args = parse_args()
     ranking = pd.read_csv(args.ranking)
     trades = pd.read_csv(args.trades)
-    _write_report(Path(args.output), ranking, trades)
+    bars = _load_bars_for_trades(trades, args.bars_cache, args.chunk_size, args.min_volume)
+    _write_report(Path(args.output), ranking, trades, bars)
     print(f"wrote {args.output}")
 
 
