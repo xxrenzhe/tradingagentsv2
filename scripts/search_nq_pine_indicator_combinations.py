@@ -52,9 +52,37 @@ FAMILY_DIRECTIONS: dict[str, int] = {
     "phase_up_pullback_long": 1,
     "phase_down_breakdown_short": -1,
     "phase_down_pullback_short": -1,
+    "trend_pullback_short_asia_europe": -1,
+    "trend_transition_short_asia_rth": -1,
+    "trend_transition_short_asia": -1,
+}
+FAMILY_TARGET_BASE: dict[str, str] = {
+    "trend_pullback_short_asia_europe": "trend_pullback_short",
+    "trend_transition_short_asia_rth": "trend_transition_short",
+    "trend_transition_short_asia": "trend_transition_short",
 }
 
 PINE_DEFAULT_FAMILIES = ("top_breakout_long", "trend_ignition_long")
+ALL_LIGHTGLOW_BASE_FAMILIES = (
+    "bottom_breakdown_short",
+    "top_breakout_long",
+    "bottom_reclaim_long",
+    "top_reject_short",
+    "trend_ignition_long",
+    "trend_ignition_short",
+    "trend_pullback_long",
+    "trend_pullback_short",
+    "trend_transition_long",
+    "trend_transition_short",
+    "reversal_impulse_long",
+    "reversal_impulse_short",
+    "fast_reversal_long",
+    "fast_reversal_short",
+    "phase_up_breakout_long",
+    "phase_up_pullback_long",
+    "phase_down_breakdown_short",
+    "phase_down_pullback_short",
+)
 MIN_ROBUST_TRADES = 50
 
 
@@ -349,6 +377,9 @@ def add_all_lightglow_signal_columns(frame: pd.DataFrame, config: BoundaryLightg
         "phase_up_pullback_long": phase_up_pullback_long,
         "phase_down_breakdown_short": phase_down_breakdown_short,
         "phase_down_pullback_short": phase_down_pullback_short,
+        "trend_pullback_short_asia_europe": trend_pullback_short & output["session"].isin(["asia", "europe"]),
+        "trend_transition_short_asia_rth": trend_transition_short & output["session"].isin(["asia", "us_rth"]),
+        "trend_transition_short_asia": trend_transition_short & output["session"].eq("asia"),
     }
     for family, condition in raw_conditions.items():
         condition = condition.fillna(False)
@@ -429,6 +460,7 @@ def backtest_combo_fast(features: pd.DataFrame, spec: ComboSpec, config: Boundar
     day_state: dict[Any, dict[str, float]] = {}
     for index in signal_indexes:
         family = str(family_array[index])
+        target_family = FAMILY_TARGET_BASE.get(family, family)
         direction = int(direction_array[index])
         entry_index = int(index) + 1
         if entry_index <= last_exit_index + config.cooldown_bars or entry_index <= pause_until or entry_index >= len(features):
@@ -449,13 +481,13 @@ def backtest_combo_fast(features: pd.DataFrame, spec: ComboSpec, config: Boundar
         signal_high = float(high_prices[index])
         signal_low = float(low_prices[index])
         if direction > 0:
-            structure_stop = range_high - active_atr * config.stop_atr_buffer if family == "top_breakout_long" and np.isfinite(range_high) else signal_low - active_atr * config.stop_atr_buffer
+            structure_stop = range_high - active_atr * config.stop_atr_buffer if target_family == "top_breakout_long" and np.isfinite(range_high) else signal_low - active_atr * config.stop_atr_buffer
         else:
-            structure_stop = range_low + active_atr * config.stop_atr_buffer if family == "bottom_breakdown_short" and np.isfinite(range_low) else signal_high + active_atr * config.stop_atr_buffer
+            structure_stop = range_low + active_atr * config.stop_atr_buffer if target_family == "bottom_breakdown_short" and np.isfinite(range_low) else signal_high + active_atr * config.stop_atr_buffer
         raw_risk = abs(entry_price - structure_stop)
         risk_points = max(raw_risk, active_atr * config.min_risk_atr, 0.25)
         initial_stop = entry_price - direction * risk_points
-        target, target_plan = _structure_target(family, direction, entry_price, risk_points, range_high, range_low, config)
+        target, target_plan = _structure_target(target_family, direction, entry_price, risk_points, range_high, range_low, config)
 
         best = float(high_prices[entry_index]) if direction > 0 else float(low_prices[entry_index])
         protective_stop = initial_stop
@@ -585,7 +617,55 @@ def build_combo_specs(args: argparse.Namespace) -> list[ComboSpec]:
         ),
         ("long_bias", ("top_breakout_long", "trend_ignition_long", "trend_pullback_long", "trend_transition_long", "reversal_impulse_long")),
         ("short_bias", ("bottom_breakdown_short", "top_reject_short", "trend_pullback_short", "trend_transition_short", "reversal_impulse_short")),
-        ("all_lightglow", tuple(FAMILY_DIRECTIONS)),
+        (
+            "selective_bidirectional",
+            (
+                "top_breakout_long",
+                "trend_ignition_long",
+                "trend_pullback_long",
+                "trend_transition_long",
+                "reversal_impulse_long",
+                "bottom_breakdown_short",
+                "trend_pullback_short",
+                "trend_transition_short",
+            ),
+        ),
+        (
+            "selective_bidirectional_core",
+            (
+                "top_breakout_long",
+                "trend_pullback_long",
+                "trend_transition_long",
+                "bottom_breakdown_short",
+                "trend_pullback_short",
+                "trend_transition_short",
+            ),
+        ),
+        (
+            "selective_bidirectional_session",
+            (
+                "top_breakout_long",
+                "trend_ignition_long",
+                "trend_pullback_long",
+                "trend_transition_long",
+                "reversal_impulse_long",
+                "trend_pullback_short_asia_europe",
+                "trend_transition_short_asia_rth",
+            ),
+        ),
+        (
+            "selective_bidirectional_strict_short",
+            (
+                "top_breakout_long",
+                "trend_ignition_long",
+                "trend_pullback_long",
+                "trend_transition_long",
+                "reversal_impulse_long",
+                "trend_pullback_short_asia_europe",
+                "trend_transition_short_asia",
+            ),
+        ),
+        ("all_lightglow", ALL_LIGHTGLOW_BASE_FAMILIES),
     ]
     specs: list[ComboSpec] = []
     for group_name, families in family_groups:
@@ -762,6 +842,7 @@ def write_markdown_report(
     lines.extend(["", "## Top Ranked Combinations", "", markdown_table(top, columns)])
     screenshot_rows = results[results["strategy"].astype(str).str.contains("fast_boundary_reversal|screenshot_reversal", regex=True)].head(10)
     phase_rows = results[results["strategy"].astype(str).str.contains("phase_", regex=False)].head(10)
+    selective_rows = results[results["strategy"].astype(str).str.contains("selective_bidirectional", regex=False)].head(10)
     sixty_min_rows = results[results["macd_timeframe"].eq(60)].head(10)
     lines.extend(
         [
@@ -777,6 +858,12 @@ def write_markdown_report(
             "These rows target fast but staged upside and downside moves using EMA phase state, micro breakouts/breakdowns, pullback reclaim/failure, and early MACD histogram filters.",
             "",
             markdown_table(phase_rows, columns),
+            "",
+            "## Selective Bidirectional Candidates",
+            "",
+            "These rows keep the long-biased best-candidate family set and add only high-quality short continuation/transition/breakdown structures, avoiding broad top-picking shorts.",
+            "",
+            markdown_table(selective_rows, columns),
             "",
             "## 60m MACD Candidates",
             "",

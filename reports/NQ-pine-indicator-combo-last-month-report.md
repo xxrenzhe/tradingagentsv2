@@ -3,7 +3,7 @@
 - Data: `2026-03-27` to `2026-04-28` from `data/raw/databento`; latest observed bar `2026-04-27 23:59:00+00:00`.
 - Pine inputs: `pine_scripts/nq_lightglow_timecell_composite_paper_readiness.pine` and `pine_scripts/CM_MacD_Ult_MTF.pine`.
 - Cost model: 1.50 NQ points round trip, matching Pine slippage/commission assumptions used by the Lightglow strategy.
-- Search size: 24192 combinations across Lightglow signal families, CM MACD MTF filters, stops, targets, holds, and risk controls.
+- Search size: 28728 combinations across Lightglow signal families, CM MACD MTF filters, stops, targets, holds, and risk controls.
 
 ## Best Strategy
 
@@ -20,23 +20,23 @@
 | long_bias_macd1_cross_recent_5_stop1.25_r2.5_h30_norisk | 218 | 1732.1003 | 2.0531 | 0.5505 | 7.9454 | 133.5368 | -109.4930 | 1416.2139 |
 | long_bias_macd1_cross_recent_5_stop1.25_r1.2_h30_norisk | 219 | 1559.4314 | 1.9489 | 0.5571 | 7.1207 | 130.7494 | -109.4930 | 1306.0333 |
 | long_bias_macd1_cross_recent_5_stop1.25_r1.8_h30_norisk | 218 | 1587.7949 | 1.9654 | 0.5505 | 7.2835 | 133.5368 | -109.4930 | 1303.3085 |
+| selective_bidirectional_session_macd1_cross_recent_5_stop1.25_r2.5_h30_norisk | 322 | 1776.5367 | 1.5897 | 0.5311 | 5.5172 | 198.4594 | -109.4930 | 992.5965 |
+| selective_bidirectional_session_macd1_cross_recent_5_stop1.25_r1.8_h30_norisk | 322 | 1700.4440 | 1.5644 | 0.5311 | 5.2809 | 198.4594 | -109.4930 | 952.6780 |
+| selective_bidirectional_session_macd1_cross_recent_5_stop1.25_r1.2_h30_norisk | 324 | 1629.3629 | 1.5411 | 0.5370 | 5.0289 | 192.2135 | -109.4930 | 942.0673 |
 | long_bias_macd1_cross_recent_5_stop1.25_r2.5_h60_norisk | 206 | 1441.3807 | 1.7089 | 0.5485 | 6.9970 | 214.3430 | -109.4930 | 779.1449 |
 | long_bias_macd1_cross_recent_5_stop1.25_r1.2_h60_norisk | 208 | 1307.4615 | 1.6434 | 0.5577 | 6.2859 | 217.5148 | -109.4930 | 703.4736 |
 | long_bias_macd1_cross_recent_5_stop1.25_r1.8_h60_norisk | 206 | 1281.5559 | 1.6303 | 0.5485 | 6.2211 | 213.1907 | -109.4930 | 702.7433 |
+| selective_bidirectional_session_macd1_cross_recent_5_stop1.25_r1.2_h60_norisk | 302 | 1402.4640 | 1.4050 | 0.5397 | 4.6439 | 232.5594 | -109.4930 | 692.5505 |
+| selective_bidirectional_session_macd1_cross_recent_5_stop1.25_r2.5_h60_norisk | 299 | 1443.3750 | 1.4166 | 0.5318 | 4.8273 | 241.3239 | -109.4930 | 688.4669 |
+| selective_bidirectional_session_macd1_cross_recent_5_stop1.25_r1.8_h60_norisk | 299 | 1328.6787 | 1.3835 | 0.5318 | 4.4437 | 226.7418 | -109.4930 | 673.9855 |
 | long_bias_macd5_trend_stop1.25_r1.2_h30_norisk | 320 | 1309.4839 | 1.4276 | 0.5281 | 4.0921 | 224.7115 | -79.9099 | 670.3621 |
 | long_bias_macd5_trend_hist_stop1.25_r1.2_h30_norisk | 320 | 1309.4839 | 1.4276 | 0.5281 | 4.0921 | 224.7115 | -79.9099 | 670.3621 |
 | long_bias_macd1_cross_recent_5_stop1.25_r2.5_h30_risk | 155 | 863.2268 | 1.7628 | 0.5548 | 5.5692 | 152.5699 | -109.4930 | 668.2352 |
 | long_bias_macd1_cross_recent_5_stop1.25_r1.8_h30_risk | 156 | 843.1834 | 1.7451 | 0.5577 | 5.4050 | 152.3143 | -109.4930 | 654.9828 |
 | long_bias_macd1_cross_recent_5_stop1.25_r2.5_h90_norisk | 205 | 1397.6886 | 1.6550 | 0.5561 | 6.8180 | 259.0640 | -109.4930 | 644.2829 |
+| selective_bidirectional_session_macd1_cross_recent_5_stop1.25_r2.5_h90_norisk | 296 | 1348.0221 | 1.3760 | 0.5304 | 4.5541 | 242.6503 | -109.4930 | 643.7664 |
 | trend_pullback_macd60_trend_stop1.25_r1.2_h30_risk | 72 | 731.8569 | 2.2659 | 0.5694 | 10.1647 | 146.9279 | -70.7887 | 624.8017 |
 | trend_pullback_macd60_trend_stop1.25_r1.8_h30_risk | 72 | 731.8569 | 2.2659 | 0.5694 | 10.1647 | 146.9279 | -70.7887 | 624.8017 |
-| trend_pullback_macd60_trend_stop1.25_r2.5_h30_risk | 72 | 731.8569 | 2.2659 | 0.5694 | 10.1647 | 146.9279 | -70.7887 | 624.8017 |
-| trend_pullback_macd60_trend_hist_stop1.25_r1.2_h30_risk | 72 | 731.8569 | 2.2659 | 0.5694 | 10.1647 | 146.9279 | -70.7887 | 624.8017 |
-| trend_pullback_macd60_trend_hist_stop1.25_r1.8_h30_risk | 72 | 731.8569 | 2.2659 | 0.5694 | 10.1647 | 146.9279 | -70.7887 | 624.8017 |
-| trend_pullback_macd60_trend_hist_stop1.25_r2.5_h30_risk | 72 | 731.8569 | 2.2659 | 0.5694 | 10.1647 | 146.9279 | -70.7887 | 624.8017 |
-| trend_pullback_macd5_hist_slope_stop0.8_r1.2_h60_norisk | 56 | 451.3295 | 1.8646 | 0.5893 | 8.0595 | 87.6537 | -65.4648 | 619.5379 |
-| phase_long_macd5_trend_stop1.25_r1.8_h60_norisk | 367 | 1499.9108 | 1.3940 | 0.5395 | 4.0870 | 281.8701 | -84.3002 | 619.1165 |
-| phase_long_macd5_trend_hist_stop1.25_r1.8_h60_norisk | 367 | 1499.9108 | 1.3940 | 0.5395 | 4.0870 | 281.8701 | -84.3002 | 619.1165 |
 
 ## Screenshot-Inspired Early Reversal Candidates
 
@@ -71,6 +71,23 @@ These rows target fast but staged upside and downside moves using EMA phase stat
 | phase_trend_macd5_trend_hist_stop1.25_r2.5_h90_norisk | 649 | 2022.9036 | 1.2786 | 0.5131 | 3.1170 | 398.2407 | -79.9099 | 587.6545 |
 | phase_long_macd5_trend_stop1.25_r2.5_h60_norisk | 359 | 1363.8993 | 1.3582 | 0.5404 | 3.7992 | 277.4733 | -84.3002 | 576.5012 |
 | phase_long_macd5_trend_hist_stop1.25_r2.5_h60_norisk | 359 | 1363.8993 | 1.3582 | 0.5404 | 3.7992 | 277.4733 | -84.3002 | 576.5012 |
+
+## Selective Bidirectional Candidates
+
+These rows keep the long-biased best-candidate family set and add only high-quality short continuation/transition/breakdown structures, avoiding broad top-picking shorts.
+
+| strategy | trades | net_points | profit_factor | win_rate | avg_points | max_drawdown_points | worst_trade_points | score |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| selective_bidirectional_session_macd1_cross_recent_5_stop1.25_r2.5_h30_norisk | 322 | 1776.5367 | 1.5897 | 0.5311 | 5.5172 | 198.4594 | -109.4930 | 992.5965 |
+| selective_bidirectional_session_macd1_cross_recent_5_stop1.25_r1.8_h30_norisk | 322 | 1700.4440 | 1.5644 | 0.5311 | 5.2809 | 198.4594 | -109.4930 | 952.6780 |
+| selective_bidirectional_session_macd1_cross_recent_5_stop1.25_r1.2_h30_norisk | 324 | 1629.3629 | 1.5411 | 0.5370 | 5.0289 | 192.2135 | -109.4930 | 942.0673 |
+| selective_bidirectional_session_macd1_cross_recent_5_stop1.25_r1.2_h60_norisk | 302 | 1402.4640 | 1.4050 | 0.5397 | 4.6439 | 232.5594 | -109.4930 | 692.5505 |
+| selective_bidirectional_session_macd1_cross_recent_5_stop1.25_r2.5_h60_norisk | 299 | 1443.3750 | 1.4166 | 0.5318 | 4.8273 | 241.3239 | -109.4930 | 688.4669 |
+| selective_bidirectional_session_macd1_cross_recent_5_stop1.25_r1.8_h60_norisk | 299 | 1328.6787 | 1.3835 | 0.5318 | 4.4437 | 226.7418 | -109.4930 | 673.9855 |
+| selective_bidirectional_session_macd1_cross_recent_5_stop1.25_r2.5_h90_norisk | 296 | 1348.0221 | 1.3760 | 0.5304 | 4.5541 | 242.6503 | -109.4930 | 643.7664 |
+| selective_bidirectional_macd1_cross_recent_5_stop1.25_r2.5_h30_norisk | 376 | 1351.5891 | 1.3594 | 0.4947 | 3.5947 | 271.8647 | -88.9689 | 580.4129 |
+| selective_bidirectional_core_macd1_cross_recent_5_stop1.25_r2.5_h30_norisk | 376 | 1351.5891 | 1.3594 | 0.4947 | 3.5947 | 271.8647 | -88.9689 | 580.4129 |
+| selective_bidirectional_macd1_cross_recent_5_stop1.25_r1.8_h30_norisk | 376 | 1339.5404 | 1.3588 | 0.4973 | 3.5626 | 271.8647 | -88.9689 | 575.8901 |
 
 ## 60m MACD Candidates
 

@@ -80,6 +80,12 @@ def test_phase_trend_families_are_bidirectional() -> None:
     assert MODULE.FAMILY_DIRECTIONS["phase_up_pullback_long"] == 1
     assert MODULE.FAMILY_DIRECTIONS["phase_down_breakdown_short"] == -1
     assert MODULE.FAMILY_DIRECTIONS["phase_down_pullback_short"] == -1
+    assert MODULE.FAMILY_DIRECTIONS["trend_pullback_short_asia_europe"] == -1
+    assert MODULE.FAMILY_DIRECTIONS["trend_transition_short_asia_rth"] == -1
+    assert MODULE.FAMILY_DIRECTIONS["trend_transition_short_asia"] == -1
+    assert MODULE.FAMILY_TARGET_BASE["trend_pullback_short_asia_europe"] == "trend_pullback_short"
+    assert MODULE.FAMILY_TARGET_BASE["trend_transition_short_asia_rth"] == "trend_transition_short"
+    assert MODULE.FAMILY_TARGET_BASE["trend_transition_short_asia"] == "trend_transition_short"
 
 
 def test_build_combo_specs_includes_bidirectional_phase_trend() -> None:
@@ -106,3 +112,72 @@ def test_build_combo_specs_includes_bidirectional_phase_trend() -> None:
         "phase_down_breakdown_short",
         "phase_down_pullback_short",
     )
+
+
+def test_build_combo_specs_includes_selective_bidirectional_families() -> None:
+    args = type(
+        "Args",
+        (),
+        {
+            "macd_timeframes": [1],
+            "macd_filters": ["cross_recent_5"],
+            "stop_atr_buffers": [1.25],
+            "target_rs": [2.5],
+            "max_hold_bars_grid": [30],
+            "risk_control_modes": [False],
+        },
+    )()
+
+    specs = MODULE.build_combo_specs(args)
+    spec_by_name = {spec.name: spec for spec in specs}
+    selective = spec_by_name["selective_bidirectional_macd1_cross_recent_5_stop1.25_r2.5_h30_norisk"]
+    core = spec_by_name["selective_bidirectional_core_macd1_cross_recent_5_stop1.25_r2.5_h30_norisk"]
+
+    assert "top_reject_short" not in selective.families
+    assert "reversal_impulse_short" not in selective.families
+    assert {
+        "top_breakout_long",
+        "trend_ignition_long",
+        "trend_pullback_long",
+        "trend_transition_long",
+        "reversal_impulse_long",
+        "bottom_breakdown_short",
+        "trend_pullback_short",
+        "trend_transition_short",
+    }.issubset(selective.families)
+    assert "trend_ignition_long" not in core.families
+    assert "reversal_impulse_long" not in core.families
+
+
+def test_build_combo_specs_includes_session_gated_selective_bidirectional() -> None:
+    args = type(
+        "Args",
+        (),
+        {
+            "macd_timeframes": [1],
+            "macd_filters": ["cross_recent_5"],
+            "stop_atr_buffers": [1.25],
+            "target_rs": [2.5],
+            "max_hold_bars_grid": [30],
+            "risk_control_modes": [False],
+        },
+    )()
+
+    specs = MODULE.build_combo_specs(args)
+    spec_by_name = {spec.name: spec for spec in specs}
+    selective = spec_by_name["selective_bidirectional_session_macd1_cross_recent_5_stop1.25_r2.5_h30_norisk"]
+
+    assert "trend_pullback_short" not in selective.families
+    assert "trend_transition_short" not in selective.families
+    assert "trend_pullback_short_asia_europe" in selective.families
+    assert "trend_transition_short_asia_rth" in selective.families
+
+    strict = spec_by_name["selective_bidirectional_strict_short_macd1_cross_recent_5_stop1.25_r2.5_h30_norisk"]
+    assert "trend_transition_short_asia" in strict.families
+    assert "trend_transition_short_asia_rth" not in strict.families
+
+
+def test_all_lightglow_excludes_session_gated_aliases() -> None:
+    assert "trend_pullback_short_asia_europe" not in MODULE.ALL_LIGHTGLOW_BASE_FAMILIES
+    assert "trend_transition_short_asia_rth" not in MODULE.ALL_LIGHTGLOW_BASE_FAMILIES
+    assert "trend_transition_short_asia" not in MODULE.ALL_LIGHTGLOW_BASE_FAMILIES
