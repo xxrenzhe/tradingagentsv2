@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import sys
 from pathlib import Path
@@ -23,6 +24,34 @@ BEST_STRATEGY = "long_bias_macd1_cross_recent_5_stop1.25_r2.5_h30_norisk"
 RANKING_PATH = ROOT_DIR / "reports/NQ-pine-indicator-combo-last-month-ranking.csv"
 TRADES_PATH = ROOT_DIR / "reports/NQ-pine-indicator-combo-last-month-best-trades.csv"
 REPORT_PATH = ROOT_DIR / "reports/NQ-pine-combo-best-candidate.html"
+
+
+def _trade_id_for_row(row: Any, fallback_index: int, strategy_name: str) -> str:
+    parts = [
+        strategy_name,
+        str(getattr(row, "entry_ts", "")),
+        str(getattr(row, "exit_ts", "")),
+        str(getattr(row, "signal_family", "")),
+        str(getattr(row, "direction", "")),
+        str(getattr(row, "entry_price", "")),
+        str(getattr(row, "exit_price", "")),
+        str(getattr(row, "entry_index", fallback_index)),
+        str(getattr(row, "exit_index", fallback_index)),
+    ]
+    digest = hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:12].upper()
+    return f"TRD-{digest}"
+
+
+def _ensure_trade_ids(trades: pd.DataFrame, strategy_name: str) -> pd.DataFrame:
+    output = trades.copy()
+    if "trade_id" not in output.columns:
+        output.insert(0, "trade_id", "")
+    missing = output["trade_id"].isna() | output["trade_id"].astype(str).str.strip().eq("")
+    if missing.any():
+        missing_indexes = output.index[missing]
+        for fallback_index, (row_index, row) in enumerate(zip(missing_indexes, output.loc[missing].itertuples(index=False)), start=1):
+            output.loc[row_index, "trade_id"] = _trade_id_for_row(row, fallback_index, strategy_name)
+    return output
 
 
 def _fmt(value: Any) -> str:
@@ -138,121 +167,128 @@ def _load_bars_for_trades(trades: pd.DataFrame, cache: str, chunk_size: int, min
     return load_continuous_nq_bars(args).sort_values("ts").reset_index(drop=True)
 
 
-def _trade_kline_svg(bars: pd.DataFrame, trades: pd.DataFrame) -> str:
-    if bars.empty or trades.empty:
-        return "<p>No K-line data available.</p>"
-    width = 1380
-    height = 720
-    pad_left = 68
-    pad_right = 34
-    pad_top = 30
-    pad_bottom = 72
+def _single_trade_kline_svg(bars: pd.DataFrame, trade: Any, trade_no: int, *, context_bars: int = 24) -> str:
+    width = 1180
+    height = 420
+    pad_left = 62
+    pad_right = 28
+    pad_top = 34
+    pad_bottom = 50
     plot_w = width - pad_left - pad_right
     plot_h = height - pad_top - pad_bottom
 
+    entry_ts = pd.Timestamp(trade.entry_ts)
+    exit_ts = pd.Timestamp(trade.exit_ts)
+    ts_values = pd.to_datetime(bars["ts"], utc=True)
+    entry_pos = int(max(0, min(len(bars) - 1, ts_values.searchsorted(entry_ts))))
+    exit_pos = int(max(0, min(len(bars) - 1, ts_values.searchsorted(exit_ts))))
+    start_pos = max(0, min(entry_pos, exit_pos) - context_bars)
+    end_pos = min(len(bars) - 1, max(entry_pos, exit_pos) + context_bars)
+    window = bars.iloc[start_pos : end_pos + 1].copy().reset_index(drop=True)
+    if window.empty:
+        return ""
+
+    window_ts = pd.to_datetime(window["ts"], utc=True)
+    local_entry = int(max(0, min(len(window) - 1, window_ts.searchsorted(entry_ts))))
+    local_exit = int(max(0, min(len(window) - 1, window_ts.searchsorted(exit_ts))))
+    price_min = min(float(window["Low"].min()), float(trade.entry_price), float(trade.exit_price))
+    price_max = max(float(window["High"].max()), float(trade.entry_price), float(trade.exit_price))
+    padding = max((price_max - price_min) * 0.12, 1.0)
+    price_min -= padding
+    price_max += padding
+    price_span = max(price_max - price_min, 1.0)
+
+    def x_for_index(index: int) -> float:
+        return pad_left + index / max(len(window) - 1, 1) * plot_w
+
+    def y_for_price(price: float) -> float:
+        return pad_top + (price_max - price) / price_span * plot_h
+
+    candle_width = max(2.6, plot_w / max(len(window), 1) * 0.58)
+    candle_parts: list[str] = []
+    for index, candle in enumerate(window.itertuples(index=False)):
+        x = x_for_index(index)
+        y_high = y_for_price(float(candle.High))
+        y_low = y_for_price(float(candle.Low))
+        y_open = y_for_price(float(candle.Open))
+        y_close = y_for_price(float(candle.Close))
+        up = float(candle.Close) >= float(candle.Open)
+        color = "#2dd4bf" if up else "#fb7185"
+        candle_parts.append(
+            f'<line x1="{x:.1f}" y1="{y_high:.1f}" x2="{x:.1f}" y2="{y_low:.1f}" stroke="{color}" stroke-width="1.2" opacity="0.82" />'
+            f'<rect x="{x - candle_width / 2:.1f}" y="{min(y_open, y_close):.1f}" width="{candle_width:.1f}" height="{max(abs(y_close - y_open), 1.4):.1f}" rx="1" fill="{color}" opacity="0.82" />'
+        )
+
+    entry_x = x_for_index(local_entry)
+    exit_x = x_for_index(local_exit)
+    entry_y = y_for_price(float(trade.entry_price))
+    exit_y = y_for_price(float(trade.exit_price))
+    is_long = int(trade.direction) > 0
+    net = float(trade.net_points)
+    pnl_color = "#34d399" if net >= 0 else "#fb7185"
+    side = "LONG" if is_long else "SHORT"
+    trade_id = html.escape(str(trade.trade_id))
+    title = f"{trade_id} · #{trade_no} · {side} · {net:+.2f} pts"
+
+    grid_lines = []
+    for frac in [0.0, 0.5, 1.0]:
+        y = pad_top + frac * plot_h
+        price = price_max - frac * price_span
+        grid_lines.append(f'<line x1="{pad_left}" y1="{y:.1f}" x2="{width - pad_right}" y2="{y:.1f}" stroke="#1f3653" stroke-width="1" />')
+        grid_lines.append(f'<text x="10" y="{y + 4:.1f}" fill="#94a3b8" font-size="11">{price:,.0f}</text>')
+    for idx in [0, max(len(window) // 2, 0), max(len(window) - 1, 0)]:
+        x = x_for_index(idx)
+        label = window_ts.iloc[idx].strftime("%m-%d %H:%M")
+        grid_lines.append(f'<text x="{x - 34:.1f}" y="{height - 18}" fill="#94a3b8" font-size="11">{html.escape(label)}</text>')
+
+    return f"""
+<article class="trade-card" id="{trade_id}">
+  <div class="trade-card-head">
+    <strong>{html.escape(title)}</strong>
+    <span>Entry {html.escape(entry_ts.strftime('%Y-%m-%d %H:%M UTC'))} @ {float(trade.entry_price):,.2f} · Exit {html.escape(exit_ts.strftime('%Y-%m-%d %H:%M UTC'))} @ {float(trade.exit_price):,.2f}</span>
+  </div>
+  <svg class="trade-kline-svg" viewBox="0 0 {width} {height}" role="img" aria-label="{html.escape(title)} K-line replay">
+    <rect x="0" y="0" width="{width}" height="{height}" rx="18" fill="#07111f" />
+    {''.join(grid_lines)}
+    <g>{''.join(candle_parts)}</g>
+    <line class="trade-link" x1="{entry_x:.1f}" y1="{entry_y:.1f}" x2="{exit_x:.1f}" y2="{exit_y:.1f}" stroke="{pnl_color}" stroke-width="2.1" opacity="0.82" />
+    <circle class="trade-entry" cx="{entry_x:.1f}" cy="{entry_y:.1f}" r="5.4" fill="#38bdf8" stroke="#e0f2fe" stroke-width="1.4" />
+    <text x="{entry_x + 7:.1f}" y="{entry_y - 10:.1f}" fill="#bae6fd" font-size="12">{side} IN {float(trade.entry_price):,.2f}</text>
+    <circle class="trade-exit" cx="{exit_x:.1f}" cy="{exit_y:.1f}" r="5.8" fill="{pnl_color}" stroke="#fff7ed" stroke-width="1.3" />
+    <text x="{exit_x + 7:.1f}" y="{exit_y + 18:.1f}" fill="{pnl_color}" font-size="12">OUT {net:+.2f} pts</text>
+  </svg>
+</article>
+"""
+
+
+def _trade_kline_svg(bars: pd.DataFrame, trades: pd.DataFrame) -> str:
+    if bars.empty or trades.empty:
+        return "<p>No K-line data available.</p>"
     bars = bars.copy().reset_index(drop=True)
     for column in ["Open", "High", "Low", "Close"]:
         bars[column] = pd.to_numeric(bars[column], errors="coerce")
     bars = bars.dropna(subset=["Open", "High", "Low", "Close"]).reset_index(drop=True)
     if bars.empty:
         return "<p>No K-line data available.</p>"
-    price_min = min(float(bars["Low"].min()), float(trades[["entry_price", "exit_price"]].min().min()))
-    price_max = max(float(bars["High"].max()), float(trades[["entry_price", "exit_price"]].max().max()))
-    padding = max((price_max - price_min) * 0.06, 1.0)
-    price_min -= padding
-    price_max += padding
-    price_span = price_max - price_min
-
-    ts_values = pd.to_datetime(bars["ts"], utc=True)
-    ts_to_index = {ts.value: idx for idx, ts in enumerate(ts_values)}
-
-    def x_for_index(index: int) -> float:
-        return pad_left + index / max(len(bars) - 1, 1) * plot_w
-
-    def y_for_price(price: float) -> float:
-        return pad_top + (price_max - price) / price_span * plot_h
-
-    def index_for_ts(ts: pd.Timestamp) -> int:
-        value = ts.value
-        if value in ts_to_index:
-            return ts_to_index[value]
-        pos = ts_values.searchsorted(ts)
-        return int(max(0, min(len(bars) - 1, pos)))
-
-    max_bars_to_draw = 2600
-    step = max(1, len(bars) // max_bars_to_draw)
-    candle_parts: list[str] = []
-    candle_width = max(1.0, plot_w / max(len(bars) / step, 1) * 0.62)
-    for index in range(0, len(bars), step):
-        row = bars.iloc[index]
-        x = x_for_index(index)
-        y_high = y_for_price(float(row["High"]))
-        y_low = y_for_price(float(row["Low"]))
-        y_open = y_for_price(float(row["Open"]))
-        y_close = y_for_price(float(row["Close"]))
-        up = float(row["Close"]) >= float(row["Open"])
-        color = "#2dd4bf" if up else "#fb7185"
-        body_y = min(y_open, y_close)
-        body_h = max(abs(y_close - y_open), 1.2)
-        candle_parts.append(
-            f'<line x1="{x:.1f}" y1="{y_high:.1f}" x2="{x:.1f}" y2="{y_low:.1f}" stroke="{color}" stroke-width="1.1" opacity="0.72" />'
-            f'<rect x="{x - candle_width / 2:.1f}" y="{body_y:.1f}" width="{candle_width:.1f}" height="{body_h:.1f}" rx="1" fill="{color}" opacity="0.72" />'
-        )
-
-    trade_parts: list[str] = []
     label_rows: list[str] = []
+    chart_parts: list[str] = []
     for trade_no, row in enumerate(trades.itertuples(index=False), start=1):
         entry_ts = pd.Timestamp(row.entry_ts)
         exit_ts = pd.Timestamp(row.exit_ts)
-        entry_index = index_for_ts(entry_ts)
-        exit_index = index_for_ts(exit_ts)
-        entry_x = x_for_index(entry_index)
-        exit_x = x_for_index(exit_index)
-        entry_y = y_for_price(float(row.entry_price))
-        exit_y = y_for_price(float(row.exit_price))
         is_long = int(row.direction) > 0
         net = float(row.net_points)
-        pnl_color = "#34d399" if net >= 0 else "#fb7185"
         direction_text = "LONG" if is_long else "SHORT"
-        marker = "▲" if is_long else "▼"
-        entry_label_y = entry_y - 12 if is_long else entry_y + 18
-        exit_label_y = exit_y - 12 if net >= 0 else exit_y + 18
-        trade_parts.append(
-            f'<line class="trade-link" x1="{entry_x:.1f}" y1="{entry_y:.1f}" x2="{exit_x:.1f}" y2="{exit_y:.1f}" stroke="{pnl_color}" stroke-width="1.4" opacity="0.62" />'
-            f'<circle class="trade-entry" cx="{entry_x:.1f}" cy="{entry_y:.1f}" r="4.2" fill="#38bdf8" stroke="#e0f2fe" stroke-width="1.2" />'
-            f'<text x="{entry_x + 5:.1f}" y="{entry_label_y:.1f}" fill="#bae6fd" font-size="10">#{trade_no} {direction_text} IN {float(row.entry_price):,.2f}</text>'
-            f'<circle class="trade-exit" cx="{exit_x:.1f}" cy="{exit_y:.1f}" r="4.5" fill="{pnl_color}" stroke="#fff7ed" stroke-width="1.1" />'
-            f'<text x="{exit_x + 5:.1f}" y="{exit_label_y:.1f}" fill="{pnl_color}" font-size="10">{marker} OUT {net:+.2f} pts</text>'
-        )
+        chart_parts.append(_single_trade_kline_svg(bars, row, trade_no))
         label_rows.append(
-            f"<tr><td>{trade_no}</td><td>{html.escape(entry_ts.strftime('%m-%d %H:%M'))}</td><td>{direction_text}</td><td>{float(row.entry_price):,.2f}</td><td>{html.escape(exit_ts.strftime('%m-%d %H:%M'))}</td><td>{float(row.exit_price):,.2f}</td><td class=\"{'gain' if net >= 0 else 'loss'}\">{net:+.2f}</td></tr>"
+            f"<tr><td><a href=\"#{html.escape(str(row.trade_id))}\">{html.escape(str(row.trade_id))}</a></td><td>{trade_no}</td><td>{html.escape(entry_ts.strftime('%m-%d %H:%M'))}</td><td>{direction_text}</td><td>{float(row.entry_price):,.2f}</td><td>{html.escape(exit_ts.strftime('%m-%d %H:%M'))}</td><td>{float(row.exit_price):,.2f}</td><td class=\"{'gain' if net >= 0 else 'loss'}\">{net:+.2f}</td></tr>"
         )
-
-    grid_lines = []
-    for frac in [0.0, 0.25, 0.5, 0.75, 1.0]:
-        y = pad_top + frac * plot_h
-        price = price_max - frac * price_span
-        grid_lines.append(f'<line x1="{pad_left}" y1="{y:.1f}" x2="{width - pad_right}" y2="{y:.1f}" stroke="#1f3653" stroke-width="1" />')
-        grid_lines.append(f'<text x="12" y="{y + 4:.1f}" fill="#94a3b8" font-size="12">{price:,.0f}</text>')
-    for frac in [0.0, 0.25, 0.5, 0.75, 1.0]:
-        x = pad_left + frac * plot_w
-        idx = int(frac * (len(bars) - 1))
-        label = ts_values.iloc[idx].strftime("%m-%d")
-        grid_lines.append(f'<line x1="{x:.1f}" y1="{pad_top}" x2="{x:.1f}" y2="{height - pad_bottom}" stroke="#132842" stroke-width="1" />')
-        grid_lines.append(f'<text x="{x - 18:.1f}" y="{height - 34}" fill="#94a3b8" font-size="12">{label}</text>')
 
     return f"""
 <div class="kline-wrap">
-  <svg class="kline-svg" viewBox="0 0 {width} {height}" role="img" aria-label="NQ 1-minute K-line chart with trade entry and exit markers">
-    <rect x="0" y="0" width="{width}" height="{height}" rx="20" fill="#07111f" />
-    {''.join(grid_lines)}
-    <g class="candles">{''.join(candle_parts)}</g>
-    <g class="trade-markers">{''.join(trade_parts)}</g>
-    <text x="{pad_left}" y="22" fill="#e5edf8" font-size="15" font-weight="700">NQ 1m K-line with all {len(trades)} trades: blue = entry, green/red = exit PnL, line = entry-to-exit path</text>
-  </svg>
+  <div class="trade-card-grid">{''.join(chart_parts)}</div>
   <details>
-    <summary>Marker index table</summary>
-    <div class="table-wrap mini"><table><thead><tr><th>#</th><th>Entry</th><th>Side</th><th>Entry Px</th><th>Exit</th><th>Exit Px</th><th>PnL pts</th></tr></thead><tbody>{''.join(label_rows)}</tbody></table></div>
+    <summary>Trade replay index</summary>
+    <div class="table-wrap mini"><table><thead><tr><th>trade_id</th><th>#</th><th>Entry</th><th>Side</th><th>Entry Px</th><th>Exit</th><th>Exit Px</th><th>PnL pts</th></tr></thead><tbody>{''.join(label_rows)}</tbody></table></div>
   </details>
 </div>
 """
@@ -278,7 +314,7 @@ def _write_report(
 ) -> None:
     strategy = _select_strategy(ranking, strategy_name)
     selected_strategy = str(strategy["strategy"])
-    trades = trades.copy()
+    trades = _ensure_trade_ids(trades, selected_strategy)
     trades["entry_ts"] = pd.to_datetime(trades["entry_ts"], utc=True)
     trades["exit_ts"] = pd.to_datetime(trades["exit_ts"], utc=True)
     trades["entry_date"] = trades["entry_ts"].dt.date.astype(str)
@@ -315,6 +351,7 @@ def _write_report(
     trade_display["entry_ts"] = trade_display["entry_ts"].dt.strftime("%Y-%m-%d %H:%M UTC")
     trade_display["exit_ts"] = trade_display["exit_ts"].dt.strftime("%Y-%m-%d %H:%M UTC")
     trade_columns = [
+        "trade_id",
         "entry_ts",
         "exit_ts",
         "signal_family",
@@ -372,7 +409,11 @@ def _write_report(
     tr:nth-child(even) td {{ background:rgba(255,255,255,.018); }}
     .note {{ color:var(--muted); line-height:1.6; }}
     .kline-wrap {{ overflow-x:auto; }}
-    .kline-svg {{ min-width:1180px; width:100%; height:auto; border:1px solid var(--line); border-radius:22px; background:#07111f; }}
+    .trade-card-grid {{ display:grid; gap:16px; }}
+    .trade-card {{ border:1px solid var(--line); border-radius:20px; padding:14px; background:rgba(5,12,24,.45); }}
+    .trade-card-head {{ display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:10px; color:#dbeafe; }}
+    .trade-card-head span {{ color:var(--muted); font-size:12px; text-align:right; }}
+    .trade-kline-svg {{ min-width:920px; width:100%; height:auto; border:1px solid var(--line); border-radius:18px; background:#07111f; }}
     details {{ margin-top:12px; color:var(--muted); }}
     summary {{ cursor:pointer; color:#cbd5e1; font-weight:700; }}
     .mini table {{ min-width:900px; }}

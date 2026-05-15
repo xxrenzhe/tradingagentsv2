@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import itertools
 import sys
 from dataclasses import dataclass, replace
@@ -509,8 +510,23 @@ def backtest_combo_fast(features: pd.DataFrame, spec: ComboSpec, config: Boundar
 
         gross_points = (exit_price - entry_price) * direction
         net_points = gross_points - costs.round_trip_cost_points
+        trade_key = "|".join(
+            [
+                spec.name,
+                str(timestamps[entry_index]),
+                str(timestamps[exit_index]),
+                family,
+                str(direction),
+                f"{entry_price:.2f}",
+                f"{exit_price:.2f}",
+                str(entry_index),
+                str(exit_index),
+            ]
+        )
+        trade_id = f"TRD-{hashlib.sha1(trade_key.encode('utf-8')).hexdigest()[:12].upper()}"
         rows.append(
             {
+                "trade_id": trade_id,
                 "signal_ts": timestamps[index],
                 "entry_ts": timestamps[entry_index],
                 "exit_ts": timestamps[exit_index],

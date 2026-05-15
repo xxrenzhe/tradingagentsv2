@@ -79,10 +79,15 @@ def test_best_candidate_html_report_contains_core_sections(tmp_path: Path) -> No
     assert "Performance Snapshot" in html
     assert "Equity Curve By Trade" in html
     assert "K-line Trade Replay" in html
+    assert "trade_id" in html
+    assert "TRD-" in html
+    assert "trade-card" in html
+    assert "trade-card-grid" in html
     assert "trade-entry" in html
     assert "trade-exit" in html
     assert "LONG IN" in html
     assert "OUT +6.50 pts" in html
+    assert "NQ 1m K-line with all" not in html
     assert "Breakdown By Signal Family" in html
     assert "Trade Log" in html
 
