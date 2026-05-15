@@ -207,3 +207,35 @@ def test_build_combo_specs_includes_smc_filtered_families() -> None:
     assert MODULE.FAMILY_TARGET_BASE["smc_bos_fvg_short"] == "trend_transition_short"
     assert "smc_trend_transition_long" in smc.families
     assert "smc_trend_transition_short" in smc.families
+
+
+def test_build_combo_specs_includes_structure_rr_entry_modes() -> None:
+    args = type(
+        "Args",
+        (),
+        {
+            "macd_timeframes": [1],
+            "macd_filters": ["cross_recent_5"],
+            "stop_atr_buffers": [1.25],
+            "target_rs": [2.5],
+            "max_hold_bars_grid": [30],
+            "risk_control_modes": [False],
+        },
+    )()
+
+    specs = MODULE.build_combo_specs(args)
+    spec_by_name = {spec.name: spec for spec in specs}
+    structure = spec_by_name["structure_rr_selective_strict_macd1_cross_recent_5_stop1.25_r2.5_h30_rr2_wait8_norisk"]
+
+    assert structure.entry_mode == "structure_rr"
+    assert structure.min_structure_rr == 2.0
+    assert structure.entry_wait_bars == 8
+    assert "trend_pullback_short_asia_europe" in structure.families
+    assert "trend_transition_short_asia" in structure.families
+
+    filtered = spec_by_name["structure_filter_selective_strict_macd1_cross_recent_5_stop1.25_r2.5_h30_rr1.5_norisk"]
+    assert filtered.entry_mode == "structure_filter"
+    assert filtered.min_structure_rr == 1.5
+    assert filtered.entry_wait_bars == 0
+    assert "trend_pullback_short_asia_europe" in filtered.families
+    assert "trend_transition_short_asia" in filtered.families

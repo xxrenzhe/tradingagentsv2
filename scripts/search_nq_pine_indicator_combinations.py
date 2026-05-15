@@ -124,6 +124,9 @@ class ComboSpec:
     target_r: float
     max_hold_bars: int
     use_risk_controls: bool
+    entry_mode: str = "next_open"
+    min_structure_rr: float = 0.0
+    entry_wait_bars: int = 0
 
 
 def latest_databento_window(csv_path: Path = LATEST_CSV, *, days: int = 31) -> tuple[str, str, pd.Timestamp]:
@@ -518,6 +521,104 @@ def materialize_combo_frame(features: pd.DataFrame, spec: ComboSpec) -> pd.DataF
     return output
 
 
+def _structure_entry_plan(
+    features: pd.DataFrame,
+    *,
+    signal_index: int,
+    direction: int,
+    active_atr: float,
+    min_structure_rr: float,
+    wait_bars: int,
+) -> dict[str, Any] | None:
+    if wait_bars <= 0:
+        return None
+    lookback = 20
+    start = max(0, signal_index - lookback + 1)
+    structure_low = float(features["Low"].iloc[start : signal_index + 1].min())
+    structure_high = float(features["High"].iloc[start : signal_index + 1].max())
+    if not np.isfinite(structure_low) or not np.isfinite(structure_high) or structure_high <= structure_low:
+        return None
+    width = structure_high - structure_low
+    buffer = max(active_atr * 0.15, 0.25)
+    if direction > 0:
+        limit_price = structure_low + width * 0.38
+        structure_stop = structure_low - buffer
+        structure_target = structure_high + width * 0.50
+        risk = limit_price - structure_stop
+        reward = structure_target - limit_price
+    else:
+        limit_price = structure_high - width * 0.38
+        structure_stop = structure_high + buffer
+        structure_target = structure_low - width * 0.50
+        risk = structure_stop - limit_price
+        reward = limit_price - structure_target
+    if risk <= 0 or reward <= 0:
+        return None
+    structure_rr = reward / risk
+    if structure_rr < min_structure_rr:
+        return None
+    for entry_index in range(signal_index + 1, min(len(features), signal_index + wait_bars + 1)):
+        if direction > 0:
+            if float(features["Low"].iat[entry_index]) <= limit_price:
+                return {
+                    "entry_index": entry_index,
+                    "entry_price": float(limit_price),
+                    "structure_stop": float(structure_stop),
+                    "structure_target": float(structure_target),
+                    "structure_rr": float(structure_rr),
+                }
+        elif float(features["High"].iat[entry_index]) >= limit_price:
+            return {
+                "entry_index": entry_index,
+                "entry_price": float(limit_price),
+                "structure_stop": float(structure_stop),
+                "structure_target": float(structure_target),
+                "structure_rr": float(structure_rr),
+            }
+    return None
+
+
+def _structure_filter_plan(
+    features: pd.DataFrame,
+    *,
+    signal_index: int,
+    direction: int,
+    entry_price: float,
+    active_atr: float,
+    min_structure_rr: float,
+) -> dict[str, Any] | None:
+    lookback = 20
+    start = max(0, signal_index - lookback + 1)
+    structure_low = float(features["Low"].iloc[start : signal_index + 1].min())
+    structure_high = float(features["High"].iloc[start : signal_index + 1].max())
+    if not np.isfinite(structure_low) or not np.isfinite(structure_high) or structure_high <= structure_low:
+        return None
+    width = structure_high - structure_low
+    buffer = max(active_atr * 0.15, 0.25)
+    if direction > 0:
+        structure_stop = structure_low - buffer
+        structure_target = structure_high + width * 0.50
+        risk = entry_price - structure_stop
+        reward = structure_target - entry_price
+    else:
+        structure_stop = structure_high + buffer
+        structure_target = structure_low - width * 0.50
+        risk = structure_stop - entry_price
+        reward = entry_price - structure_target
+    if risk <= 0 or reward <= 0:
+        return None
+    structure_rr = reward / risk
+    if structure_rr < min_structure_rr:
+        return None
+    return {
+        "entry_index": signal_index + 1,
+        "entry_price": float(entry_price),
+        "structure_stop": float(structure_stop),
+        "structure_target": float(structure_target),
+        "structure_rr": float(structure_rr),
+    }
+
+
 def backtest_combo_fast(features: pd.DataFrame, spec: ComboSpec, config: BoundaryLightglowConfig, costs: BacktestCosts) -> pd.DataFrame:
     family_array = np.full(len(features), "", dtype=object)
     direction_array = np.zeros(len(features), dtype=np.int8)
@@ -555,6 +656,37 @@ def backtest_combo_fast(features: pd.DataFrame, spec: ComboSpec, config: Boundar
         target_family = FAMILY_TARGET_BASE.get(family, family)
         direction = int(direction_array[index])
         entry_index = int(index) + 1
+        if entry_index >= len(features):
+            continue
+        active_atr = float(atr[index]) if np.isfinite(atr[index]) and atr[index] > 0 else float(atr[entry_index])
+        if not np.isfinite(active_atr) or active_atr <= 0:
+            continue
+        structure_plan: dict[str, Any] | None = None
+        if spec.entry_mode == "structure_rr":
+            structure_plan = _structure_entry_plan(
+                features,
+                signal_index=index,
+                direction=direction,
+                active_atr=active_atr,
+                min_structure_rr=spec.min_structure_rr,
+                wait_bars=spec.entry_wait_bars,
+            )
+            if structure_plan is None:
+                continue
+            entry_index = int(structure_plan["entry_index"])
+        elif spec.entry_mode == "structure_filter":
+            structure_plan = _structure_filter_plan(
+                features,
+                signal_index=index,
+                direction=direction,
+                entry_price=float(open_prices[entry_index]),
+                active_atr=active_atr,
+                min_structure_rr=spec.min_structure_rr,
+            )
+            if structure_plan is None:
+                continue
+        elif spec.entry_mode != "next_open":
+            raise ValueError(f"unknown entry mode: {spec.entry_mode}")
         if entry_index <= last_exit_index + config.cooldown_bars or entry_index <= pause_until or entry_index >= len(features):
             continue
         if symbols[entry_index] != symbols[index]:
@@ -564,22 +696,27 @@ def backtest_combo_fast(features: pd.DataFrame, spec: ComboSpec, config: Boundar
         if spec.use_risk_controls and (state["trades"] >= config.max_trades_per_day or state["net"] <= -config.daily_stop_points):
             continue
 
-        entry_price = float(open_prices[entry_index])
-        active_atr = float(atr[index]) if np.isfinite(atr[index]) and atr[index] > 0 else float(atr[entry_index])
-        if not np.isfinite(active_atr) or active_atr <= 0:
-            continue
+        entry_price = float(open_prices[entry_index]) if structure_plan is None else float(structure_plan["entry_price"])
         range_high = float(range_high_values[index])
         range_low = float(range_low_values[index])
         signal_high = float(high_prices[index])
         signal_low = float(low_prices[index])
-        if direction > 0:
+        if structure_plan is not None:
+            structure_stop = float(structure_plan["structure_stop"])
+        elif direction > 0:
             structure_stop = range_high - active_atr * config.stop_atr_buffer if target_family == "top_breakout_long" and np.isfinite(range_high) else signal_low - active_atr * config.stop_atr_buffer
         else:
             structure_stop = range_low + active_atr * config.stop_atr_buffer if target_family == "bottom_breakdown_short" and np.isfinite(range_low) else signal_high + active_atr * config.stop_atr_buffer
         raw_risk = abs(entry_price - structure_stop)
-        risk_points = max(raw_risk, active_atr * config.min_risk_atr, 0.25)
+        risk_points = max(raw_risk, 0.25) if structure_plan is not None else max(raw_risk, active_atr * config.min_risk_atr, 0.25)
         initial_stop = entry_price - direction * risk_points
-        target, target_plan = _structure_target(target_family, direction, entry_price, risk_points, range_high, range_low, config)
+        if structure_plan is None:
+            target, target_plan = _structure_target(target_family, direction, entry_price, risk_points, range_high, range_low, config)
+            structure_rr = np.nan
+        else:
+            target = float(structure_plan["structure_target"])
+            target_plan = "structure_rr_pullback"
+            structure_rr = float(structure_plan["structure_rr"])
 
         best = float(high_prices[entry_index]) if direction > 0 else float(low_prices[entry_index])
         protective_stop = initial_stop
@@ -663,6 +800,8 @@ def backtest_combo_fast(features: pd.DataFrame, spec: ComboSpec, config: Boundar
                 "initial_stop": float(initial_stop),
                 "target": float(target),
                 "target_plan": target_plan,
+                "entry_mode": spec.entry_mode,
+                "structure_rr": float(structure_rr) if np.isfinite(structure_rr) else np.nan,
                 "exit_reason": exit_reason,
                 "bars_held": int(exit_index - entry_index),
                 "gross_points": float(gross_points),
@@ -788,6 +927,36 @@ def build_combo_specs(args: argparse.Namespace) -> list[ComboSpec]:
         ),
         ("all_lightglow", ALL_LIGHTGLOW_BASE_FAMILIES),
     ]
+    structure_family_groups: list[tuple[str, tuple[str, ...]]] = [
+        ("structure_rr_long_bias", ("top_breakout_long", "trend_ignition_long", "trend_pullback_long", "trend_transition_long", "reversal_impulse_long")),
+        (
+            "structure_rr_selective_strict",
+            (
+                "top_breakout_long",
+                "trend_ignition_long",
+                "trend_pullback_long",
+                "trend_transition_long",
+                "reversal_impulse_long",
+                "trend_pullback_short_asia_europe",
+                "trend_transition_short_asia",
+            ),
+        ),
+    ]
+    structure_filter_family_groups = [
+        ("structure_filter_long_bias", ("top_breakout_long", "trend_ignition_long", "trend_pullback_long", "trend_transition_long", "reversal_impulse_long")),
+        (
+            "structure_filter_selective_strict",
+            (
+                "top_breakout_long",
+                "trend_ignition_long",
+                "trend_pullback_long",
+                "trend_transition_long",
+                "reversal_impulse_long",
+                "trend_pullback_short_asia_europe",
+                "trend_transition_short_asia",
+            ),
+        ),
+    ]
     specs: list[ComboSpec] = []
     for group_name, families in family_groups:
         for timeframe, macd_filter, stop_atr_buffer, target_r, max_hold_bars, use_risk_controls in itertools.product(
@@ -813,6 +982,68 @@ def build_combo_specs(args: argparse.Namespace) -> list[ComboSpec]:
                     target_r=float(target_r),
                     max_hold_bars=int(max_hold_bars),
                     use_risk_controls=bool(use_risk_controls),
+                )
+            )
+    for group_name, families in structure_family_groups:
+        for timeframe, macd_filter, stop_atr_buffer, target_r, max_hold_bars, use_risk_controls, min_structure_rr in itertools.product(
+            args.macd_timeframes,
+            args.macd_filters,
+            args.stop_atr_buffers,
+            args.target_rs,
+            args.max_hold_bars_grid,
+            args.risk_control_modes,
+            [2.0, 2.5],
+        ):
+            name = (
+                f"{group_name}_macd{timeframe}_{macd_filter}"
+                f"_stop{stop_atr_buffer:g}_r{target_r:g}_h{max_hold_bars}"
+                f"_rr{min_structure_rr:g}_wait8"
+                f"_{'risk' if use_risk_controls else 'norisk'}"
+            )
+            specs.append(
+                ComboSpec(
+                    name=name,
+                    families=families,
+                    macd_filter=macd_filter,
+                    macd_timeframe=timeframe,
+                    stop_atr_buffer=float(stop_atr_buffer),
+                    target_r=float(target_r),
+                    max_hold_bars=int(max_hold_bars),
+                    use_risk_controls=bool(use_risk_controls),
+                    entry_mode="structure_rr",
+                    min_structure_rr=float(min_structure_rr),
+                    entry_wait_bars=8,
+                )
+            )
+    for group_name, families in structure_filter_family_groups:
+        for timeframe, macd_filter, stop_atr_buffer, target_r, max_hold_bars, use_risk_controls, min_structure_rr in itertools.product(
+            args.macd_timeframes,
+            args.macd_filters,
+            args.stop_atr_buffers,
+            args.target_rs,
+            args.max_hold_bars_grid,
+            args.risk_control_modes,
+            [1.5, 2.0, 2.5],
+        ):
+            name = (
+                f"{group_name}_macd{timeframe}_{macd_filter}"
+                f"_stop{stop_atr_buffer:g}_r{target_r:g}_h{max_hold_bars}"
+                f"_rr{min_structure_rr:g}"
+                f"_{'risk' if use_risk_controls else 'norisk'}"
+            )
+            specs.append(
+                ComboSpec(
+                    name=name,
+                    families=families,
+                    macd_filter=macd_filter,
+                    macd_timeframe=timeframe,
+                    stop_atr_buffer=float(stop_atr_buffer),
+                    target_r=float(target_r),
+                    max_hold_bars=int(max_hold_bars),
+                    use_risk_controls=bool(use_risk_controls),
+                    entry_mode="structure_filter",
+                    min_structure_rr=float(min_structure_rr),
+                    entry_wait_bars=0,
                 )
             )
     return specs
@@ -883,6 +1114,9 @@ def evaluate_combinations(features: pd.DataFrame, specs: list[ComboSpec], costs:
                 "target_r": spec.target_r,
                 "max_hold_bars": spec.max_hold_bars,
                 "use_risk_controls": spec.use_risk_controls,
+                "entry_mode": spec.entry_mode,
+                "min_structure_rr": spec.min_structure_rr,
+                "entry_wait_bars": spec.entry_wait_bars,
                 "score": score,
                 **summary,
             }
@@ -964,6 +1198,7 @@ def write_markdown_report(
     screenshot_rows = results[results["strategy"].astype(str).str.contains("fast_boundary_reversal|screenshot_reversal", regex=True)].head(10)
     phase_rows = results[results["strategy"].astype(str).str.contains("phase_", regex=False)].head(10)
     selective_rows = results[results["strategy"].astype(str).str.contains("selective_bidirectional", regex=False)].head(10)
+    structure_rows = results[results["strategy"].astype(str).str.contains("structure_rr", regex=False)].head(10)
     smc_rows = results[results["strategy"].astype(str).str.contains("smc_", regex=False)].head(10)
     sixty_min_rows = results[results["macd_timeframe"].eq(60)].head(10)
     lines.extend(
@@ -986,6 +1221,12 @@ def write_markdown_report(
             "These rows keep the long-biased best-candidate family set and add only high-quality short continuation/transition/breakdown structures, avoiding broad top-picking shorts.",
             "",
             markdown_table(selective_rows, columns),
+            "",
+            "## Structure Risk-Reward Pullback Candidates",
+            "",
+            "These rows keep the directional signal fixed, then wait for a pullback into the favorable side of the recent structure and require a minimum historical structure R/R before entering.",
+            "",
+            markdown_table(structure_rows, columns),
             "",
             "## Lightglow SMC-Filtered Candidates",
             "",
