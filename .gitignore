@@ -56,6 +56,9 @@ cover/
 .playwright-mcp/
 .tmp/
 
+# Generated reports
+reports/
+
 # OS metadata
 .DS_Store
 
