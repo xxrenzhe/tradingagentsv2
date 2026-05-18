@@ -27,11 +27,11 @@ def test_project_env_can_preserve_existing_values(tmp_path, monkeypatch):
     assert os.environ["TRADINGAGENTS_IBKR_ACCOUNT"] == "DU005"
 
 
-def test_project_ibkr_paper_account_is_du007(monkeypatch):
+def test_project_ibkr_paper_account_is_du003(monkeypatch):
     monkeypatch.delenv("TRADINGAGENTS_IBKR_ACCOUNT", raising=False)
     monkeypatch.delenv("TRADINGAGENTS_IBKR_ALLOWED_ACCOUNTS", raising=False)
 
     load_project_env(Path(__file__).resolve())
 
-    assert IBKRConnectionConfig.from_env().account == "DU007"
-    assert IBKRPaperRiskConfig.from_env().allowed_accounts == ("DU007",)
+    assert IBKRConnectionConfig.from_env().account == "DU003"
+    assert IBKRPaperRiskConfig.from_env().allowed_accounts == ("DU003",)
