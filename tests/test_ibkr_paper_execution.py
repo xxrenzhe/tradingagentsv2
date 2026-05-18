@@ -568,6 +568,10 @@ def test_paper_session_blocks_connect_failure(tmp_path, monkeypatch):
     assert response["readiness"]["status"] == "blocked"
     assert response["connection"]["status"] == "connect_failed"
     assert "not_connected" in response["readiness"]["missing_requirements"]
+    assert response["readiness"]["diagnostics"] == [
+        "ibkr_api_handshake_failed: socket is listening but the IBKR API session did not complete; "
+        "restart TWS/IB Gateway, verify API settings, and use an unused client id"
+    ]
 
 
 def test_paper_session_blocks_wide_spread(tmp_path, monkeypatch):

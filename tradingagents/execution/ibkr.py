@@ -1130,6 +1130,7 @@ class IBKRPaperTradingSession:
             account,
             contract_details,
             market_snapshot if connection.get("connected") and include_market_data else None,
+            socket_ready=socket_ready,
         )
         event = {
             "event_type": "ibkr_paper_preflight",
@@ -1195,16 +1196,29 @@ class IBKRPaperTradingSession:
         account: dict[str, Any],
         contract_details: dict[str, Any],
         market_snapshot: dict[str, Any] | None,
+        *,
+        socket_ready: bool = False,
     ) -> dict[str, Any]:
         missing = []
+        diagnostics = []
         if not connection.get("connected"):
             missing.append("not_connected")
+            if socket_ready and connection.get("status") == "connect_failed":
+                diagnostics.append(
+                    "ibkr_api_handshake_failed: socket is listening but the IBKR API session did not complete; "
+                    "restart TWS/IB Gateway, verify API settings, and use an unused client id"
+                )
+            elif connection.get("reason") == "socket_not_listening":
+                diagnostics.append("ibkr_socket_not_listening: start paper TWS/IB Gateway on the configured host/port")
         if connection.get("reason") == "configured_account_not_managed":
             missing.append("configured_account_not_managed")
+            diagnostics.append("configured_account_not_managed: confirm the configured paper account is visible to this API session")
         if account and not account.get("paper"):
             missing.append("paper_account_not_verified")
+            diagnostics.append("paper_account_not_verified: account summary did not confirm a DU/paper account")
         if account and self.broker.risk.allowed_accounts and (account.get("account") not in self.broker.risk.allowed_accounts):
             missing.append("account_not_allowed")
+            diagnostics.append("account_not_allowed: configured account is not in TRADINGAGENTS_IBKR_ALLOWED_ACCOUNTS")
         for key in ["symbol", "exchange", "currency"]:
             if contract_details and str(contract_details.get(key)) != str(getattr(self.contract, key)):
                 missing.append(f"contract_{key}_mismatch")
@@ -1227,6 +1241,7 @@ class IBKRPaperTradingSession:
         return {
             "status": "ready" if not missing else "blocked",
             "missing_requirements": missing,
+            "diagnostics": diagnostics,
             "checked_at": _now(),
         }
 

@@ -17,6 +17,10 @@ from tradingagents.config.env import load_project_env
 from tradingagents.execution import PaperValidationGateConfig, summarize_paper_audits
 
 
+def _ibkr_account_present() -> bool:
+    return bool(os.getenv("TRADINGAGENTS_IBKR_ACCOUNT") or os.getenv("IBKR_ACCOUNT"))
+
+
 def _feature_span(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"path": str(path), "exists": False, "rows": 0, "start": None, "end": None, "calendar_days": 0}
@@ -192,7 +196,7 @@ def audit_best_strategy(args: argparse.Namespace) -> dict[str, Any]:
         live_blockers.append("databento_api_key_missing")
     current_ibkr_ready = int(paper.get("ibkr_current_ready", paper.get("ibkr_ready", 0)) or 0)
     current_ibkr_account_paper = bool(paper.get("ibkr_current_account_paper"))
-    if not os.getenv("IBKR_ACCOUNT") and current_ibkr_ready < args.min_ibkr_ready and not current_ibkr_account_paper:
+    if not _ibkr_account_present() and current_ibkr_ready < args.min_ibkr_ready and not current_ibkr_account_paper:
         live_blockers.append("ibkr_account_missing")
     paper_gate = paper["validation_gate"]
     if paper_gate["status"] != "pass":

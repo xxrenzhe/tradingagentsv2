@@ -135,11 +135,11 @@ from tradingagents.execution import IBKROrderIntent, IBKRPaperBroker
 intent = IBKROrderIntent(
     action="BUY",
     quantity=1,
-    symbol="NQ",
+    symbol="MNQ",
     last_trade_date_or_contract_month="202606",
     stop_loss_price=18000.0,
     take_profit_price=18100.0,
-    account="DU123456",
+    account="DU007",
     strategy_id="adaptive_mbp_portfolio",
 )
 

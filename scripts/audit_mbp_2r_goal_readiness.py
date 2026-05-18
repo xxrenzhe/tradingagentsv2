@@ -17,6 +17,10 @@ from tradingagents.config.env import load_project_env
 from tradingagents.execution import PaperValidationGateConfig, summarize_paper_audits
 
 
+def _ibkr_account_present() -> bool:
+    return bool(os.getenv("TRADINGAGENTS_IBKR_ACCOUNT") or os.getenv("IBKR_ACCOUNT"))
+
+
 def _csv_summary(path: Path, pass_column: str) -> dict[str, Any]:
     if not path.exists():
         return {"path": str(path), "exists": False, "rows": 0, "passes": 0}
@@ -95,7 +99,8 @@ def audit_goal(args: argparse.Namespace) -> dict[str, Any]:
         blockers.append(f"history_span_below_min:{data_span['calendar_days']}<{args.min_history_days}")
     if not os.getenv("DATABENTO_API_KEY"):
         blockers.append("databento_api_key_missing")
-    if not os.getenv("IBKR_ACCOUNT"):
+    ibkr_account_present = _ibkr_account_present()
+    if not ibkr_account_present:
         blockers.append("ibkr_account_missing")
     paper_gate = paper["validation_gate"]
     if paper_gate["status"] != "pass":
@@ -127,10 +132,10 @@ def audit_goal(args: argparse.Namespace) -> dict[str, Any]:
             "requirement": "direct live/paper readiness",
             "evidence": {
                 "databento_api_key_present": bool(os.getenv("DATABENTO_API_KEY")),
-                "ibkr_account_present": bool(os.getenv("IBKR_ACCOUNT")),
+                "ibkr_account_present": ibkr_account_present,
                 "paper_gate": paper_gate,
             },
-            "status": "pass" if paper_gate["status"] == "pass" and os.getenv("IBKR_ACCOUNT") else "blocked",
+            "status": "pass" if paper_gate["status"] == "pass" and ibkr_account_present else "blocked",
         },
     ]
     return {

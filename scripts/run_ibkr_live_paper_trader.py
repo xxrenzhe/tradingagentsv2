@@ -11,6 +11,8 @@ if str(ROOT_DIR) not in sys.path:
 
 from tradingagents.config.env import load_project_env
 from tradingagents.execution import (
+    BA_NO_TRADE_COMBO_ALIAS,
+    BA_NO_TRADE_COMBO_STRATEGY_ID,
     BEST_MEAN_REVERSION_ALIAS,
     BEST_MEAN_REVERSION_STRATEGY_ID,
     IBKRConnectionConfig,
@@ -22,6 +24,7 @@ from tradingagents.execution import (
     PaperValidationGateConfig,
     LiveStrategySpec,
     LiveStrategySignalConfig,
+    ba_no_trade_combo_spec,
     run_live_paper_trader_daemon,
     run_live_paper_trader_once,
     regime_transition_spec,
@@ -38,7 +41,11 @@ def main() -> int:
     parser.add_argument("--state-path", default=".tmp/mbp-live-paper-trader-state.json")
     parser.add_argument("--strategy-id", default=DEFAULT_STRATEGY_ID)
     parser.add_argument("--selected-alias", default=DEFAULT_SELECTED_ALIAS)
-    parser.add_argument("--strategy-family", choices=["mean_reversion", "mtf_setup", "regime_transition"], default="mean_reversion")
+    parser.add_argument(
+        "--strategy-family",
+        choices=["mean_reversion", "mtf_setup", "regime_transition", "ba_no_trade_combo"],
+        default="mean_reversion",
+    )
     parser.add_argument("--imbalance-threshold", type=float, default=None)
     parser.add_argument("--signal-mode", choices=["strategy", "manual"], default="strategy")
     parser.add_argument("--direction", choices=["buy", "sell", "BUY", "SELL"], default=None)
@@ -87,7 +94,12 @@ def main() -> int:
     parser.add_argument("--daemon", action="store_true")
     parser.add_argument("--interval-seconds", type=float, default=30.0)
     parser.add_argument("--max-iterations", type=int, default=1, help="Use 0 to run until stopped.")
+    parser.add_argument("--status-path", default=".tmp/mbp-live-paper-trader-status.json")
+    parser.add_argument("--preflight-attempts", type=int, default=3)
+    parser.add_argument("--preflight-retry-seconds", type=float, default=1.0)
+    parser.add_argument("--skip-startup-preflight-gate", action="store_true")
     args = parser.parse_args()
+    base_connection = IBKRConnectionConfig.from_env()
 
     if args.signal_mode == "manual" and args.direction is None:
         raise SystemExit("--direction is required when --signal-mode manual")
@@ -97,9 +109,14 @@ def main() -> int:
     if args.strategy_family == "mtf_setup" and strategy_id == DEFAULT_STRATEGY_ID and selected_alias == DEFAULT_SELECTED_ALIAS:
         strategy_id = "mtf_setup"
         selected_alias = "mtf_setup"
+    if args.strategy_family == "ba_no_trade_combo" and strategy_id == DEFAULT_STRATEGY_ID and selected_alias == DEFAULT_SELECTED_ALIAS:
+        strategy_id = BA_NO_TRADE_COMBO_STRATEGY_ID
+        selected_alias = BA_NO_TRADE_COMBO_ALIAS
     strategy_spec = (
         regime_transition_spec(strategy_id, selected_alias)
         if args.strategy_family == "regime_transition"
+        else ba_no_trade_combo_spec(strategy_id, selected_alias)
+        if args.strategy_family == "ba_no_trade_combo"
         else LiveStrategySpec(
             strategy_id=strategy_id,
             selected_alias=selected_alias,
@@ -128,7 +145,7 @@ def main() -> int:
             last_trade_date_or_contract_month=args.contract_month,
             expected_point_value=2.0 if args.symbol.upper() == "MNQ" else 20.0,
         ),
-        account=args.account,
+        account=args.account or base_connection.account,
         quantity=args.quantity,
         stop_loss_points=args.stop_loss_points,
         take_profit_points=args.take_profit_points,
@@ -167,15 +184,14 @@ def main() -> int:
     )
     broker = None
     if args.client_id is not None:
-        connection = IBKRConnectionConfig.from_env()
         broker = IBKRPaperBroker(
             connection=IBKRConnectionConfig(
-                host=connection.host,
-                port=connection.port,
+                host=base_connection.host,
+                port=base_connection.port,
                 client_id=args.client_id,
-                account=connection.account,
-                timeout=connection.timeout,
-                readonly=connection.readonly,
+                account=base_connection.account,
+                timeout=base_connection.timeout,
+                readonly=base_connection.readonly,
             )
         )
     if args.daemon:
@@ -184,6 +200,10 @@ def main() -> int:
                 trader=config,
                 interval_seconds=args.interval_seconds,
                 max_iterations=None if args.max_iterations == 0 else args.max_iterations,
+                preflight_attempts=args.preflight_attempts,
+                preflight_retry_seconds=args.preflight_retry_seconds,
+                require_preflight_ready=not args.skip_startup_preflight_gate,
+                status_path=Path(args.status_path),
             ),
             broker=broker,
         )
