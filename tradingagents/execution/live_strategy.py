@@ -21,6 +21,8 @@ from .live_signal import LiveSignalConfig, build_live_signal_row
 
 BEST_MEAN_REVERSION_STRATEGY_ID = "adv_wf_best_mean_reversion_lb6_thr0.8_min1_max6_reverse_europe_all_imb0.3"
 BEST_MEAN_REVERSION_ALIAS = "best_strategy"
+BA_NO_TRADE_COMBO_STRATEGY_ID = "mnq_ba_no_trade_best_combo"
+BA_NO_TRADE_COMBO_ALIAS = "ba_no_trade_best_combo"
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,22 @@ class LiveStrategySpec:
     min_buffer_points: float = 0.25
     min_stop_points: float = 4.0
     max_stop_points: float = 80.0
+    ba_range_length: int = 90
+    ba_momentum_lookback: int = 30
+    ba_accept_bars: int = 3
+    ba_accept_atr_buffer: float = 0.15
+    ba_body_atr_min: float = 0.60
+    ba_volume_z_min: float = 0.0
+    ba_max_hold_minutes: int = 35
+    ba_stop_atr: float = 1.25
+    ba_target_r: float = 2.5
+    overlay_only_when_ba_quiet: bool = True
+    overlay_lg_pivot_size: int = 5
+    overlay_breakout_lookback: int = 30
+    overlay_breakout_threshold: float = 0.001
+    overlay_lg_hold_minutes: int = 45
+    overlay_br_hold_minutes: int = 60
+    overlay_protective_stop_atr: float = 4.0
 
 
 @dataclass(frozen=True)
@@ -108,6 +126,21 @@ def regime_transition_spec(strategy_id: str, selected_alias: str | None = None) 
     )
 
 
+def ba_no_trade_combo_spec(
+    strategy_id: str = BA_NO_TRADE_COMBO_STRATEGY_ID,
+    selected_alias: str | None = None,
+) -> LiveStrategySpec:
+    return LiveStrategySpec(
+        strategy_id=strategy_id,
+        selected_alias=selected_alias or BA_NO_TRADE_COMBO_ALIAS,
+        family="ba_no_trade_combo",
+        session="all",
+        max_hold_minutes=60,
+        min_stop_points=4.0,
+        max_stop_points=80.0,
+    )
+
+
 def build_strategy_live_signal_row(
     *,
     signal_config: LiveSignalConfig,
@@ -136,7 +169,7 @@ def build_strategy_live_signal_row(
     history = _load_recent_history(strategy_config.history_path, timestamp, strategy_config.max_history_minutes)
     bars = (
         _historical_bars_frame(_safe_historical_minute_bars(active_broker, signal_config.contract))
-        if strategy_spec.family == "regime_transition"
+        if strategy_spec.family in {"regime_transition", "ba_no_trade_combo"}
         else pd.DataFrame()
     )
     if bars.empty:
@@ -165,6 +198,18 @@ def build_strategy_live_signal_row(
                 bars = pd.concat([bars, bootstrap], ignore_index=True)
                 bars = bars.sort_values("ts").drop_duplicates("ts").reset_index(drop=True)
         evaluation = evaluate_regime_transition_signal(bars, strategy_spec, min_bars=strategy_config.min_bars)
+    elif strategy_spec.family == "ba_no_trade_combo":
+        required_bars = max(
+            strategy_config.min_bars,
+            strategy_spec.ba_range_length + strategy_spec.ba_momentum_lookback + 5,
+            220,
+        )
+        if len(bars) < required_bars:
+            bootstrap = _load_bootstrap_bars(strategy_config.bootstrap_cache_path, timestamp, required_bars)
+            if not bootstrap.empty:
+                bars = pd.concat([bars, bootstrap], ignore_index=True)
+                bars = bars.sort_values("ts").drop_duplicates("ts").reset_index(drop=True)
+        evaluation = evaluate_ba_no_trade_combo_signal(bars, strategy_spec, min_bars=strategy_config.min_bars)
     else:
         raise ValueError(f"unsupported live strategy family: {strategy_spec.family}")
     if not evaluation["triggered"]:
@@ -195,6 +240,9 @@ def build_strategy_live_signal_row(
         if actual_entry is not None and stop_price is not None and actual_entry > stop_price:
             dynamic_stop_points = actual_entry - stop_price
             dynamic_target_points = dynamic_stop_points * float(evaluation.get("reward_risk", strategy_spec.reward_risk))
+    if strategy_spec.family == "ba_no_trade_combo":
+        dynamic_stop_points = evaluation.get("stop_points", dynamic_stop_points)
+        dynamic_target_points = evaluation.get("target_points", dynamic_target_points)
     return row | {
         "session_bucket": strategy_spec.session,
         "vol_bucket": strategy_spec.volatility_filter,
@@ -216,6 +264,7 @@ def build_strategy_live_signal_row(
         "strategy_displacement_atr": evaluation.get("displacement_atr", ""),
         "strategy_body_share": evaluation.get("body_share", ""),
         "strategy_volume_z": evaluation.get("volume_z", ""),
+        "strategy_leg": evaluation.get("leg", ""),
     }
 
 
@@ -386,6 +435,290 @@ def evaluate_regime_transition_signal(
         "reward_risk": float(spec.reward_risk),
         **metrics,
     }
+
+
+def evaluate_ba_no_trade_combo_signal(
+    bars: pd.DataFrame,
+    spec: LiveStrategySpec | None = None,
+    *,
+    min_bars: int | None = None,
+) -> dict[str, Any]:
+    spec = spec or ba_no_trade_combo_spec()
+    if bars.empty:
+        return {"triggered": False, "reason": "no_market_history", "bars": 0}
+    data = bars.sort_values("ts").reset_index(drop=True).copy()
+    required_bars = max(
+        int(min_bars or 0),
+        spec.ba_range_length + spec.ba_momentum_lookback + 5,
+        220,
+    )
+    if len(data) < required_bars:
+        return {"triggered": False, "reason": "insufficient_bars", "bars": int(len(data)), "required_bars": required_bars}
+    data["ts"] = pd.to_datetime(data["ts"], utc=True, errors="coerce")
+    for column in ["Open", "High", "Low", "Close"]:
+        data[column] = pd.to_numeric(data[column], errors="coerce")
+    if "Volume" not in data.columns:
+        data["Volume"] = 0.0
+    data["Volume"] = pd.to_numeric(data["Volume"], errors="coerce").fillna(0.0)
+    if data[["ts", "Open", "High", "Low", "Close"]].tail(required_bars).isna().any().any():
+        return {"triggered": False, "reason": "invalid_ohlc", "bars": int(len(data))}
+
+    high = data["High"]
+    low = data["Low"]
+    close = data["Close"]
+    open_price = data["Open"]
+    previous_close = close.shift(1)
+    true_range = pd.concat([high - low, (high - previous_close).abs(), (low - previous_close).abs()], axis=1).max(axis=1)
+    atr = true_range.rolling(14, min_periods=14).mean()
+    ema20 = close.ewm(span=20, adjust=False, min_periods=20).mean()
+    ema60 = close.ewm(span=60, adjust=False, min_periods=60).mean()
+    ema200 = close.ewm(span=200, adjust=False, min_periods=200).mean()
+    range_high = high.rolling(spec.ba_range_length, min_periods=spec.ba_range_length).max().shift(1)
+    range_low = low.rolling(spec.ba_range_length, min_periods=spec.ba_range_length).min().shift(1)
+    range_width = range_high - range_low
+    range_pos = (close - range_low) / range_width.replace(0, pd.NA)
+    volume_z = _volume_z(data)
+    if volume_z is None:
+        volume_z = pd.Series(0.0, index=data.index)
+    volume_z = volume_z.fillna(0.0)
+    momentum = close - close.shift(spec.ba_momentum_lookback)
+    bar_range = high - low
+    body_atr = (close - open_price).abs() / atr.replace(0, pd.NA)
+    close_location = (close - low) / bar_range.replace(0, pd.NA)
+    lower_wick_ratio = (pd.concat([open_price, close], axis=1).min(axis=1) - low) / bar_range.replace(0, pd.NA)
+    micro_high = high.rolling(10, min_periods=10).max().shift(1)
+    micro_low = low.rolling(10, min_periods=10).min().shift(1)
+    internal_high = micro_high
+    internal_low = micro_low
+    swing_high = high.rolling(50, min_periods=50).max().shift(1)
+    swing_low = low.rolling(50, min_periods=50).min().shift(1)
+    last_bear_high = high.where(close < open_price).ffill().shift(1)
+    last_bear_low = low.where(close < open_price).ffill().shift(1)
+    last_bull_high = high.where(close > open_price).ffill().shift(1)
+    last_bull_low = low.where(close > open_price).ffill().shift(1)
+    bullish_fvg = low > high.shift(2)
+    bearish_fvg = high < low.shift(2)
+    recent_bullish_fvg = bullish_fvg.rolling(5, min_periods=1).sum() > 0
+    recent_bearish_fvg = bearish_fvg.rolling(5, min_periods=1).sum() > 0
+
+    idx = data.index[-1]
+    last = data.iloc[-1]
+    timestamp = last["ts"]
+    minute = int(timestamp.hour * 60 + timestamp.minute)
+    hour = int(timestamp.hour)
+    is_asia = minute < 420 or minute >= 1380
+    is_europe = 420 <= minute < 810
+    is_us_rth = 810 <= minute < 1200
+    is_us_late = 1200 <= minute < 1380
+
+    metrics = {
+        "atr": _finite_float(atr.loc[idx]),
+        "range_high": _finite_float(range_high.loc[idx]),
+        "range_low": _finite_float(range_low.loc[idx]),
+        "range_pos": _finite_float(range_pos.loc[idx]),
+        "body_share": _finite_float(body_atr.loc[idx]),
+        "volume_z": _finite_float(volume_z.loc[idx]),
+        "minute_of_day": minute,
+    }
+    missing = [key for key in ["atr", "range_high", "range_low", "range_pos"] if metrics[key] is None]
+    if missing:
+        return {"triggered": False, "reason": "invalid_ba_features", "missing": missing, "bars": int(len(data))}
+
+    atr_last = float(metrics["atr"])
+    range_low_last = float(metrics["range_low"])
+    range_high_last = float(metrics["range_high"])
+    close_last = float(last["Close"])
+    open_last = float(last["Open"])
+    high_last = float(last["High"])
+    low_last = float(last["Low"])
+    body_atr_last = _finite_float(body_atr.loc[idx]) or 0.0
+    volume_z_last = _finite_float(volume_z.loc[idx]) or 0.0
+    momentum_last = _finite_float(momentum.loc[idx]) or 0.0
+    momentum_prev = _finite_float(momentum.shift(1).loc[idx]) or 0.0
+    close_loc_last = _finite_float(close_location.loc[idx]) or 0.5
+    lower_wick_last = _finite_float(lower_wick_ratio.loc[idx]) or 0.0
+
+    below_range = close < range_low - atr * spec.ba_accept_atr_buffer
+    above_range = close > range_high + atr * spec.ba_accept_atr_buffer
+    accepted_below = bool(below_range.tail(spec.ba_accept_bars).sum() >= spec.ba_accept_bars)
+    accepted_above = bool(above_range.tail(spec.ba_accept_bars).sum() >= spec.ba_accept_bars)
+    sweep_below = low_last < range_low_last and close_last > range_low_last
+    sweep_above = high_last > range_high_last and close_last < range_high_last
+
+    trend_up = bool(ema20.loc[idx] > ema60.loc[idx] > ema200.loc[idx] and ema20.loc[idx] > ema20.shift(10).loc[idx] and close_last > ema60.loc[idx])
+    trend_down = bool(ema20.loc[idx] < ema60.loc[idx] < ema200.loc[idx] and ema20.loc[idx] < ema20.shift(10).loc[idx] and close_last < ema60.loc[idx])
+    bullish_choch = close_last > float(internal_high.loc[idx]) and close.shift(1).loc[idx] <= internal_high.shift(1).loc[idx]
+    bearish_choch = close_last < float(internal_low.loc[idx]) and close.shift(1).loc[idx] >= internal_low.shift(1).loc[idx]
+    bullish_bos = close_last > float(swing_high.loc[idx]) and close.shift(1).loc[idx] <= swing_high.shift(1).loc[idx]
+    bearish_bos = close_last < float(swing_low.loc[idx]) and close.shift(1).loc[idx] >= swing_low.shift(1).loc[idx]
+    discount_zone = (metrics["range_pos"] or 0.5) <= 0.35
+    premium_zone = (metrics["range_pos"] or 0.5) >= 0.65
+
+    bottom_reclaim_long = sweep_below and close_last > open_last and momentum_last > momentum_prev and body_atr_last >= spec.ba_body_atr_min * 0.5
+    top_breakout_long = accepted_above and close_last > open_last and ema20.loc[idx] > ema60.loc[idx] >= ema200.loc[idx] and momentum_last > 0 and volume_z_last >= spec.ba_volume_z_min and body_atr_last >= spec.ba_body_atr_min
+    asia_trend_short = is_asia and accepted_below and close_last < open_last and ema20.loc[idx] < ema60.loc[idx] <= ema200.loc[idx] and momentum_last < 0 and volume_z_last >= spec.ba_volume_z_min and body_atr_last >= spec.ba_body_atr_min
+    ema_bull_transition = close_last > ema20.loc[idx] and close_last > ema60.loc[idx] and ema20.loc[idx] > ema20.shift(1).loc[idx] and close_last > high.rolling(20).max().shift(1).loc[idx] and momentum_last > 0 and body_atr_last >= spec.ba_body_atr_min * 0.65
+    ema_bear_transition = close_last < ema20.loc[idx] and close_last < ema60.loc[idx] and ema20.loc[idx] < ema20.shift(1).loc[idx] and close_last < low.rolling(20).min().shift(1).loc[idx] and momentum_last < 0 and body_atr_last >= spec.ba_body_atr_min * 0.65
+    trend_pullback_long = trend_up and low_last <= ema20.loc[idx] + atr_last * 0.35 and low_last > ema60.loc[idx] - atr_last * 0.35 and close_last > ema20.loc[idx] and close_last > open_last and close_last > micro_high.loc[idx] and momentum_last > 0 and body_atr_last >= 0.18
+    trend_pullback_short = (is_asia or is_europe) and trend_down and high_last >= ema20.loc[idx] - atr_last * 0.35 and high_last < ema60.loc[idx] + atr_last * 0.35 and close_last < ema20.loc[idx] and close_last < open_last and close_last < micro_low.loc[idx] and momentum_last < 0 and body_atr_last >= 0.18
+    fast_reversal_long = sweep_below and close_last > range_low_last and close_loc_last >= 0.62 and lower_wick_last >= 0.35 and close_last > close.shift(1).loc[idx] and body_atr_last >= 0.20
+    smc_discount_long = (discount_zone or sweep_below) and bullish_choch and close_loc_last >= 0.60 and momentum_last > momentum_prev and body_atr_last >= 0.20
+    smc_premium_short = (premium_zone or sweep_above) and bearish_choch and close_loc_last <= 0.40 and momentum_last < momentum_prev and body_atr_last >= 0.20
+    smc_ob_retest_long = trend_up and low_last <= last_bear_high.loc[idx] and low_last >= last_bear_low.loc[idx] - atr_last * 0.30 and close_last > open_last and close_last > ema20.loc[idx] and close_loc_last >= 0.55
+    smc_ob_retest_short = trend_down and high_last >= last_bull_low.loc[idx] and high_last <= last_bull_high.loc[idx] + atr_last * 0.30 and close_last < open_last and close_last < ema20.loc[idx] and close_loc_last <= 0.45
+    smc_bos_fvg_long = bool(bullish_bos and recent_bullish_fvg.loc[idx] and close_last > open_last and momentum_last > 0 and volume_z_last >= spec.ba_volume_z_min)
+    smc_bos_fvg_short = bool(bearish_bos and recent_bearish_fvg.loc[idx] and close_last < open_last and momentum_last < 0 and volume_z_last >= spec.ba_volume_z_min)
+
+    allow_trend_transition_long = not is_asia and hour not in {1, 3, 5, 6, 8, 10, 11, 14, 15, 16, 17, 18, 19, 20, 21, 22} and not (is_europe and volume_z_last < 0)
+    allow_trend_transition_short = is_asia and hour not in {0, 3, 5, 23} and momentum_last <= 0
+    allow_trend_pullback_long = hour not in {0, 1, 2, 10, 11, 13, 15, 16, 17, 19, 21, 22, 23}
+    allow_trend_pullback_short = is_europe and hour not in {2, 3, 4, 5, 7, 8, 9, 12, 23}
+    allow_bottom_reclaim = not (is_europe or is_us_rth) and hour not in {0, 7, 8, 9, 10, 12, 17, 19}
+    allow_smc_discount = hour not in {0, 1, 2, 3, 10, 13, 16, 18, 21, 22, 23} and not (is_us_rth and hour == 17)
+
+    long_reasons = {
+        "bottom_reclaim": bottom_reclaim_long and allow_bottom_reclaim,
+        "top_breakout": top_breakout_long,
+        "ema_bull_transition": ema_bull_transition and allow_trend_transition_long,
+        "trend_pullback": trend_pullback_long and allow_trend_pullback_long,
+        "fast_reversal": fast_reversal_long and not is_asia,
+        "smc_discount_choch": smc_discount_long and allow_smc_discount,
+        "smc_ob_retest": smc_ob_retest_long,
+        "smc_bos_fvg": smc_bos_fvg_long,
+    }
+    short_reasons = {
+        "asia_trend": asia_trend_short and allow_trend_transition_short,
+        "ema_bear_transition": ema_bear_transition and allow_trend_transition_short,
+        "trend_pullback": trend_pullback_short and allow_trend_pullback_short,
+        "smc_premium_choch": smc_premium_short,
+        "smc_ob_retest": smc_ob_retest_short,
+        "smc_bos_fvg": smc_bos_fvg_short,
+    }
+    ba_direction = 1 if any(long_reasons.values()) else -1 if any(short_reasons.values()) else 0
+    ba_reason = _first_true_key(long_reasons if ba_direction > 0 else short_reasons) if ba_direction else ""
+
+    lg_direction = _lightglow_ob_direction(data, pivot_size=spec.overlay_lg_pivot_size) if is_us_late else 0
+    br_long = _breakout_retest_long(data, lookback=spec.overlay_breakout_lookback, threshold=spec.overlay_breakout_threshold) if is_us_late else False
+    overlay_direction = 1 if (lg_direction > 0 or br_long) else -1 if lg_direction < 0 else 0
+    if spec.overlay_only_when_ba_quiet and ba_direction != 0:
+        overlay_direction = 0
+
+    direction = ba_direction if ba_direction != 0 else overlay_direction
+    if direction == 0:
+        return {
+            "triggered": False,
+            "reason": "no_ba_no_trade_combo_signal",
+            "bars": int(len(data)),
+            "ba_reason": ba_reason,
+            "lg_direction": lg_direction,
+            "breakout_retest_long": bool(br_long),
+            **metrics,
+        }
+
+    leg = "BA" if ba_direction != 0 else "BR" if br_long and direction > 0 else "LG_OB"
+    if leg == "BA":
+        stop_points = atr_last * spec.ba_stop_atr
+        target_points = stop_points * spec.ba_target_r
+        horizon = spec.ba_max_hold_minutes
+        side = f"{'long' if direction > 0 else 'short'}_ba_{ba_reason}"
+    else:
+        stop_points = atr_last * spec.overlay_protective_stop_atr
+        target_points = None
+        horizon = spec.overlay_br_hold_minutes if leg == "BR" else spec.overlay_lg_hold_minutes
+        side = f"{'long' if direction > 0 else 'short'}_{leg.lower()}"
+    if stop_points < spec.min_stop_points or stop_points > spec.max_stop_points:
+        return {
+            "triggered": False,
+            "reason": "stop_distance_outside_bounds",
+            "stop_points": float(stop_points),
+            "leg": leg,
+            "side": side,
+            **metrics,
+        }
+
+    return {
+        "triggered": True,
+        "reason": "strategy_signal",
+        "direction": int(direction),
+        "side": side,
+        "leg": leg,
+        "bars": int(len(data)),
+        "horizon_minutes": int(horizon),
+        "stop_points": float(stop_points),
+        "target_points": "" if target_points is None else float(target_points),
+        "ba_reason": ba_reason,
+        "lg_direction": int(lg_direction),
+        "breakout_retest_long": bool(br_long),
+        "session": "asia" if is_asia else "europe" if is_europe else "us_rth" if is_us_rth else "us_late" if is_us_late else "other",
+        "realized_vol_30": _realized_vol_30(close),
+        "vwap_distance": _vwap_distance(data),
+        **metrics,
+    }
+
+
+def _lightglow_ob_direction(data: pd.DataFrame, *, pivot_size: int) -> int:
+    if len(data) < pivot_size * 4 + 3:
+        return 0
+    compressed = data.copy()
+    compressed["bucket"] = compressed["ts"].dt.floor("15min")
+    htf = compressed.groupby("bucket", as_index=False).agg(High=("High", "max"), Low=("Low", "min"), Close=("Close", "last"))
+    if len(htf) < pivot_size * 4 + 3:
+        return 0
+    pivot_high = None
+    pivot_low = None
+    high_crossed = True
+    low_crossed = True
+    bull_block_low = None
+    bear_block_high = None
+    direction = 0
+    for i in range(pivot_size, len(htf)):
+        confirmed = i - pivot_size
+        if confirmed >= pivot_size and confirmed + pivot_size < len(htf):
+            window = htf.iloc[confirmed - pivot_size : confirmed + pivot_size + 1]
+            candidate = htf.iloc[confirmed]
+            if candidate["High"] >= window["High"].max():
+                pivot_high = float(candidate["High"])
+                high_crossed = False
+            if candidate["Low"] <= window["Low"].min():
+                pivot_low = float(candidate["Low"])
+                low_crossed = False
+        row = htf.iloc[i]
+        previous = htf.iloc[i - 1]
+        if pivot_high is not None and not high_crossed and previous["Close"] <= pivot_high and row["Close"] > pivot_high:
+            high_crossed = True
+            lookback = htf.iloc[max(0, i - pivot_size * 2 + 1) : i + 1]
+            bull_block_low = float(lookback["Low"].min())
+        if pivot_low is not None and not low_crossed and previous["Close"] >= pivot_low and row["Close"] < pivot_low:
+            low_crossed = True
+            lookback = htf.iloc[max(0, i - pivot_size * 2 + 1) : i + 1]
+            bear_block_high = float(lookback["High"].max())
+        if i == len(htf) - 1:
+            if bear_block_high is not None and float(data.iloc[-1]["High"]) > bear_block_high:
+                direction = 1
+            if bull_block_low is not None and float(data.iloc[-1]["Low"]) < bull_block_low:
+                direction = -1
+    return direction
+
+
+def _breakout_retest_long(data: pd.DataFrame, *, lookback: int, threshold: float) -> bool:
+    if len(data) < lookback + 3:
+        return False
+    high = data["High"]
+    low = data["Low"]
+    close = data["Close"]
+    prior_high = _finite_float(high.rolling(lookback, min_periods=lookback).max().shift(2).iloc[-1])
+    prior_low = _finite_float(low.rolling(lookback, min_periods=lookback).min().shift(2).iloc[-1])
+    if prior_high is None or prior_low is None:
+        return False
+    prior_range = prior_high - prior_low
+    return bool(close.iloc[-2] > prior_high and low.iloc[-1] <= prior_high and close.iloc[-1] > prior_high + prior_range * threshold)
+
+
+def _first_true_key(values: dict[str, bool]) -> str:
+    for key, value in values.items():
+        if value:
+            return key
+    return ""
 
 
 def _mtf_spec(spec: LiveStrategySpec) -> MultiTimeframeSetupSpec:

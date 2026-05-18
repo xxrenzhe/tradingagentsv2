@@ -99,6 +99,41 @@ def _group_summary(trades: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("net_points", ascending=False)
 
 
+def _period_summary(trades: pd.DataFrame) -> dict[str, Any]:
+    entry = pd.to_datetime(trades["entry_ts"], utc=True)
+    exit_ts = pd.to_datetime(trades["exit_ts"], utc=True)
+    first = entry.min()
+    last = entry.max()
+    days = int((last - first).days + 1) if len(entry) else 0
+    return {
+        "first_entry": first.strftime("%Y-%m-%d %H:%M UTC") if len(entry) else "",
+        "last_entry": last.strftime("%Y-%m-%d %H:%M UTC") if len(entry) else "",
+        "last_exit": exit_ts.max().strftime("%Y-%m-%d %H:%M UTC") if len(exit_ts) else "",
+        "calendar_days": days,
+        "calendar_years": float(days / 365.25) if days else 0.0,
+        "active_months": int(entry.dt.strftime("%Y-%m").nunique()) if len(entry) else 0,
+        "first_month": entry.dt.strftime("%Y-%m").min() if len(entry) else "",
+        "last_month": entry.dt.strftime("%Y-%m").max() if len(entry) else "",
+    }
+
+
+def _period_breakdown(trades: pd.DataFrame, period: str) -> pd.DataFrame:
+    frame = trades.copy()
+    entry = pd.to_datetime(frame["entry_ts"], utc=True)
+    if period == "year":
+        frame["period"] = entry.dt.strftime("%Y")
+    elif period == "month":
+        frame["period"] = entry.dt.strftime("%Y-%m")
+    else:
+        raise ValueError(f"unsupported period: {period}")
+    rows: list[dict[str, Any]] = []
+    for label, group in frame.groupby("period", sort=True):
+        row = {"period": label}
+        row.update(_summary(group))
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def _table(frame: pd.DataFrame, columns: list[str], *, limit: int | None = None) -> str:
     if frame.empty:
         return "<p>No rows.</p>"
@@ -261,7 +296,17 @@ def _single_trade_kline_svg(bars: pd.DataFrame, trade: Any, trade_no: int, *, co
 """
 
 
-def _trade_kline_svg(bars: pd.DataFrame, trades: pd.DataFrame) -> str:
+def _select_replay_trades(trades: pd.DataFrame, top_n: int = 10, bottom_n: int = 10) -> pd.DataFrame:
+    if trades.empty:
+        return trades.copy()
+    top = trades.sort_values("net_points", ascending=False).head(top_n)
+    bottom = trades.sort_values("net_points", ascending=True).head(bottom_n)
+    selected = pd.concat([top, bottom], ignore_index=False)
+    selected = selected.loc[~selected.index.duplicated(keep="first")]
+    return selected.sort_values("net_points", ascending=False).reset_index(drop=True)
+
+
+def _trade_kline_svg(bars: pd.DataFrame, trades: pd.DataFrame, *, replay_title: str = "Top10 winners and Bottom10 losers") -> str:
     if bars.empty or trades.empty:
         return "<p>No K-line data available.</p>"
     bars = bars.copy().reset_index(drop=True)
@@ -285,6 +330,7 @@ def _trade_kline_svg(bars: pd.DataFrame, trades: pd.DataFrame) -> str:
 
     return f"""
 <div class="kline-wrap">
+  <p class="note">{html.escape(replay_title)} are shown below to keep the report lightweight. The full trade log remains available at the bottom of the report.</p>
   <div class="trade-card-grid">{''.join(chart_parts)}</div>
   <details>
     <summary>Trade replay index</summary>
@@ -314,6 +360,7 @@ def _write_report(
 ) -> None:
     strategy = _select_strategy(ranking, strategy_name)
     selected_strategy = str(strategy["strategy"])
+    report_title = f"NQ Pine {selected_strategy} Candidate Report"
     trades = _ensure_trade_ids(trades, selected_strategy)
     trades["entry_ts"] = pd.to_datetime(trades["entry_ts"], utc=True)
     trades["exit_ts"] = pd.to_datetime(trades["exit_ts"], utc=True)
@@ -322,13 +369,17 @@ def _write_report(
     trades["drawdown_points"] = trades["equity_points"].cummax() - trades["equity_points"]
 
     summary = _summary(trades)
+    period = _period_summary(trades)
+    yearly = _period_breakdown(trades, "year")
+    monthly = _period_breakdown(trades, "month")
     daily = _group_summary(trades, ["entry_date"])
     session = _group_summary(trades, ["session"])
     family = _group_summary(trades, ["signal_family"])
     exits = _group_summary(trades, ["exit_reason"])
     if bars is None:
         bars = pd.DataFrame()
-    kline_chart = _trade_kline_svg(bars, trades)
+    replay_trades = _select_replay_trades(trades, top_n=10, bottom_n=10)
+    kline_chart = _trade_kline_svg(bars, replay_trades, replay_title="Only Top10 winning trades and Bottom10 losing trades")
 
     cards = [
         ("Trades", _fmt(int(summary["trades"]))),
@@ -343,6 +394,20 @@ def _write_report(
     card_html = "".join(
         f"<div class=\"metric\"><span>{html.escape(label)}</span><strong>{html.escape(value)}</strong></div>"
         for label, value in cards
+    )
+    period_cards = [
+        ("First Entry", str(period["first_entry"])),
+        ("Last Entry", str(period["last_entry"])),
+        ("Last Exit", str(period["last_exit"])),
+        ("Calendar Days", _fmt(int(period["calendar_days"]))),
+        ("Calendar Years", _fmt(float(period["calendar_years"]))),
+        ("Active Months", _fmt(int(period["active_months"]))),
+        ("First Month", str(period["first_month"])),
+        ("Last Month", str(period["last_month"])),
+    ]
+    period_card_html = "".join(
+        f"<div class=\"metric\"><span>{html.escape(label)}</span><strong>{html.escape(value)}</strong></div>"
+        for label, value in period_cards
     )
     equity_values = [0.0, *trades["equity_points"].astype(float).tolist()]
     drawdown_values = [0.0, *(-trades["drawdown_points"].astype(float)).tolist()]
@@ -372,7 +437,7 @@ def _write_report(
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>NQ Pine Combo Best Candidate Report</title>
+  <title>{html.escape(report_title)}</title>
   <style>
     :root {{
       --bg:#07111f;
@@ -425,8 +490,8 @@ def _write_report(
 </head>
 <body>
   <header>
-    <div class="tag">NQ 1m · Databento Recent Month · Best Robust Candidate</div>
-    <h1>NQ Pine Combo Best Candidate Report</h1>
+    <div class="tag">NQ 1m · Databento · Strategy Candidate</div>
+    <h1>{html.escape(report_title)}</h1>
     <p class="subtitle"><code>{html.escape(selected_strategy)}</code><br />Families: <code>{html.escape(str(strategy["families"]))}</code> · MACD filter: <code>{html.escape(str(strategy["macd_filter"]))}</code> · Stop ATR buffer: <code>{strategy["stop_atr_buffer"]}</code> · Target: <code>{strategy["target_r"]}R</code> · Max hold: <code>{strategy["max_hold_bars"]} bars</code></p>
   </header>
   <main>
@@ -435,13 +500,28 @@ def _write_report(
       <div class="metrics">{card_html}</div>
       <p class="note">Cost model is already embedded in <code>net_points</code>. The report follows the current top-ranked row by default, so it can promote a bidirectional phase-trend candidate when the search ranks it above the prior long-biased baseline.</p>
     </section>
+    <section>
+      <h2>Data Coverage Period</h2>
+      <div class="metrics">{period_card_html}</div>
+      <p class="note">The calendar span is measured from first trade entry to last trade entry. Active months counts months with at least one executed trade.</p>
+    </section>
     <section class="grid2">
       {_svg_line(equity_values, title="Equity Curve By Trade (net points)", stroke="var(--green)")}
       {_svg_line(drawdown_values, title="Drawdown Curve (negative points)", stroke="var(--red)")}
     </section>
+    <section class="grid2">
+      <div>
+        <h2>Yearly PnL Distribution</h2>
+        {_table(yearly, ["period", "trades", "net_points", "profit_factor", "win_rate", "avg_points", "max_drawdown_points", "worst_trade_points", "best_trade_points"])}
+      </div>
+      <div>
+        <h2>Monthly PnL Distribution</h2>
+        {_table(monthly, ["period", "trades", "net_points", "profit_factor", "win_rate", "avg_points", "max_drawdown_points", "worst_trade_points", "best_trade_points"])}
+      </div>
+    </section>
     <section>
       <h2>K-line Trade Replay</h2>
-      <p class="note">Each trade is plotted directly on the NQ 1-minute candles: blue dot marks entry, green/red dot marks exit, labels show long/short side, entry/exit price, and net PnL points after costs.</p>
+      <p class="note">To keep the HTML file small, only Top10 winning trades and Bottom10 losing trades are plotted on NQ 1-minute candles. Blue dot marks entry, green/red dot marks exit, labels show long/short side, entry/exit price, and net PnL points after costs.</p>
       {kline_chart}
     </section>
     <section>

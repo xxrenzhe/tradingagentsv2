@@ -172,6 +172,60 @@ def test_loss_learning_selected_rule_must_work_oos_to_be_positive() -> None:
     assert result["loss_learning_verdict"].iloc[0] in {"not_selected", "not_proven", "positive_candidate"}
 
 
+def test_bottom_state_context_distinguishes_breakdown_and_reclaim() -> None:
+    ts = pd.date_range("2022-01-03 14:00", periods=160, freq="min", tz="UTC")
+    rows = []
+    for index, stamp in enumerate(ts):
+        if index < 100:
+            base = 10000.0 + (index % 10) * 0.5
+            close = base + (0.25 if index % 2 else -0.25)
+        elif index < 112:
+            base = 10000.0 - (index - 99) * 3.0
+            close = base - 2.0
+        elif index == 112:
+            base = 9960.0
+            close = 9998.0
+        else:
+            base = 9998.0 + (index - 112) * 0.4
+            close = base + 0.3
+        rows.append(
+            {
+                "ts": stamp,
+                "symbol": "NQ",
+                "Open": base,
+                "High": max(base, close) + 1.0,
+                "Low": min(base, close) - (8.0 if index == 112 else 1.0),
+                "Close": close,
+                "Volume": 500 + index * 3,
+            }
+        )
+    bars = pd.DataFrame(rows)
+    trades = pd.DataFrame(
+        [
+            {
+                "entry_ts": ts[110],
+                "exit_ts": ts[112],
+                "strategy_source": paper_script.LIGHTGLOW_SOURCE,
+                "direction": 1,
+                "net_points": -12.0,
+            },
+            {
+                "entry_ts": ts[113],
+                "exit_ts": ts[115],
+                "strategy_source": paper_script.LIGHTGLOW_SOURCE,
+                "direction": 1,
+                "net_points": 8.0,
+            },
+        ]
+    )
+
+    context = paper_script.add_bottom_state_context(trades, bars)
+
+    assert "bottom_breakdown_continuation" in context.columns
+    assert "bottom_sweep_reclaim_bounce" in context.columns
+    assert set(context["bottom_state"]) & {"breakdown_continuation", "sweep_reclaim_bounce", "uncertain_bottom"}
+
+
 def test_report_generation_writes_outputs(tmp_path: Path) -> None:
     feature_path = tmp_path / "features.pkl"
     composite_path = tmp_path / "composite.csv"
@@ -215,12 +269,16 @@ def test_report_generation_writes_outputs(tmp_path: Path) -> None:
     assert "纸盘准备度结论" in html
     assert "亏损交易学习" in html
     assert "反手做空诊断" in html
+    assert "区间底部破位 vs 扫低收回诊断" in html
+    assert "breakdown_continuation" in html
+    assert "sweep_reclaim_bounce" in html
     assert "泄漏审计" in html
     assert "原始冻结组合最差交易 K线（审计样本）" in html
     assert "纸盘可执行 Lightglow 最差交易 K线" in html
     assert "为什么原始最差交易仍然显示" in html
     assert "Timecell 因 <code>0.05x</code> 无法映射为整数合约" in html
     assert result["readiness"]["status"] == "blocked"
+    assert result["bottom_state_rows"] >= 1
     assert result["reverse_trade_verdict"] in {"reverse_not_selected", "reverse_not_proven", "reverse_positive_candidate"}
     for path in (markdown, summary, wf, wf_trades, stress, leakage, loss_learning, reverse_diagnostic, plan):
         assert path.exists()

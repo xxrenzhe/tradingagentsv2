@@ -1,0 +1,565 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © TradingAgentsV2
+//
+// MNQ BA No-Trade Best Combo Candidate
+//
+// Research report:
+// reports/NQ-pine-5y-ba-no-trade-best-combo-candidate.html
+//
+// This script is a TradingView-executable validation bridge for the current best
+// deployment candidate:
+// - BA main approximation: optional structure/momentum engine inspired by the
+//   runner-meta balanced-aggressive family. The original BA selector is Python
+//   walk-forward meta allocation, so it cannot be reproduced exactly in Pine.
+// - Recommended no-trade overlay: causal_no_ict only. It keeps the two live
+//   candidates that improved the 5y combo after removing the weak ICT leg:
+//   1) Lightglow internal OB break, 15m source, US late, 45m time exit.
+//   2) US-late long breakout-retest, lookback 30, threshold 0.001, 60m time exit.
+//
+// Apply on MNQ/MNQ1! charts. Pine strategies trade the active chart symbol, so
+// load this script on an MNQ chart when validating micro-Nasdaq execution.
+// Default "Live Approximation" mode is signal-producing
+// on any chart timeframe so 1m/3m can be compared directly. Non-1m results are
+// timeframe experiments, not HTML report parity. Switch to "Report Parity" when
+// comparing against the HTML report windows.
+// Use this for visual/paper validation, not as live-trading approval.
+
+//@version=5
+strategy("MNQ BA No-Trade Best Combo Candidate",
+     shorttitle="MNQ BA+NT",
+     overlay=true,
+     initial_capital=5000,
+     currency=currency.USD,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1,
+     commission_type=strategy.commission.cash_per_contract,
+     commission_value=1,
+     slippage=2,
+     process_orders_on_close=false,
+     calc_on_every_tick=false,
+     calc_on_order_fills=false,
+     pyramiding=0,
+     max_labels_count=500,
+     max_lines_count=500)
+
+// ============================================================================
+// Inputs
+// ============================================================================
+
+groupMode = "Deployment Mode"
+tradeBaApprox = input.bool(true, "Trade BA Main Approximation", group=groupMode)
+tradeNoTradeOverlay = input.bool(true, "Trade Recommended BA No-Trade Overlay", group=groupMode)
+overlayOnlyWhenBaQuiet = input.bool(true, "Overlay Only When BA Approx Is Quiet", group=groupMode)
+useDateFilter = input.bool(false, "Use Date Filter", group=groupMode)
+startTime = input.time(timestamp("01 Apr 2021 00:00 +0000"), "Start", group=groupMode)
+endTime = input.time(timestamp("31 Dec 2027 23:59 +0000"), "End", group=groupMode)
+
+groupParity = "Parity / Safety"
+executionMode = input.string("Live Approximation", "Execution Mode", options=["Live Approximation", "Report Parity"], group=groupParity)
+strictOneMinute = input.bool(false, "Warn When Not 1-Minute Chart", group=groupParity)
+warnWhenNotMnq = input.bool(true, "Warn When Chart Is Not MNQ", group=groupParity)
+applyReportSizing = input.bool(false, "Apply Report BA Position Scaling", group=groupParity)
+showParityWarning = input.bool(true, "Show Parity Warning Label", group=groupParity)
+baReportStart = input.time(timestamp("01 Sep 2025 00:00 +0000"), "BA Report Start UTC", group=groupParity)
+baReportEnd = input.time(timestamp("01 May 2026 00:00 +0000"), "BA Report End UTC", group=groupParity)
+overlayReportStart = input.time(timestamp("01 Aug 2022 00:00 +0000"), "Overlay Report Start UTC", group=groupParity)
+overlayReportEnd = input.time(timestamp("01 Aug 2024 00:00 +0000"), "Overlay Report End UTC", group=groupParity)
+
+groupBa = "BA Main Approximation"
+baRangeLength = input.int(90, "Range Lookback", minval=20, maxval=300, group=groupBa)
+baMomentumLookback = input.int(30, "Momentum Lookback", minval=5, maxval=120, group=groupBa)
+baAcceptBars = input.int(3, "Acceptance Bars", minval=1, maxval=10, group=groupBa)
+baAcceptAtrBuffer = input.float(0.15, "Acceptance ATR Buffer", minval=0.0, maxval=2.0, step=0.05, group=groupBa)
+baBodyAtrMin = input.float(0.60, "Body ATR Min", minval=0.05, maxval=3.0, step=0.05, group=groupBa)
+baVolumeZMin = input.float(0.00, "Volume Z Min", minval=-3.0, maxval=5.0, step=0.1, group=groupBa)
+baUseAsiaShort = input.bool(true, "Allow Asia Trend Short", group=groupBa)
+baUseBottomReclaimLong = input.bool(true, "Allow Bottom Reclaim Long", group=groupBa)
+baUseTopBreakoutLong = input.bool(true, "Allow Top Breakout Long", group=groupBa)
+baUseTrendTransition = input.bool(true, "Allow EMA Trend Transition", group=groupBa)
+baUseExpandedFamilies = input.bool(true, "Use Expanded HTML Family Approximation", group=groupBa)
+
+groupOverlay = "No-Trade Overlay"
+lgObTf = input.timeframe("15", "Lightglow OB Source Timeframe", group=groupOverlay)
+lgHoldBars1m = input.int(45, "Lightglow Time Exit Bars On 1m", minval=1, maxval=240, group=groupOverlay)
+lgPivotSize = input.int(5, "Lightglow Internal Pivot Size", minval=2, maxval=20, group=groupOverlay)
+brLookback = input.int(30, "Breakout-Retest Lookback", minval=5, maxval=120, group=groupOverlay)
+brThreshold = input.float(0.001, "Breakout-Retest Threshold", minval=0.0, maxval=0.02, step=0.0001, group=groupOverlay)
+brHoldBars1m = input.int(60, "Breakout-Retest Time Exit Bars", minval=1, maxval=240, group=groupOverlay)
+
+groupRisk = "Risk / Exit"
+exitMode = input.string("Hybrid", "Exit Mode", options=["Hybrid", "Time Only", "Structure Bracket"], group=groupRisk)
+baMaxHoldBars = input.int(35, "BA Max Hold Bars", minval=2, maxval=240, group=groupRisk)
+baStopAtr = input.float(1.25, "BA Stop ATR", minval=0.25, maxval=8.0, step=0.05, group=groupRisk)
+baTargetR = input.float(2.50, "BA Target R", minval=0.25, maxval=8.0, step=0.05, group=groupRisk)
+overlayUseTimeExit = input.bool(true, "Overlay Uses Time Exit", group=groupRisk)
+protectiveStopAtr = input.float(4.00, "Failsafe Protective Stop ATR", minval=0.5, maxval=20.0, step=0.25, group=groupRisk)
+cooldownBars = input.int(5, "Cooldown Bars After Exit", minval=0, maxval=200, group=groupRisk)
+
+groupDisplay = "Display"
+showSignalMarkers = input.bool(true, "Show Compact Signal Markers", group=groupDisplay)
+showActualOrderMarkers = input.bool(true, "Show Actual Entry/Exit Markers", group=groupDisplay)
+showTradeLines = input.bool(true, "Draw Closed Trade Lines", group=groupDisplay)
+tradeLineWidth = input.int(3, "Closed Trade Line Width", minval=1, maxval=5, group=groupDisplay)
+showPnlLabels = input.bool(true, "Show Closed Trade Labels", group=groupDisplay)
+showTrendLines = input.bool(true, "Show EMA / Active Risk Lines", group=groupDisplay)
+showZones = input.bool(true, "Show Diagnostic Zones", group=groupDisplay)
+showStats = input.bool(true, "Show Summary Table", group=groupDisplay)
+showDebugCounters = input.bool(true, "Show Debug Counters", group=groupDisplay)
+maxVisualTrades = input.int(200, "Max Visual Trade Labels/Lines", minval=20, maxval=500, group=groupDisplay)
+markerSizeMode = input.string("Normal", "Marker Label Size", options=["Tiny", "Small", "Normal"], group=groupDisplay)
+pnlLabelSizeMode = input.string("Normal", "PnL Label Size", options=["Tiny", "Small", "Normal"], group=groupDisplay)
+entryMarkerAtrOffset = input.float(1.20, "Entry Marker ATR Offset", minval=0.0, maxval=10.0, step=0.25, group=groupDisplay)
+exitMarkerAtrOffset = input.float(1.80, "Exit Marker ATR Offset", minval=0.0, maxval=10.0, step=0.25, group=groupDisplay)
+pnlLabelAtrOffset = input.float(4.50, "PnL Label ATR Offset", minval=0.5, maxval=20.0, step=0.25, group=groupDisplay)
+pnlLabelBarsRight = input.int(14, "PnL Label Bars Right", minval=1, maxval=80, group=groupDisplay)
+
+// ============================================================================
+// Sessions / Shared Features
+// ============================================================================
+
+dateOk = not useDateFilter or (time >= startTime and time <= endTime)
+isMnqChart = str.contains(str.upper(syminfo.ticker), "MNQ")
+isOneMinuteChart = timeframe.isminutes and timeframe.multiplier == 1
+chartOk = true
+reportParityMode = executionMode == "Report Parity"
+baWindowOk = not reportParityMode or (time >= baReportStart and time < baReportEnd)
+overlayWindowOk = not reportParityMode or (time >= overlayReportStart and time < overlayReportEnd)
+utcYear = year(time, "UTC")
+utcHour = hour(time, "UTC")
+utcMinute = minute(time, "UTC")
+utcMonth = month(time, "UTC")
+utcMinuteOfDay = utcHour * 60 + utcMinute
+isAsia = utcMinuteOfDay < 420 or utcMinuteOfDay >= 1380
+isEurope = utcMinuteOfDay >= 420 and utcMinuteOfDay < 810
+isUsRth = utcMinuteOfDay >= 810 and utcMinuteOfDay < 1200
+isUsLate = utcMinuteOfDay >= 1200 and utcMinuteOfDay < 1380
+
+atr = ta.atr(14)
+ema20 = ta.ema(close, 20)
+ema60 = ta.ema(close, 60)
+ema200 = ta.ema(close, 200)
+rangeHigh = ta.highest(high, baRangeLength)[1]
+rangeLow = ta.lowest(low, baRangeLength)[1]
+rangeWidth = rangeHigh - rangeLow
+rangePos = rangeWidth > 0 ? (close - rangeLow) / rangeWidth : na
+volumeMean = ta.sma(volume, 60)
+volumeStd = ta.stdev(volume, 60)
+volumeZ = volumeStd > 0 ? (volume - volumeMean) / volumeStd : 0.0
+momentum = close - close[baMomentumLookback]
+bodyAtr = atr > 0 ? math.abs(close - open) / atr : 0.0
+barRange = high - low
+closeLocation = barRange > 0 ? (close - low) / barRange : 0.5
+lowerWickRatio = barRange > 0 ? (math.min(open, close) - low) / barRange : 0.0
+upperWickRatio = barRange > 0 ? (high - math.max(open, close)) / barRange : 0.0
+microBreakoutHigh = ta.highest(high, 10)[1]
+microBreakdownLow = ta.lowest(low, 10)[1]
+internalHigh = ta.highest(high, 10)[1]
+internalLow = ta.lowest(low, 10)[1]
+swingHigh = ta.highest(high, 50)[1]
+swingLow = ta.lowest(low, 50)[1]
+lastBearishHigh = ta.valuewhen(close < open, high, 0)[1]
+lastBearishLow = ta.valuewhen(close < open, low, 0)[1]
+lastBullishHigh = ta.valuewhen(close > open, high, 0)[1]
+lastBullishLow = ta.valuewhen(close > open, low, 0)[1]
+
+float baReportScale = 1.0
+if reportParityMode and applyReportSizing
+    baReportScale := 0.0
+    if utcYear == 2025 and utcMonth == 9
+        baReportScale := 0.85
+    else if utcYear == 2025 and utcMonth == 10
+        baReportScale := 1.65
+    else if utcYear == 2025 and utcMonth >= 11
+        baReportScale := 2.35
+    else if utcYear == 2026 and utcMonth <= 4
+        baReportScale := 2.35
+baEffectiveQty = math.max(baReportScale, 0.0)
+overlayEffectiveQty = 1.0
+
+// ============================================================================
+// BA Main Approximation
+// ============================================================================
+
+belowRangeLow = not na(rangeLow) and close < rangeLow - atr * baAcceptAtrBuffer
+aboveRangeHigh = not na(rangeHigh) and close > rangeHigh + atr * baAcceptAtrBuffer
+acceptedBelowRange = math.sum(belowRangeLow ? 1 : 0, baAcceptBars) >= baAcceptBars
+acceptedAboveRange = math.sum(aboveRangeHigh ? 1 : 0, baAcceptBars) >= baAcceptBars
+sweepBelowRange = not na(rangeLow) and low < rangeLow and close > rangeLow
+sweepAboveRange = not na(rangeHigh) and high > rangeHigh and close < rangeHigh
+
+bottomReclaimLong = baUseBottomReclaimLong and sweepBelowRange and close > open and momentum > momentum[1] and bodyAtr >= baBodyAtrMin * 0.5
+topBreakoutLong = baUseTopBreakoutLong and acceptedAboveRange and close > open and ema20 > ema60 and ema60 >= ema200 and momentum > 0 and volumeZ >= baVolumeZMin and bodyAtr >= baBodyAtrMin
+asiaTrendShort = baUseAsiaShort and isAsia and acceptedBelowRange and close < open and ema20 < ema60 and ema60 <= ema200 and momentum < 0 and volumeZ >= baVolumeZMin and bodyAtr >= baBodyAtrMin
+emaBullTransition = baUseTrendTransition and close > ema20 and close > ema60 and ema20 > ema20[1] and close > ta.highest(high, 20)[1] and momentum > 0 and bodyAtr >= baBodyAtrMin * 0.65
+emaBearTransition = baUseTrendTransition and close < ema20 and close < ema60 and ema20 < ema20[1] and close < ta.lowest(low, 20)[1] and momentum < 0 and bodyAtr >= baBodyAtrMin * 0.65
+
+trendUp = ema20 > ema60 and ema60 > ema200 and ema20 > ema20[10] and close > ema60
+trendDown = ema20 < ema60 and ema60 < ema200 and ema20 < ema20[10] and close < ema60
+trendPullbackLong = trendUp and low <= ema20 + atr * 0.35 and low > ema60 - atr * 0.35 and close > ema20 and close > open and close > microBreakoutHigh and momentum > 0 and bodyAtr >= 0.18
+trendPullbackShortAsiaEurope = (isAsia or isEurope) and trendDown and high >= ema20 - atr * 0.35 and high < ema60 + atr * 0.35 and close < ema20 and close < open and close < microBreakdownLow and momentum < 0 and bodyAtr >= 0.18
+fastReversalLong = sweepBelowRange and close > rangeLow and closeLocation >= 0.62 and lowerWickRatio >= 0.35 and close > close[1] and bodyAtr >= 0.20
+bullishChoch = close > internalHigh and close[1] <= internalHigh[1]
+bearishChoch = close < internalLow and close[1] >= internalLow[1]
+bullishBos = close > swingHigh and close[1] <= swingHigh[1]
+bearishBos = close < swingLow and close[1] >= swingLow[1]
+bullishFvg = low > high[2]
+bearishFvg = high < low[2]
+recentBullishFvg = math.sum(bullishFvg ? 1 : 0, 5) > 0
+recentBearishFvg = math.sum(bearishFvg ? 1 : 0, 5) > 0
+discountZone = rangePos <= 0.35
+premiumZone = rangePos >= 0.65
+smcDiscountChochLong = (discountZone or sweepBelowRange) and bullishChoch and closeLocation >= 0.60 and momentum > momentum[1] and bodyAtr >= 0.20
+smcPremiumChochShort = (premiumZone or sweepAboveRange) and bearishChoch and closeLocation <= 0.40 and momentum < momentum[1] and bodyAtr >= 0.20
+smcObRetestLong = trendUp and low <= lastBearishHigh and low >= lastBearishLow - atr * 0.30 and close > open and close > ema20 and closeLocation >= 0.55
+smcObRetestShort = trendDown and high >= lastBullishLow and high <= lastBullishHigh + atr * 0.30 and close < open and close < ema20 and closeLocation <= 0.45
+smcBosFvgLong = bullishBos and recentBullishFvg and close > open and momentum > 0 and volumeZ >= baVolumeZMin
+smcBosFvgShort = bearishBos and recentBearishFvg and close < open and momentum < 0 and volumeZ >= baVolumeZMin
+
+allowTrendTransitionLong = not isAsia and not (utcHour == 1 or utcHour == 3 or utcHour == 5 or utcHour == 6 or utcHour == 8 or utcHour == 10 or utcHour == 11 or utcHour == 14 or utcHour == 15 or utcHour == 16 or utcHour == 17 or utcHour == 18 or utcHour == 19 or utcHour == 20 or utcHour == 21 or utcHour == 22) and not (isEurope and volumeZ < 0)
+allowTrendTransitionShort = isAsia and not (utcHour == 0 or utcHour == 3 or utcHour == 5 or utcHour == 23) and momentum <= 0
+allowTrendPullbackLong = not (utcHour == 0 or utcHour == 1 or utcHour == 2 or utcHour == 10 or utcHour == 11 or utcHour == 13 or utcHour == 15 or utcHour == 16 or utcHour == 17 or utcHour == 19 or utcHour == 21 or utcHour == 22 or utcHour == 23)
+allowTrendPullbackShort = isEurope and not (utcHour == 2 or utcHour == 3 or utcHour == 4 or utcHour == 5 or utcHour == 7 or utcHour == 8 or utcHour == 9 or utcHour == 12 or utcHour == 23)
+allowBottomReclaim = not (isEurope or isUsRth) and not (utcHour == 0 or utcHour == 7 or utcHour == 8 or utcHour == 9 or utcHour == 10 or utcHour == 12 or utcHour == 17 or utcHour == 19)
+allowSmcDiscount = not (utcHour == 0 or utcHour == 1 or utcHour == 2 or utcHour == 3 or utcHour == 10 or utcHour == 13 or utcHour == 16 or utcHour == 18 or utcHour == 21 or utcHour == 22 or utcHour == 23) and not (isUsRth and utcHour == 17)
+
+expandedLong = baUseExpandedFamilies and ((bottomReclaimLong and allowBottomReclaim) or (emaBullTransition and allowTrendTransitionLong) or (trendPullbackLong and allowTrendPullbackLong) or (fastReversalLong and not isAsia) or (smcDiscountChochLong and allowSmcDiscount) or smcObRetestLong or smcBosFvgLong)
+expandedShort = baUseExpandedFamilies and ((asiaTrendShort and allowTrendTransitionShort) or (emaBearTransition and allowTrendTransitionShort) or (trendPullbackShortAsiaEurope and allowTrendPullbackShort) or smcPremiumChochShort or smcObRetestShort or smcBosFvgShort)
+legacyLong = not baUseExpandedFamilies and (bottomReclaimLong or topBreakoutLong or emaBullTransition)
+legacyShort = not baUseExpandedFamilies and (asiaTrendShort or emaBearTransition or (sweepAboveRange and close < open and momentum < 0 and bodyAtr >= baBodyAtrMin * 0.5))
+
+baRawLongSignal = tradeBaApprox and (expandedLong or legacyLong)
+baRawShortSignal = tradeBaApprox and (expandedShort or legacyShort)
+baLongSignal = baRawLongSignal and dateOk and chartOk and baWindowOk
+baShortSignal = baRawShortSignal and dateOk and chartOk and baWindowOk
+baSignal = baLongSignal ? 1 : baShortSignal ? -1 : 0
+
+// ============================================================================
+// Recommended No-Trade Overlay: Lightglow Internal OB Break
+// ============================================================================
+
+lgHigh = request.security(syminfo.tickerid, lgObTf, high, barmerge.gaps_off, barmerge.lookahead_off)
+lgLow = request.security(syminfo.tickerid, lgObTf, low, barmerge.gaps_off, barmerge.lookahead_off)
+lgClose = request.security(syminfo.tickerid, lgObTf, close, barmerge.gaps_off, barmerge.lookahead_off)
+lgTime = request.security(syminfo.tickerid, lgObTf, time, barmerge.gaps_off, barmerge.lookahead_off)
+newLgBar = ta.change(lgTime) != 0
+
+var float lgPivotHighLevel = na
+var float lgPivotLowLevel = na
+var int lgTrend = 0
+var bool lgHighCrossed = true
+var bool lgLowCrossed = true
+var float lgBearBlockHigh = na
+var float lgBearBlockLow = na
+var float lgBullBlockHigh = na
+var float lgBullBlockLow = na
+
+lgPivotHigh = ta.pivothigh(lgHigh, lgPivotSize, lgPivotSize)
+lgPivotLow = ta.pivotlow(lgLow, lgPivotSize, lgPivotSize)
+if newLgBar and not na(lgPivotHigh)
+    lgPivotHighLevel := lgPivotHigh
+    lgHighCrossed := false
+if newLgBar and not na(lgPivotLow)
+    lgPivotLowLevel := lgPivotLow
+    lgLowCrossed := false
+
+lgBullBos = newLgBar and not na(lgPivotHighLevel) and not lgHighCrossed and lgClose[1] <= lgPivotHighLevel and lgClose > lgPivotHighLevel
+lgBearBos = newLgBar and not na(lgPivotLowLevel) and not lgLowCrossed and lgClose[1] >= lgPivotLowLevel and lgClose < lgPivotLowLevel
+
+if lgBullBos
+    lgHighCrossed := true
+    lgTrend := 1
+    lgBullBlockLow := ta.lowest(lgLow, lgPivotSize * 2)
+    lgBullBlockHigh := ta.highest(lgHigh, lgPivotSize * 2)
+if lgBearBos
+    lgLowCrossed := true
+    lgTrend := -1
+    lgBearBlockLow := ta.lowest(lgLow, lgPivotSize * 2)
+    lgBearBlockHigh := ta.highest(lgHigh, lgPivotSize * 2)
+
+lgInternalObBreakLong = newLgBar and not na(lgBearBlockHigh) and high > lgBearBlockHigh
+lgInternalObBreakShort = newLgBar and not na(lgBullBlockLow) and low < lgBullBlockLow
+if lgInternalObBreakLong
+    lgBearBlockHigh := na
+    lgBearBlockLow := na
+if lgInternalObBreakShort
+    lgBullBlockHigh := na
+    lgBullBlockLow := na
+
+lightglowOverlayRawSignal = tradeNoTradeOverlay and isUsLate and (lgInternalObBreakLong or lgInternalObBreakShort)
+lightglowOverlaySignal = lightglowOverlayRawSignal and dateOk and chartOk and overlayWindowOk
+lightglowDirection = lgInternalObBreakLong ? 1 : lgInternalObBreakShort ? -1 : 0
+
+// ============================================================================
+// Recommended No-Trade Overlay: US-Late Long Breakout-Retest
+// ============================================================================
+
+brPriorHigh = ta.highest(high, brLookback)[2]
+brPriorLow = ta.lowest(low, brLookback)[2]
+brRange = brPriorHigh - brPriorLow
+brLongBreakout = close[1] > brPriorHigh
+brLongRetest = low <= brPriorHigh and close > brPriorHigh + brRange * brThreshold
+breakoutRetestRawLong = tradeNoTradeOverlay and isUsLate and brLongBreakout and brLongRetest
+breakoutRetestLong = breakoutRetestRawLong and dateOk and chartOk and overlayWindowOk
+
+overlayQuietOk = not overlayOnlyWhenBaQuiet or baSignal == 0
+overlayLongSignal = overlayQuietOk and (lightglowOverlaySignal and lightglowDirection > 0 or breakoutRetestLong)
+overlayShortSignal = overlayQuietOk and lightglowOverlaySignal and lightglowDirection < 0
+overlaySignal = overlayLongSignal ? 1 : overlayShortSignal ? -1 : 0
+
+// ============================================================================
+// Orders / State
+// ============================================================================
+
+var int lastClosedCount = 0
+var int lastExitBar = na
+var string activeLeg = ""
+var int activeEntryBar = na
+var float activeStop = na
+var float activeTarget = na
+var int baSignalCount = 0
+var int overlaySignalCount = 0
+var int entryAllowedCount = 0
+var int dateBlockedCount = 0
+var int timeframeBlockedCount = 0
+var int reportWindowBlockedCount = 0
+var int cooldownBlockedCount = 0
+var int occupiedBlockedCount = 0
+var array<line> tradeLines = array.new<line>()
+var array<label> pnlLabels = array.new<label>()
+var array<label> orderLabels = array.new<label>()
+
+isFlat = strategy.position_size == 0
+cooldownOk = na(lastExitBar) or bar_index - lastExitBar >= cooldownBars
+entryDirection = baSignal != 0 ? baSignal : overlaySignal
+entryLeg = baSignal != 0 ? "BA" : overlaySignal != 0 ? (breakoutRetestLong ? "BR" : "LG_OB") : ""
+entryAllowed = isFlat and cooldownOk and dateOk and entryDirection != 0
+
+if baSignal != 0
+    baSignalCount += 1
+if overlaySignal != 0
+    overlaySignalCount += 1
+if entryAllowed
+    entryAllowedCount += 1
+rawSignalPresent = baRawLongSignal or baRawShortSignal or lightglowOverlayRawSignal or breakoutRetestRawLong
+if not dateOk and rawSignalPresent
+    dateBlockedCount += 1
+if strictOneMinute and not isOneMinuteChart and rawSignalPresent
+    timeframeBlockedCount += 1
+if reportParityMode and chartOk and dateOk and ((baRawLongSignal or baRawShortSignal) and not baWindowOk or (lightglowOverlayRawSignal or breakoutRetestRawLong) and not overlayWindowOk)
+    reportWindowBlockedCount += 1
+if dateOk and not isFlat and (baSignal != 0 or overlaySignal != 0)
+    occupiedBlockedCount += 1
+if dateOk and isFlat and not cooldownOk and (baSignal != 0 or overlaySignal != 0)
+    cooldownBlockedCount += 1
+
+if entryAllowed and entryDirection > 0
+    activeLeg := entryLeg
+    activeEntryBar := bar_index
+    if entryLeg == "BA"
+        activeStop := close - atr * baStopAtr
+        activeTarget := close + atr * baStopAtr * baTargetR
+    else
+        activeStop := close - atr * protectiveStopAtr
+        activeTarget := na
+    if entryLeg == "BA"
+        strategy.entry("L", strategy.long, qty=baEffectiveQty)
+    else if entryLeg == "BR"
+        strategy.entry("L", strategy.long, qty=overlayEffectiveQty)
+    else
+        strategy.entry("L", strategy.long, qty=overlayEffectiveQty)
+
+if entryAllowed and entryDirection < 0
+    activeLeg := entryLeg
+    activeEntryBar := bar_index
+    if entryLeg == "BA"
+        activeStop := close + atr * baStopAtr
+        activeTarget := close - atr * baStopAtr * baTargetR
+    else
+        activeStop := close + atr * protectiveStopAtr
+        activeTarget := na
+    if entryLeg == "BA"
+        strategy.entry("S", strategy.short, qty=baEffectiveQty)
+    else
+        strategy.entry("S", strategy.short, qty=overlayEffectiveQty)
+
+barsHeld = strategy.opentrades > 0 ? bar_index - strategy.opentrades.entry_bar_index(0) : 0
+newLongPosition = strategy.position_size > 0 and strategy.position_size[1] <= 0
+newShortPosition = strategy.position_size < 0 and strategy.position_size[1] >= 0
+newFlatPosition = strategy.position_size == 0 and strategy.position_size[1] != 0
+isBaPosition = activeLeg == "BA"
+isLgPosition = activeLeg == "LG_OB"
+isBrPosition = activeLeg == "BR"
+overlayHoldBars = isLgPosition ? lgHoldBars1m : isBrPosition ? brHoldBars1m : baMaxHoldBars
+
+if strategy.position_size > 0
+    if exitMode != "Time Only"
+        strategy.exit("XL", stop=activeStop, limit=isBaPosition ? activeTarget : na)
+    if (isBaPosition and barsHeld >= baMaxHoldBars) or (not isBaPosition and overlayUseTimeExit and barsHeld >= overlayHoldBars)
+        strategy.close_all("X")
+
+if strategy.position_size < 0
+    if exitMode != "Time Only"
+        strategy.exit("XS", stop=activeStop, limit=isBaPosition ? activeTarget : na)
+    if (isBaPosition and barsHeld >= baMaxHoldBars) or (not isBaPosition and overlayUseTimeExit and barsHeld >= overlayHoldBars)
+        strategy.close_all("X")
+
+if newFlatPosition
+    activeLeg := ""
+    activeEntryBar := na
+    activeStop := na
+    activeTarget := na
+
+// ============================================================================
+// Visuals
+// ============================================================================
+
+markerLabelSize = markerSizeMode == "Normal" ? size.normal : markerSizeMode == "Small" ? size.small : size.tiny
+pnlLabelSize = pnlLabelSizeMode == "Normal" ? size.normal : pnlLabelSizeMode == "Small" ? size.small : size.tiny
+
+plotshape(showSignalMarkers and baLongSignal, "BA Approx Long", shape.triangleup, location.bottom, color.new(color.lime, 15), size=size.tiny, text="BA")
+plotshape(showSignalMarkers and baShortSignal, "BA Approx Short", shape.triangledown, location.top, color.new(color.red, 15), size=size.tiny, text="BA")
+plotshape(showSignalMarkers and lightglowOverlaySignal and lightglowDirection > 0, "Overlay LG OB Long", shape.circle, location.bottom, color.new(color.aqua, 15), size=size.tiny, text="LG")
+plotshape(showSignalMarkers and lightglowOverlaySignal and lightglowDirection < 0, "Overlay LG OB Short", shape.circle, location.top, color.new(color.fuchsia, 15), size=size.tiny, text="LG")
+plotshape(showSignalMarkers and breakoutRetestLong, "Overlay Breakout Retest Long", shape.diamond, location.bottom, color.new(color.yellow, 15), size=size.tiny, text="BR")
+
+if showActualOrderMarkers and newLongPosition
+    entryLabel = label.new(bar_index, low - atr * entryMarkerAtrOffset, "IN L", xloc=xloc.bar_index, yloc=yloc.price, color=color.new(color.lime, 80), textcolor=color.lime, style=label.style_label_up, size=markerLabelSize)
+    array.push(orderLabels, entryLabel)
+    if array.size(orderLabels) > maxVisualTrades
+        label.delete(array.shift(orderLabels))
+
+if showActualOrderMarkers and newShortPosition
+    entryLabel = label.new(bar_index, high + atr * entryMarkerAtrOffset, "IN S", xloc=xloc.bar_index, yloc=yloc.price, color=color.new(color.red, 80), textcolor=color.red, style=label.style_label_down, size=markerLabelSize)
+    array.push(orderLabels, entryLabel)
+    if array.size(orderLabels) > maxVisualTrades
+        label.delete(array.shift(orderLabels))
+
+if showActualOrderMarkers and newFlatPosition
+    wasLong = strategy.position_size[1] > 0
+    exitY = wasLong ? high + atr * exitMarkerAtrOffset : low - atr * exitMarkerAtrOffset
+    exitStyle = wasLong ? label.style_label_down : label.style_label_up
+    exitLabel = label.new(bar_index, exitY, "OUT", xloc=xloc.bar_index, yloc=yloc.price, color=color.new(color.yellow, 80), textcolor=color.yellow, style=exitStyle, size=markerLabelSize)
+    array.push(orderLabels, exitLabel)
+    if array.size(orderLabels) > maxVisualTrades
+        label.delete(array.shift(orderLabels))
+
+plot(showZones ? rangeHigh : na, "BA Diagnostic Range High", color=color.new(color.blue, 78), linewidth=1, style=plot.style_linebr)
+plot(showZones ? rangeLow : na, "BA Diagnostic Range Low", color=color.new(color.orange, 72), linewidth=1, style=plot.style_linebr)
+plot(showTrendLines ? ema20 : na, "EMA20", color=color.new(color.aqua, 72), linewidth=1)
+plot(showTrendLines ? ema60 : na, "EMA60", color=color.new(color.orange, 72), linewidth=1)
+plot(showTrendLines ? ema200 : na, "EMA200", color=color.new(color.gray, 82), linewidth=1)
+plot(showTrendLines and strategy.position_size != 0 ? activeStop : na, "Active Stop", color=color.new(color.red, 50), linewidth=1, style=plot.style_linebr)
+plot(showTrendLines and strategy.position_size != 0 and isBaPosition ? activeTarget : na, "BA Active Target", color=color.new(color.lime, 50), linewidth=1, style=plot.style_linebr)
+bgcolor(showParityWarning and strictOneMinute and not isOneMinuteChart ? color.new(color.red, 88) : na, title="Wrong Timeframe Warning")
+
+var label parityWarningLabel = na
+if showParityWarning and barstate.islast
+    if not na(parityWarningLabel)
+        label.delete(parityWarningLabel)
+    symbolWarning = warnWhenNotMnq and not isMnqChart
+    warningText = symbolWarning ? "SYMBOL WARNING\nLoad on MNQ/MNQ1! for micro-Nasdaq.\nPine trades current chart: " + syminfo.ticker : strictOneMinute and not isOneMinuteChart ? "TIMEFRAME EXPERIMENT\nTrades are allowed for comparison.\nNon-1m is not HTML report parity." : reportParityMode ? "REPORT PARITY\nOnly causal enabled HTML report windows can trade." : "LIVE APPROXIMATION\nMNQ chart expected.\nNot exact Python walk-forward parity."
+    warningSize = symbolWarning or (strictOneMinute and not isOneMinuteChart) ? size.large : size.normal
+    warningColor = symbolWarning ? color.red : strictOneMinute and not isOneMinuteChart ? color.red : color.orange
+    parityWarningLabel := label.new(bar_index, high + atr * 7.0, warningText, xloc=xloc.bar_index, yloc=yloc.price, color=color.new(color.black, 10), textcolor=warningColor, style=label.style_label_left, size=warningSize)
+
+if strategy.closedtrades > lastClosedCount
+    tradeIndex = strategy.closedtrades - 1
+    exitBar = strategy.closedtrades.exit_bar_index(tradeIndex)
+    entryBar = strategy.closedtrades.entry_bar_index(tradeIndex)
+    entryPrice = strategy.closedtrades.entry_price(tradeIndex)
+    exitPrice = strategy.closedtrades.exit_price(tradeIndex)
+    tradeSize = strategy.closedtrades.size(tradeIndex)
+    direction = tradeSize > 0 ? 1 : -1
+    pointsPnl = (exitPrice - entryPrice) * direction
+    cashPnl = strategy.closedtrades.profit(tradeIndex)
+    isWin = cashPnl >= 0
+    tradeColor = isWin ? color.new(color.lime, 0) : color.new(color.red, 0)
+    if showTradeLines
+        newLine = line.new(entryBar, entryPrice, exitBar, exitPrice, xloc=xloc.bar_index, extend=extend.none, color=color.new(tradeColor, 20), style=line.style_dashed, width=tradeLineWidth)
+        array.push(tradeLines, newLine)
+        if array.size(tradeLines) > maxVisualTrades
+            line.delete(array.shift(tradeLines))
+    if showPnlLabels
+        pnlY = direction > 0 ? math.max(high, exitPrice) + atr * pnlLabelAtrOffset : math.min(low, exitPrice) - atr * pnlLabelAtrOffset
+        pnlText = "Trade #" + str.tostring(strategy.closedtrades) + "\n" + (direction > 0 ? "LONG " : "SHORT ") + str.tostring(pointsPnl, "#.##") + " pts\n$" + str.tostring(cashPnl, "#.##")
+        newLabel = label.new(exitBar + pnlLabelBarsRight, pnlY, pnlText, xloc=xloc.bar_index, yloc=yloc.price, color=color.new(color.black, 35), textcolor=tradeColor, style=label.style_label_left, size=pnlLabelSize)
+        array.push(pnlLabels, newLabel)
+        if array.size(pnlLabels) > maxVisualTrades
+            label.delete(array.shift(pnlLabels))
+    lastExitBar := exitBar
+    lastClosedCount := strategy.closedtrades
+
+alertcondition(newLongPosition, "MNQ BA+NT Long Entry", "MNQ BA+NT combo long entry. Pine trades the active chart symbol.")
+alertcondition(newShortPosition, "MNQ BA+NT Short Entry", "MNQ BA+NT combo short entry. Pine trades the active chart symbol.")
+alertcondition(newFlatPosition, "MNQ BA+NT Exit", "MNQ BA+NT combo exit.")
+
+// ============================================================================
+// Summary Table
+// ============================================================================
+
+if showStats and barstate.islast
+    var table stats = table.new(position.top_right, 2, 30, border_width=1)
+    winRate = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100 : 0.0
+    grossLossAbs = math.abs(strategy.grossloss)
+    profitFactor = grossLossAbs > 0 ? strategy.grossprofit / grossLossAbs : na
+    avgTrade = strategy.closedtrades > 0 ? strategy.netprofit / strategy.closedtrades : 0.0
+    table.cell(stats, 0, 0, "MNQ BA+NT", text_color=color.white, bgcolor=color.new(color.blue, 25), text_size=size.small)
+    table.cell(stats, 1, 0, "micro contract", text_color=color.white, bgcolor=color.new(color.blue, 25), text_size=size.small)
+    table.cell(stats, 0, 1, "Closed Trades", text_size=size.small)
+    table.cell(stats, 1, 1, str.tostring(strategy.closedtrades), text_size=size.small)
+    table.cell(stats, 0, 2, "Net Profit", text_size=size.small)
+    table.cell(stats, 1, 2, "$" + str.tostring(strategy.netprofit, "#.##"), text_color=strategy.netprofit >= 0 ? color.lime : color.red, text_size=size.small)
+    table.cell(stats, 0, 3, "Win Rate", text_size=size.small)
+    table.cell(stats, 1, 3, str.tostring(winRate, "#.#") + "%", text_size=size.small)
+    table.cell(stats, 0, 4, "Profit Factor", text_size=size.small)
+    table.cell(stats, 1, 4, na(profitFactor) ? "n/a" : str.tostring(profitFactor, "#.##"), text_size=size.small)
+    table.cell(stats, 0, 5, "Avg Trade", text_size=size.small)
+    table.cell(stats, 1, 5, "$" + str.tostring(avgTrade, "#.##"), text_color=avgTrade >= 0 ? color.lime : color.red, text_size=size.small)
+    table.cell(stats, 0, 6, "UTC Session", text_size=size.small)
+    table.cell(stats, 1, 6, isAsia ? "asia" : isEurope ? "europe" : isUsRth ? "us_rth" : isUsLate ? "us_late" : "other", text_size=size.small)
+    table.cell(stats, 0, 7, "Active Leg", text_size=size.small)
+    table.cell(stats, 1, 7, activeLeg == "" ? "flat" : activeLeg, text_size=size.small)
+    table.cell(stats, 0, 8, "Range Pos", text_size=size.small)
+    table.cell(stats, 1, 8, na(rangePos) ? "n/a" : str.tostring(rangePos, "#.##"), text_size=size.small)
+    table.cell(stats, 0, 9, "Volume Z", text_size=size.small)
+    table.cell(stats, 1, 9, str.tostring(volumeZ, "#.##"), text_size=size.small)
+    table.cell(stats, 0, 10, "BA Approx", text_size=size.small)
+    table.cell(stats, 1, 10, tradeBaApprox ? "ON" : "OFF", text_size=size.small)
+    table.cell(stats, 0, 11, "Overlay", text_size=size.small)
+    table.cell(stats, 1, 11, tradeNoTradeOverlay ? "ON" : "OFF", text_size=size.small)
+    table.cell(stats, 0, 12, "Date Filter", text_size=size.small)
+    table.cell(stats, 1, 12, useDateFilter ? (dateOk ? "ON/pass" : "ON/blocked") : "OFF", text_color=dateOk ? color.lime : color.red, text_size=size.small)
+    table.cell(stats, 0, 13, "Chart TF", text_size=size.small)
+    table.cell(stats, 1, 13, timeframe.period, text_size=size.small)
+    table.cell(stats, 0, 14, "BA Signals", text_size=size.small)
+    table.cell(stats, 1, 14, showDebugCounters ? str.tostring(baSignalCount) : "hidden", text_size=size.small)
+    table.cell(stats, 0, 15, "Overlay Signals", text_size=size.small)
+    table.cell(stats, 1, 15, showDebugCounters ? str.tostring(overlaySignalCount) : "hidden", text_size=size.small)
+    table.cell(stats, 0, 16, "Orders Allowed", text_size=size.small)
+    table.cell(stats, 1, 16, showDebugCounters ? str.tostring(entryAllowedCount) : "hidden", text_size=size.small)
+    table.cell(stats, 0, 17, "Blocked: Date", text_size=size.small)
+    table.cell(stats, 1, 17, showDebugCounters ? str.tostring(dateBlockedCount) : "hidden", text_size=size.small)
+    table.cell(stats, 0, 18, "Blocked: In Trade", text_size=size.small)
+    table.cell(stats, 1, 18, showDebugCounters ? str.tostring(occupiedBlockedCount) : "hidden", text_size=size.small)
+    table.cell(stats, 0, 19, "Blocked: Cooldown", text_size=size.small)
+    table.cell(stats, 1, 19, showDebugCounters ? str.tostring(cooldownBlockedCount) : "hidden", text_size=size.small)
+    table.cell(stats, 0, 20, "Mode", text_size=size.small)
+    table.cell(stats, 1, 20, executionMode, text_color=reportParityMode ? color.orange : color.yellow, text_size=size.small)
+    table.cell(stats, 0, 21, "TF Warning", text_size=size.small)
+    table.cell(stats, 1, 21, strictOneMinute ? (isOneMinuteChart ? "1m/pass" : "non-1m/allowed") : "off", text_color=isOneMinuteChart or not strictOneMinute ? color.lime : color.orange, text_size=size.small)
+    table.cell(stats, 0, 22, "BA Window", text_size=size.small)
+    table.cell(stats, 1, 22, reportParityMode ? (baWindowOk ? "enabled" : "blocked") : "live approx", text_color=baWindowOk ? color.lime : color.gray, text_size=size.small)
+    table.cell(stats, 0, 23, "Overlay Window", text_size=size.small)
+    table.cell(stats, 1, 23, reportParityMode ? (overlayWindowOk ? "enabled" : "blocked") : "live approx", text_color=overlayWindowOk ? color.lime : color.gray, text_size=size.small)
+    table.cell(stats, 0, 24, "Warn: TF", text_size=size.small)
+    table.cell(stats, 1, 24, showDebugCounters ? str.tostring(timeframeBlockedCount) : "hidden", text_size=size.small)
+    table.cell(stats, 0, 25, "Blocked: ReportWin", text_size=size.small)
+    table.cell(stats, 1, 25, showDebugCounters ? str.tostring(reportWindowBlockedCount) : "hidden", text_size=size.small)
+    table.cell(stats, 0, 26, "BA Report Scale", text_size=size.small)
+    table.cell(stats, 1, 26, applyReportSizing ? str.tostring(baReportScale, "#.##") + "x" : "off", text_color=baReportScale > 0 ? color.lime : color.gray, text_size=size.small)
+    table.cell(stats, 0, 27, "Parity Caveat", text_size=size.small)
+    table.cell(stats, 1, 27, "Pine approx", text_color=color.orange, text_size=size.small)
+    table.cell(stats, 0, 28, "Chart Symbol", text_size=size.small)
+    table.cell(stats, 1, 28, syminfo.ticker, text_color=isMnqChart ? color.lime : color.red, text_size=size.small)
+    table.cell(stats, 0, 29, "MNQ Check", text_size=size.small)
+    table.cell(stats, 1, 29, isMnqChart ? "MNQ/pass" : "not MNQ", text_color=isMnqChart ? color.lime : color.red, text_size=size.small)

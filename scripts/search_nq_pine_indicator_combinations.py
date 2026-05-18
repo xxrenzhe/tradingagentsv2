@@ -127,6 +127,56 @@ class ComboSpec:
     entry_mode: str = "next_open"
     min_structure_rr: float = 0.0
     entry_wait_bars: int = 0
+    risk_cap_atr: float = 0.0
+    max_target_r: float = 0.0
+    trail_start_r: float = 0.0
+    trail_atr_mult: float = 0.0
+    breakeven_trigger_r: float = 0.0
+    min_target_r: float = 0.0
+    time_stop_bars: int = 0
+    time_stop_min_r: float = 0.0
+    giveback_start_r: float = 0.0
+    giveback_keep_r: float = 0.0
+    avoid_loss_clusters: bool = False
+    target_runner: bool = False
+    adverse_reversal_exit: bool = False
+    adverse_exit_max_r: float = 999.0
+    target_runner_families: tuple[str, ...] = ()
+    entry_quality_filter: str = "none"
+
+
+STRUCTURE_CONTINUATION_BASES = {
+    "top_breakout_long",
+    "bottom_breakdown_short",
+    "trend_ignition_long",
+    "trend_ignition_short",
+    "trend_pullback_long",
+    "trend_pullback_short",
+    "trend_transition_long",
+    "trend_transition_short",
+    "phase_up_breakout_long",
+    "phase_up_pullback_long",
+    "phase_down_breakdown_short",
+    "phase_down_pullback_short",
+    "smc_bos_fvg_long",
+    "smc_bos_fvg_short",
+    "smc_ob_retest_long",
+    "smc_ob_retest_short",
+    "smc_trend_transition_long",
+    "smc_trend_transition_short",
+    "smc_trend_pullback_long",
+    "smc_trend_pullback_short",
+}
+STRUCTURE_REVERSAL_BASES = {
+    "bottom_reclaim_long",
+    "top_reject_short",
+    "fast_reversal_long",
+    "fast_reversal_short",
+    "reversal_impulse_long",
+    "reversal_impulse_short",
+    "smc_discount_choch_long",
+    "smc_premium_choch_short",
+}
 
 
 def latest_databento_window(csv_path: Path = LATEST_CSV, *, days: int = 31) -> tuple[str, str, pd.Timestamp]:
@@ -479,6 +529,34 @@ def add_all_lightglow_signal_columns(frame: pd.DataFrame, config: BoundaryLightg
     for family, condition in raw_conditions.items():
         condition = condition.fillna(False)
         output[f"lg_{family}"] = condition & ~condition.shift(1, fill_value=False)
+    output["strong_trend_continuation_long"] = (
+        (close > open_)
+        & (close >= high - (high - low).replace(0, np.nan) * 0.25)
+        & (body_atr >= 0.80)
+        & (volume_z >= 0.75)
+        & (output["range_pos"] >= 0.95)
+    ).fillna(False)
+    output["strong_trend_continuation_short"] = (
+        (close < open_)
+        & (close <= low + (high - low).replace(0, np.nan) * 0.25)
+        & (body_atr >= 0.80)
+        & (volume_z >= 0.75)
+        & (output["range_pos"] <= 0.05)
+    ).fillna(False)
+    output["adverse_reversal_long"] = (
+        (close < open_)
+        & (body_atr >= 0.85)
+        & (volume_z >= 0.25)
+        & ((close < low.shift(1)) | (close < output["range_high"].shift(1)))
+        & (output["range_pos"] <= 0.75)
+    ).fillna(False)
+    output["adverse_reversal_short"] = (
+        (close > open_)
+        & (body_atr >= 0.85)
+        & (volume_z >= 0.25)
+        & ((close > high.shift(1)) | (close > output["range_low"].shift(1)))
+        & (output["range_pos"] >= 0.25)
+    ).fillna(False)
     return output
 
 
@@ -619,6 +697,389 @@ def _structure_filter_plan(
     }
 
 
+def _price_in_directional_zone(
+    *,
+    direction: int,
+    entry_price: float,
+    structure_low: float,
+    structure_high: float,
+    max_long_pos: float,
+    min_short_pos: float,
+) -> bool:
+    width = structure_high - structure_low
+    if not np.isfinite(width) or width <= 0:
+        return False
+    pos = (entry_price - structure_low) / width
+    if direction > 0:
+        return bool(pos <= max_long_pos)
+    return bool(pos >= min_short_pos)
+
+
+def _adaptive_structure_plan(
+    features: pd.DataFrame,
+    *,
+    signal_index: int,
+    direction: int,
+    family: str,
+    entry_price: float,
+    active_atr: float,
+    min_structure_rr: float,
+    wait_bars: int,
+) -> dict[str, Any] | None:
+    target_family = FAMILY_TARGET_BASE.get(family, family)
+    is_reversal = target_family in STRUCTURE_REVERSAL_BASES
+    lookback = 34 if is_reversal else 14
+    start = max(0, signal_index - lookback + 1)
+    structure_low = float(features["Low"].iloc[start : signal_index + 1].min())
+    structure_high = float(features["High"].iloc[start : signal_index + 1].max())
+    if not np.isfinite(structure_low) or not np.isfinite(structure_high) or structure_high <= structure_low:
+        return None
+    width = structure_high - structure_low
+    buffer = max(active_atr * (0.18 if is_reversal else 0.12), 0.25)
+    max_risk_atr = 2.25 if is_reversal else 1.55
+    max_long_pos = 0.55 if is_reversal else 0.72
+    min_short_pos = 0.45 if is_reversal else 0.28
+    if direction > 0:
+        structure_stop = structure_low - buffer
+        structure_target = structure_high + width * (0.45 if is_reversal else 0.65)
+        risk = entry_price - structure_stop
+        reward = structure_target - entry_price
+    else:
+        structure_stop = structure_high + buffer
+        structure_target = structure_low - width * (0.45 if is_reversal else 0.65)
+        risk = structure_stop - entry_price
+        reward = entry_price - structure_target
+    if risk <= 0 or reward <= 0:
+        return None
+    if risk > active_atr * max_risk_atr:
+        return None
+    if not _price_in_directional_zone(
+        direction=direction,
+        entry_price=entry_price,
+        structure_low=structure_low,
+        structure_high=structure_high,
+        max_long_pos=max_long_pos,
+        min_short_pos=min_short_pos,
+    ):
+        return None
+    structure_rr = reward / risk
+    if structure_rr >= min_structure_rr:
+        return {
+            "entry_index": signal_index + 1,
+            "entry_price": float(entry_price),
+            "structure_stop": float(structure_stop),
+            "structure_target": float(structure_target),
+            "structure_rr": float(structure_rr),
+        }
+    if wait_bars <= 0:
+        return None
+
+    pullback_fraction = 0.42 if is_reversal else 0.56
+    if direction > 0:
+        limit_price = min(entry_price, structure_low + width * pullback_fraction)
+        risk = limit_price - structure_stop
+        reward = structure_target - limit_price
+    else:
+        limit_price = max(entry_price, structure_high - width * pullback_fraction)
+        risk = structure_stop - limit_price
+        reward = limit_price - structure_target
+    if risk <= 0 or reward <= 0 or risk > active_atr * max_risk_atr:
+        return None
+    structure_rr = reward / risk
+    if structure_rr < min_structure_rr:
+        return None
+    for entry_index in range(signal_index + 1, min(len(features), signal_index + wait_bars + 1)):
+        if direction > 0:
+            if float(features["Low"].iat[entry_index]) <= limit_price:
+                return {
+                    "entry_index": entry_index,
+                    "entry_price": float(limit_price),
+                    "structure_stop": float(structure_stop),
+                    "structure_target": float(structure_target),
+                    "structure_rr": float(structure_rr),
+                }
+        elif float(features["High"].iat[entry_index]) >= limit_price:
+            return {
+                "entry_index": entry_index,
+                "entry_price": float(limit_price),
+                "structure_stop": float(structure_stop),
+                "structure_target": float(structure_target),
+                "structure_rr": float(structure_rr),
+            }
+    return None
+
+
+def _micro_structure_plan(
+    features: pd.DataFrame,
+    config: BoundaryLightglowConfig,
+    *,
+    signal_index: int,
+    direction: int,
+    family: str,
+    entry_price: float,
+    active_atr: float,
+    min_structure_rr: float,
+    wait_bars: int,
+) -> dict[str, Any] | None:
+    lookback = 8 if "pullback" in family else 12
+    start = max(0, signal_index - lookback + 1)
+    recent_low = float(features["Low"].iloc[start : signal_index + 1].min())
+    recent_high = float(features["High"].iloc[start : signal_index + 1].max())
+    range_high = float(features["range_high"].iat[signal_index])
+    range_low = float(features["range_low"].iat[signal_index])
+    if not np.isfinite(recent_low) or not np.isfinite(recent_high) or recent_high <= recent_low:
+        return None
+    buffer = max(active_atr * 0.10, 0.25)
+    max_risk_atr = 2.8 if family.startswith("trend_transition") else 2.2
+
+    def build_plan(candidate_entry: float, candidate_index: int) -> dict[str, Any] | None:
+        if direction > 0:
+            stop = recent_low - buffer
+            raw_risk = candidate_entry - stop
+        else:
+            stop = recent_high + buffer
+            raw_risk = stop - candidate_entry
+        if raw_risk <= 0 or raw_risk > active_atr * max_risk_atr:
+            return None
+        target_family = FAMILY_TARGET_BASE.get(family, family)
+        target, target_plan = _structure_target(target_family, direction, candidate_entry, raw_risk, range_high, range_low, config)
+        reward = (target - candidate_entry) * direction
+        if reward <= 0:
+            return None
+        structure_rr = reward / raw_risk
+        if structure_rr < min_structure_rr:
+            return None
+        return {
+            "entry_index": candidate_index,
+            "entry_price": float(candidate_entry),
+            "structure_stop": float(stop),
+            "structure_target": float(target),
+            "structure_rr": float(structure_rr),
+            "target_plan": f"micro_{target_plan}",
+        }
+
+    immediate = build_plan(float(entry_price), signal_index + 1)
+    if immediate is not None:
+        return immediate
+    if wait_bars <= 0:
+        return None
+
+    width = recent_high - recent_low
+    if direction > 0:
+        limit_price = max(recent_low + width * 0.45, entry_price - active_atr * 0.60)
+        limit_price = min(limit_price, entry_price)
+    else:
+        limit_price = min(recent_high - width * 0.45, entry_price + active_atr * 0.60)
+        limit_price = max(limit_price, entry_price)
+    for entry_index in range(signal_index + 1, min(len(features), signal_index + wait_bars + 1)):
+        if direction > 0:
+            if float(features["Low"].iat[entry_index]) <= limit_price:
+                return build_plan(float(limit_price), entry_index)
+        elif float(features["High"].iat[entry_index]) >= limit_price:
+            return build_plan(float(limit_price), entry_index)
+    return None
+
+
+def _is_known_loss_cluster(*, family: str, session: str, entry_ts: Any) -> bool:
+    hour = pd.Timestamp(entry_ts).hour
+    if family == "trend_transition_long" and session == "europe" and hour in {9, 12, 13}:
+        return True
+    if family == "trend_transition_short_asia" and session == "asia" and hour == 3:
+        return True
+    return False
+
+
+def _passes_entry_quality_filter(features: pd.DataFrame, signal_index: int, family: str, filter_name: str) -> bool:
+    if filter_name == "none":
+        return True
+    row = features.iloc[signal_index]
+    range_pos = float(row.get("range_pos", np.nan))
+    volume_z = float(row.get("volume_z", np.nan))
+    body_atr = float(row.get("body_atr", np.nan))
+    compression_width_atr = float(row.get("compression_width_atr", np.nan))
+    momentum = float(row.get("momentum", np.nan))
+    hour = pd.Timestamp(row.get("ts")).hour if "ts" in row else -1
+    session = str(row.get("session", ""))
+    ema60 = float(row.get("ema60", np.nan))
+    ema200 = float(row.get("ema200", np.nan))
+
+    if filter_name in {"smc_volume_guard", "reversal_quality_guard", "defensive_quality_guard"}:
+        if family == "smc_discount_choch_long" and np.isfinite(volume_z) and volume_z < 0.0:
+            return False
+    if filter_name in {"reversal_quality_guard", "defensive_quality_guard"}:
+        if family == "bottom_reclaim_long" and np.isfinite(range_pos) and range_pos > 0.25:
+            return False
+    if filter_name == "reversal_loose_guard":
+        if family == "smc_discount_choch_long" and np.isfinite(volume_z) and volume_z < 0.0:
+            return False
+        if family == "bottom_reclaim_long" and np.isfinite(range_pos) and range_pos > 0.45:
+            return False
+    if filter_name in {"pullback_quality_guard", "defensive_quality_guard"}:
+        if family == "trend_pullback_long" and np.isfinite(range_pos) and range_pos > 0.70:
+            return False
+        if family == "trend_pullback_short_asia_europe" and np.isfinite(range_pos) and range_pos < 0.35:
+            return False
+    if filter_name == "defensive_quality_guard":
+        if family == "trend_transition_long":
+            weak_breakout = np.isfinite(volume_z) and volume_z < 0.0
+            early_range = np.isfinite(range_pos) and range_pos < 0.35
+            low_compression = np.isfinite(compression_width_atr) and compression_width_atr < 2.0
+            if weak_breakout and early_range and low_compression:
+                return False
+        if family == "trend_transition_short_asia":
+            late_range = np.isfinite(range_pos) and range_pos > 0.80
+            weak_body = np.isfinite(body_atr) and body_atr < 0.35
+            if late_range and weak_body:
+                return False
+    if filter_name == "momentum_quality_guard":
+        if family in {"trend_transition_long", "trend_pullback_long"} and np.isfinite(momentum) and momentum <= 0:
+            return False
+        if family in {"trend_transition_short_asia", "trend_pullback_short_asia_europe"} and np.isfinite(momentum) and momentum >= 0:
+            return False
+        if family == "smc_discount_choch_long" and np.isfinite(volume_z) and volume_z < 0.0:
+            return False
+    if filter_name == "weak_hour_guard":
+        if family == "smc_discount_choch_long" and hour in {0, 1, 2, 21, 22, 23}:
+            return False
+        if family == "trend_pullback_long" and hour in {0, 1, 2, 15, 16, 17, 21, 22, 23}:
+            return False
+    if filter_name in {"weak_ttl_session_guard", "weak_family_session_guard", "weak_hour_family_guard", "weak_combo2_guard"}:
+        if family == "smc_discount_choch_long" and hour in {0, 1, 2, 21, 22, 23}:
+            return False
+        if family == "trend_pullback_long" and hour in {0, 1, 2, 15, 16, 17, 21, 22, 23}:
+            return False
+    if filter_name in {
+        "weak_loss_cluster_guard",
+        "weak_loss_cluster_ttl_asia_guard",
+        "weak_loss_cluster_broad_hour_guard",
+        "weak_loss_cluster_strict_guard",
+        "weak_loss_cluster_ultra_guard",
+        "weak_loss_cluster_ultra_plus_guard",
+        "ultra_plus_trend_regime_guard",
+        "ultra_plus_selective_regime_guard",
+        "twelve_month_high_yield_guard",
+    }:
+        if family == "smc_discount_choch_long" and hour in {0, 1, 2, 21, 22, 23}:
+            return False
+        if family == "trend_pullback_long" and hour in {0, 1, 2, 10, 11, 13, 15, 16, 17, 19, 21, 22, 23}:
+            return False
+        if family == "trend_transition_long" and hour in {11, 14, 15, 19, 22}:
+            return False
+    if filter_name in {"weak_ttl_session_guard", "weak_family_session_guard"}:
+        if family == "trend_transition_long" and session in {"us_rth", "us_late"}:
+            return False
+    if filter_name in {"weak_family_session_guard", "weak_combo2_guard"}:
+        if family == "trend_pullback_long" and session in {"europe", "us_rth"}:
+            return False
+        if family == "trend_transition_long" and session in {"us_rth", "us_late"}:
+            return False
+    if filter_name == "weak_combo2_guard":
+        if family == "smc_discount_choch_long" and session in {"asia", "europe"}:
+            return False
+    if filter_name == "weak_hour_family_guard":
+        if family == "trend_pullback_long" and hour in {10, 11, 13, 19}:
+            return False
+        if family == "trend_transition_long" and hour in {11, 14, 15, 19, 22}:
+            return False
+    if filter_name in {
+        "weak_loss_cluster_guard",
+        "weak_loss_cluster_ttl_asia_guard",
+        "weak_loss_cluster_broad_hour_guard",
+        "weak_loss_cluster_strict_guard",
+        "weak_loss_cluster_ultra_guard",
+    }:
+        if family == "smc_discount_choch_long" and session in {"asia", "europe"}:
+            return False
+        if family == "trend_transition_short_asia" and hour == 3:
+            return False
+    if filter_name in {
+        "weak_loss_cluster_ttl_asia_guard",
+        "weak_loss_cluster_strict_guard",
+        "weak_loss_cluster_ultra_guard",
+        "weak_loss_cluster_ultra_plus_guard",
+        "ultra_plus_trend_regime_guard",
+        "ultra_plus_selective_regime_guard",
+    }:
+        if family == "trend_transition_long" and session == "asia":
+            return False
+    if filter_name in {
+        "weak_loss_cluster_strict_guard",
+        "weak_loss_cluster_ultra_guard",
+        "weak_loss_cluster_ultra_plus_guard",
+        "ultra_plus_trend_regime_guard",
+        "ultra_plus_selective_regime_guard",
+    }:
+        if family == "bottom_reclaim_long" and session in {"europe", "us_rth"}:
+            return False
+        if family == "trend_pullback_short_asia_europe" and session == "asia":
+            return False
+        if family == "top_breakout_long":
+            return False
+        if family == "fast_reversal_long" and session == "asia":
+            return False
+    if filter_name in {
+        "weak_loss_cluster_broad_hour_guard",
+        "weak_loss_cluster_ultra_guard",
+        "weak_loss_cluster_ultra_plus_guard",
+        "ultra_plus_trend_regime_guard",
+        "ultra_plus_selective_regime_guard",
+    }:
+        if family == "trend_transition_short_asia" and hour in {0, 3, 23}:
+            return False
+        if family == "trend_transition_long" and hour in {1, 3, 5, 6, 16}:
+            return False
+        if family == "smc_discount_choch_long" and hour in {3, 10, 13, 16, 18}:
+            return False
+    if filter_name in {
+        "weak_loss_cluster_ultra_plus_guard",
+        "ultra_plus_trend_regime_guard",
+        "ultra_plus_selective_regime_guard",
+    }:
+        if family == "trend_transition_long" and hour in {14, 17, 21, 22}:
+            return False
+        if family == "trend_pullback_short_asia_europe" and hour in {2, 3, 4, 5, 7, 8, 9, 12, 23}:
+            return False
+        if family == "bottom_reclaim_long" and hour in {0, 7, 8, 9, 10, 12, 17, 19}:
+            return False
+    if filter_name == "ultra_plus_trend_regime_guard":
+        if np.isfinite(ema60) and np.isfinite(ema200) and ema60 < ema200:
+            return False
+    if filter_name == "ultra_plus_selective_regime_guard":
+        if family == "trend_transition_long" and session == "europe" and np.isfinite(volume_z) and volume_z < 0.0:
+            return False
+        if family == "trend_transition_long" and hour in {8, 10, 18, 20}:
+            return False
+        if family == "smc_discount_choch_long" and session == "us_rth" and hour == 17:
+            return False
+        if family == "trend_transition_short_asia" and hour == 5 and np.isfinite(momentum) and momentum > 0:
+            return False
+    if filter_name == "twelve_month_high_yield_guard":
+        if family == "top_breakout_long":
+            return session == "us_rth" and hour in {13, 14, 15, 16, 19}
+        if family == "smc_discount_choch_long":
+            return (
+                (session == "us_rth" and hour in {14, 15, 18, 19})
+                or (session == "asia" and hour == 1)
+                or (session == "europe" and hour == 9)
+            )
+        if family == "smc_ob_retest_short":
+            return session == "us_rth" and hour in {15, 16}
+        if family == "smc_premium_choch_short":
+            return (
+                (session == "us_late" and hour == 20)
+                or (session == "us_rth" and hour in {13, 14})
+                or (session == "asia" and hour == 4)
+            )
+        if family == "smc_ob_retest_long":
+            return (
+                (session == "us_rth" and hour == 15)
+                or (session == "us_late" and hour == 20)
+                or (session == "europe" and hour == 13)
+            )
+        return False
+    return True
+
+
 def backtest_combo_fast(features: pd.DataFrame, spec: ComboSpec, config: BoundaryLightglowConfig, costs: BacktestCosts) -> pd.DataFrame:
     family_array = np.full(len(features), "", dtype=object)
     direction_array = np.zeros(len(features), dtype=np.int8)
@@ -642,6 +1103,10 @@ def backtest_combo_fast(features: pd.DataFrame, spec: ComboSpec, config: Boundar
     atr = features["atr"].to_numpy(dtype=float)
     range_high_values = features["range_high"].to_numpy(dtype=float)
     range_low_values = features["range_low"].to_numpy(dtype=float)
+    strong_trend_long = features.get("strong_trend_continuation_long", pd.Series(False, index=features.index)).fillna(False).to_numpy(dtype=bool)
+    strong_trend_short = features.get("strong_trend_continuation_short", pd.Series(False, index=features.index)).fillna(False).to_numpy(dtype=bool)
+    adverse_reversal_long = features.get("adverse_reversal_long", pd.Series(False, index=features.index)).fillna(False).to_numpy(dtype=bool)
+    adverse_reversal_short = features.get("adverse_reversal_short", pd.Series(False, index=features.index)).fillna(False).to_numpy(dtype=bool)
     symbols = features["symbol"].astype(str).to_numpy()
     sessions = features["session"].astype(str).to_numpy()
     trade_dates = features["trade_date"].to_numpy()
@@ -685,11 +1150,44 @@ def backtest_combo_fast(features: pd.DataFrame, spec: ComboSpec, config: Boundar
             )
             if structure_plan is None:
                 continue
-        elif spec.entry_mode != "next_open":
+        elif spec.entry_mode == "structure_adaptive":
+            structure_plan = _adaptive_structure_plan(
+                features,
+                signal_index=index,
+                direction=direction,
+                family=family,
+                entry_price=float(open_prices[entry_index]),
+                active_atr=active_atr,
+                min_structure_rr=spec.min_structure_rr,
+                wait_bars=spec.entry_wait_bars,
+            )
+            if structure_plan is None:
+                continue
+            entry_index = int(structure_plan["entry_index"])
+        elif spec.entry_mode == "structure_micro_rr":
+            structure_plan = _micro_structure_plan(
+                features,
+                config,
+                signal_index=index,
+                direction=direction,
+                family=family,
+                entry_price=float(open_prices[entry_index]),
+                active_atr=active_atr,
+                min_structure_rr=spec.min_structure_rr,
+                wait_bars=spec.entry_wait_bars,
+            )
+            if structure_plan is None:
+                continue
+            entry_index = int(structure_plan["entry_index"])
+        elif spec.entry_mode not in {"next_open", "structure_risk_cap"}:
             raise ValueError(f"unknown entry mode: {spec.entry_mode}")
         if entry_index <= last_exit_index + config.cooldown_bars or entry_index <= pause_until or entry_index >= len(features):
             continue
         if symbols[entry_index] != symbols[index]:
+            continue
+        if not _passes_entry_quality_filter(features, index, family, spec.entry_quality_filter):
+            continue
+        if spec.avoid_loss_clusters and _is_known_loss_cluster(family=family, session=sessions[index], entry_ts=timestamps[entry_index]):
             continue
         trade_day = trade_dates[entry_index]
         state = day_state.setdefault(trade_day, {"trades": 0.0, "net": 0.0})
@@ -709,13 +1207,20 @@ def backtest_combo_fast(features: pd.DataFrame, spec: ComboSpec, config: Boundar
             structure_stop = range_low + active_atr * config.stop_atr_buffer if target_family == "bottom_breakdown_short" and np.isfinite(range_low) else signal_high + active_atr * config.stop_atr_buffer
         raw_risk = abs(entry_price - structure_stop)
         risk_points = max(raw_risk, 0.25) if structure_plan is not None else max(raw_risk, active_atr * config.min_risk_atr, 0.25)
+        uncapped_risk_points = risk_points
+        risk_cap_points = active_atr * spec.risk_cap_atr if spec.entry_mode == "structure_risk_cap" and spec.risk_cap_atr > 0 else np.nan
+        if np.isfinite(risk_cap_points) and risk_points > risk_cap_points:
+            risk_points = max(float(risk_cap_points), active_atr * config.min_risk_atr, 0.25)
         initial_stop = entry_price - direction * risk_points
         if structure_plan is None:
-            target, target_plan = _structure_target(target_family, direction, entry_price, risk_points, range_high, range_low, config)
+            target_risk_points = uncapped_risk_points if spec.entry_mode == "structure_risk_cap" else risk_points
+            target, target_plan = _structure_target(target_family, direction, entry_price, target_risk_points, range_high, range_low, config)
+            if spec.entry_mode == "structure_risk_cap" and risk_points < uncapped_risk_points:
+                target_plan = f"cap_stop_preserve_{target_plan}"
             structure_rr = np.nan
         else:
             target = float(structure_plan["structure_target"])
-            target_plan = "structure_rr_pullback"
+            target_plan = str(structure_plan.get("target_plan", "structure_rr_pullback"))
             structure_rr = float(structure_plan["structure_rr"])
 
         best = float(high_prices[entry_index]) if direction > 0 else float(low_prices[entry_index])
@@ -725,6 +1230,8 @@ def backtest_combo_fast(features: pd.DataFrame, spec: ComboSpec, config: Boundar
         exit_reason = "end_of_data"
         path_end = min(len(features) - 1, entry_index + config.max_hold_bars)
         path_start = min(len(features) - 1, entry_index + 1)
+        runner_allowed = spec.target_runner and (not spec.target_runner_families or family in spec.target_runner_families)
+        target_runner_armed = False
         for path_index in range(path_start, path_end + 1):
             if symbols[path_index] != symbols[entry_index]:
                 exit_index = max(entry_index, path_index - 1)
@@ -738,15 +1245,26 @@ def backtest_combo_fast(features: pd.DataFrame, spec: ComboSpec, config: Boundar
                     exit_reason = "protective_stop"
                     break
                 if path_index - entry_index >= config.min_hold_bars_before_target_exit and high_prices[path_index] >= target:
+                    if not (runner_allowed and target_runner_armed):
+                        exit_index = path_index
+                        exit_price = float(target)
+                        exit_reason = "target"
+                        break
+                current_r = (float(close_prices[path_index]) - entry_price) / risk_points
+                if spec.adverse_reversal_exit and current_r <= spec.adverse_exit_max_r and adverse_reversal_long[path_index]:
                     exit_index = path_index
-                    exit_price = float(target)
-                    exit_reason = "target"
+                    exit_price = float(close_prices[path_index])
+                    exit_reason = "adverse_reversal"
                     break
                 best = max(best, float(high_prices[path_index]))
                 progress_r = (best - entry_price) / risk_points
                 trail_stop = best - float(atr[path_index]) * config.trail_atr_mult if progress_r >= config.trail_start_r else initial_stop
                 breakeven_stop = entry_price if progress_r >= config.breakeven_trigger_r else initial_stop
-                protective_stop = max(initial_stop, trail_stop, breakeven_stop)
+                giveback_stop = entry_price + risk_points * spec.giveback_keep_r if spec.giveback_start_r > 0 and progress_r >= spec.giveback_start_r else initial_stop
+                protective_stop = max(initial_stop, trail_stop, breakeven_stop, giveback_stop)
+                current_r = (float(close_prices[path_index]) - entry_price) / risk_points
+                if runner_allowed and strong_trend_long[path_index] and progress_r >= config.trail_start_r:
+                    target_runner_armed = True
             else:
                 if high_prices[path_index] >= protective_stop:
                     exit_index = path_index
@@ -754,15 +1272,31 @@ def backtest_combo_fast(features: pd.DataFrame, spec: ComboSpec, config: Boundar
                     exit_reason = "protective_stop"
                     break
                 if path_index - entry_index >= config.min_hold_bars_before_target_exit and low_prices[path_index] <= target:
+                    if not (runner_allowed and target_runner_armed):
+                        exit_index = path_index
+                        exit_price = float(target)
+                        exit_reason = "target"
+                        break
+                current_r = (entry_price - float(close_prices[path_index])) / risk_points
+                if spec.adverse_reversal_exit and current_r <= spec.adverse_exit_max_r and adverse_reversal_short[path_index]:
                     exit_index = path_index
-                    exit_price = float(target)
-                    exit_reason = "target"
+                    exit_price = float(close_prices[path_index])
+                    exit_reason = "adverse_reversal"
                     break
                 best = min(best, float(low_prices[path_index]))
                 progress_r = (entry_price - best) / risk_points
                 trail_stop = best + float(atr[path_index]) * config.trail_atr_mult if progress_r >= config.trail_start_r else initial_stop
                 breakeven_stop = entry_price if progress_r >= config.breakeven_trigger_r else initial_stop
-                protective_stop = min(initial_stop, trail_stop, breakeven_stop)
+                giveback_stop = entry_price - risk_points * spec.giveback_keep_r if spec.giveback_start_r > 0 and progress_r >= spec.giveback_start_r else initial_stop
+                protective_stop = min(initial_stop, trail_stop, breakeven_stop, giveback_stop)
+                current_r = (entry_price - float(close_prices[path_index])) / risk_points
+                if runner_allowed and strong_trend_short[path_index] and progress_r >= config.trail_start_r:
+                    target_runner_armed = True
+            if spec.time_stop_bars > 0 and path_index - entry_index >= spec.time_stop_bars and current_r < spec.time_stop_min_r:
+                exit_index = path_index
+                exit_price = float(close_prices[path_index])
+                exit_reason = "time_stop"
+                break
             if path_index >= path_end:
                 exit_index = path_index
                 exit_price = float(close_prices[path_index])
@@ -896,6 +1430,21 @@ def build_combo_specs(args: argparse.Namespace) -> list[ComboSpec]:
                 "trend_transition_short_asia",
             ),
         ),
+        (
+            "selective_bidirectional_strict_reversal_long",
+            (
+                "top_breakout_long",
+                "trend_ignition_long",
+                "trend_pullback_long",
+                "trend_transition_long",
+                "reversal_impulse_long",
+                "bottom_reclaim_long",
+                "fast_reversal_long",
+                "smc_discount_choch_long",
+                "trend_pullback_short_asia_europe",
+                "trend_transition_short_asia",
+            ),
+        ),
         ("smc_reversal", ("smc_discount_choch_long", "smc_premium_choch_short")),
         ("smc_bos_fvg", ("smc_bos_fvg_long", "smc_bos_fvg_short")),
         ("smc_ob_retest", ("smc_ob_retest_long", "smc_ob_retest_short")),
@@ -952,6 +1501,82 @@ def build_combo_specs(args: argparse.Namespace) -> list[ComboSpec]:
                 "trend_pullback_long",
                 "trend_transition_long",
                 "reversal_impulse_long",
+                "trend_pullback_short_asia_europe",
+                "trend_transition_short_asia",
+            ),
+        ),
+    ]
+    structure_adaptive_family_groups = [
+        ("structure_adaptive_long_bias", ("top_breakout_long", "trend_ignition_long", "trend_pullback_long", "trend_transition_long", "reversal_impulse_long")),
+        (
+            "structure_adaptive_selective_strict",
+            (
+                "top_breakout_long",
+                "trend_ignition_long",
+                "trend_pullback_long",
+                "trend_transition_long",
+                "reversal_impulse_long",
+                "trend_pullback_short_asia_europe",
+                "trend_transition_short_asia",
+            ),
+        ),
+        (
+            "structure_adaptive_smc_strict",
+            (
+                "smc_discount_choch_long",
+                "smc_bos_fvg_long",
+                "smc_ob_retest_long",
+                "smc_trend_transition_long",
+                "smc_trend_pullback_long",
+                "smc_premium_choch_short",
+                "smc_bos_fvg_short",
+                "smc_ob_retest_short",
+                "smc_trend_transition_short",
+                "smc_trend_pullback_short",
+            ),
+        ),
+    ]
+    structure_micro_family_groups = [
+        ("structure_micro_long_bias", ("top_breakout_long", "trend_ignition_long", "trend_pullback_long", "trend_transition_long", "reversal_impulse_long")),
+        (
+            "structure_micro_selective_strict",
+            (
+                "top_breakout_long",
+                "trend_ignition_long",
+                "trend_pullback_long",
+                "trend_transition_long",
+                "reversal_impulse_long",
+                "trend_pullback_short_asia_europe",
+                "trend_transition_short_asia",
+            ),
+        ),
+        ("structure_micro_trend_pullback", ("trend_pullback_long", "trend_pullback_short_asia_europe")),
+    ]
+    structure_risk_cap_family_groups = [
+        ("structure_risk_cap_long_bias", ("top_breakout_long", "trend_ignition_long", "trend_pullback_long", "trend_transition_long", "reversal_impulse_long")),
+        (
+            "structure_risk_cap_selective_strict",
+            (
+                "top_breakout_long",
+                "trend_ignition_long",
+                "trend_pullback_long",
+                "trend_transition_long",
+                "reversal_impulse_long",
+                "trend_pullback_short_asia_europe",
+                "trend_transition_short_asia",
+            ),
+        ),
+        (
+            "structure_risk_cap_selective_strict_reversal_long",
+            (
+                "top_breakout_long",
+                "trend_ignition_long",
+                "trend_pullback_long",
+                "trend_transition_long",
+                "reversal_impulse_long",
+                "bottom_reclaim_long",
+                "fast_reversal_long",
+                "smc_discount_choch_long",
                 "trend_pullback_short_asia_europe",
                 "trend_transition_short_asia",
             ),
@@ -1046,6 +1671,558 @@ def build_combo_specs(args: argparse.Namespace) -> list[ComboSpec]:
                     entry_wait_bars=0,
                 )
             )
+    for group_name, families in structure_adaptive_family_groups:
+        for timeframe, macd_filter, stop_atr_buffer, target_r, max_hold_bars, use_risk_controls, min_structure_rr, wait_bars in itertools.product(
+            args.macd_timeframes,
+            args.macd_filters,
+            args.stop_atr_buffers,
+            args.target_rs,
+            args.max_hold_bars_grid,
+            args.risk_control_modes,
+            [1.4, 1.7, 2.0],
+            [3, 5],
+        ):
+            name = (
+                f"{group_name}_macd{timeframe}_{macd_filter}"
+                f"_stop{stop_atr_buffer:g}_r{target_r:g}_h{max_hold_bars}"
+                f"_rr{min_structure_rr:g}_wait{wait_bars}"
+                f"_{'risk' if use_risk_controls else 'norisk'}"
+            )
+            specs.append(
+                ComboSpec(
+                    name=name,
+                    families=families,
+                    macd_filter=macd_filter,
+                    macd_timeframe=timeframe,
+                    stop_atr_buffer=float(stop_atr_buffer),
+                    target_r=float(target_r),
+                    max_hold_bars=int(max_hold_bars),
+                    use_risk_controls=bool(use_risk_controls),
+                    entry_mode="structure_adaptive",
+                    min_structure_rr=float(min_structure_rr),
+                    entry_wait_bars=int(wait_bars),
+                )
+            )
+    for group_name, families in structure_micro_family_groups:
+        for timeframe, macd_filter, stop_atr_buffer, target_r, max_hold_bars, use_risk_controls, min_structure_rr, wait_bars in itertools.product(
+            args.macd_timeframes,
+            args.macd_filters,
+            args.stop_atr_buffers,
+            args.target_rs,
+            args.max_hold_bars_grid,
+            args.risk_control_modes,
+            [1.0, 1.25, 1.5],
+            [0, 3],
+        ):
+            name = (
+                f"{group_name}_macd{timeframe}_{macd_filter}"
+                f"_stop{stop_atr_buffer:g}_r{target_r:g}_h{max_hold_bars}"
+                f"_rr{min_structure_rr:g}_wait{wait_bars}"
+                f"_{'risk' if use_risk_controls else 'norisk'}"
+            )
+            specs.append(
+                ComboSpec(
+                    name=name,
+                    families=families,
+                    macd_filter=macd_filter,
+                    macd_timeframe=timeframe,
+                    stop_atr_buffer=float(stop_atr_buffer),
+                    target_r=float(target_r),
+                    max_hold_bars=int(max_hold_bars),
+                    use_risk_controls=bool(use_risk_controls),
+                    entry_mode="structure_micro_rr",
+                    min_structure_rr=float(min_structure_rr),
+                    entry_wait_bars=int(wait_bars),
+                )
+            )
+    for group_name, families in structure_risk_cap_family_groups:
+        for timeframe, macd_filter, stop_atr_buffer, target_r, max_hold_bars, use_risk_controls, risk_cap_atr in itertools.product(
+            args.macd_timeframes,
+            args.macd_filters,
+            args.stop_atr_buffers,
+            args.target_rs,
+            args.max_hold_bars_grid,
+            args.risk_control_modes,
+            [2.0, 2.5, 3.0, 3.5, 4.0, 5.0],
+        ):
+            name = (
+                f"{group_name}_macd{timeframe}_{macd_filter}"
+                f"_stop{stop_atr_buffer:g}_r{target_r:g}_h{max_hold_bars}"
+                f"_cap{risk_cap_atr:g}atr"
+                f"_{'risk' if use_risk_controls else 'norisk'}"
+            )
+            specs.append(
+                ComboSpec(
+                    name=name,
+                    families=families,
+                    macd_filter=macd_filter,
+                    macd_timeframe=timeframe,
+                    stop_atr_buffer=float(stop_atr_buffer),
+                    target_r=float(target_r),
+                    max_hold_bars=int(max_hold_bars),
+                    use_risk_controls=bool(use_risk_controls),
+                    entry_mode="structure_risk_cap",
+                    risk_cap_atr=float(risk_cap_atr),
+                )
+            )
+    reversal_long_families = (
+        "top_breakout_long",
+        "trend_ignition_long",
+        "trend_pullback_long",
+        "trend_transition_long",
+        "reversal_impulse_long",
+        "bottom_reclaim_long",
+        "fast_reversal_long",
+        "smc_discount_choch_long",
+        "trend_pullback_short_asia_europe",
+        "trend_transition_short_asia",
+    )
+    exit_enhancements = [
+        (
+            "selective_yield_balanced_reversal_long",
+            "next_open",
+            0.0,
+            30,
+            2.5,
+            4.0,
+            1.2,
+            2.0,
+            1.5,
+            1.0,
+            0,
+            0.0,
+            0.0,
+            0.0,
+            False,
+            False,
+            False,
+            999.0,
+            (),
+        ),
+        (
+            "selective_exit_lock_reversal_long",
+            "next_open",
+            0.0,
+            30,
+            2.5,
+            4.0,
+            1.2,
+            2.0,
+            1.5,
+            1.0,
+            0,
+            0.0,
+            1.5,
+            1.0,
+            False,
+            False,
+            False,
+            999.0,
+            (),
+        ),
+        (
+            "selective_adverse_guard_reversal_long",
+            "next_open",
+            0.0,
+            35,
+            2.5,
+            4.0,
+            1.2,
+            2.0,
+            1.5,
+            1.0,
+            0,
+            0.0,
+            1.5,
+            1.0,
+            False,
+            False,
+            True,
+            0.25,
+            (),
+        ),
+        (
+            "selective_long_runner_adverse_guard_reversal_long",
+            "next_open",
+            0.0,
+            35,
+            2.5,
+            4.0,
+            1.2,
+            2.0,
+            1.5,
+            1.0,
+            0,
+            0.0,
+            1.5,
+            1.0,
+            False,
+            True,
+            True,
+            0.25,
+            ("trend_transition_long", "trend_pullback_long"),
+        ),
+        (
+            "selective_runner_reversal_exit_reversal_long",
+            "next_open",
+            0.0,
+            45,
+            2.5,
+            4.0,
+            1.2,
+            2.0,
+            1.5,
+            1.0,
+            0,
+            0.0,
+            1.5,
+            1.0,
+            False,
+            True,
+            True,
+            0.25,
+            (),
+        ),
+        (
+            "selective_exit_lock_cluster_filter_reversal_long",
+            "next_open",
+            0.0,
+            30,
+            2.5,
+            4.0,
+            1.2,
+            2.0,
+            1.5,
+            1.0,
+            0,
+            0.0,
+            1.5,
+            1.0,
+            True,
+            False,
+            False,
+            999.0,
+            (),
+        ),
+        (
+            "selective_adverse_guard_cluster_filter_reversal_long",
+            "next_open",
+            0.0,
+            35,
+            2.5,
+            4.0,
+            1.2,
+            2.0,
+            1.5,
+            1.0,
+            0,
+            0.0,
+            1.5,
+            1.0,
+            True,
+            False,
+            True,
+            0.25,
+            (),
+        ),
+        (
+            "selective_long_runner_adverse_guard_cluster_filter_reversal_long",
+            "next_open",
+            0.0,
+            35,
+            2.5,
+            4.0,
+            1.2,
+            2.0,
+            1.5,
+            1.0,
+            0,
+            0.0,
+            1.5,
+            1.0,
+            True,
+            True,
+            True,
+            0.25,
+            ("trend_transition_long", "trend_pullback_long"),
+        ),
+        (
+            "selective_runner_reversal_exit_cluster_filter_reversal_long",
+            "next_open",
+            0.0,
+            45,
+            2.5,
+            4.0,
+            1.2,
+            2.0,
+            1.5,
+            1.0,
+            0,
+            0.0,
+            1.5,
+            1.0,
+            True,
+            True,
+            True,
+            0.25,
+            (),
+        ),
+        (
+            "selective_yield_growth_reversal_long",
+            "next_open",
+            0.0,
+            40,
+            2.75,
+            3.0,
+            1.2,
+            3.0,
+            1.5,
+            1.0,
+            0,
+            0.0,
+            0.0,
+            0.0,
+            False,
+            False,
+            False,
+            999.0,
+            (),
+        ),
+        (
+            "structure_risk_cap_yield_growth_reversal_long",
+            "structure_risk_cap",
+            3.5,
+            45,
+            2.75,
+            3.0,
+            2.0,
+            3.0,
+            1.5,
+            1.0,
+            0,
+            0.0,
+            0.0,
+            0.0,
+            False,
+            False,
+            False,
+            999.0,
+            (),
+        ),
+        (
+            "structure_risk_cap_exit_time_reversal_long",
+            "structure_risk_cap",
+            3.5,
+            45,
+            2.75,
+            3.0,
+            2.0,
+            3.0,
+            1.5,
+            1.0,
+            20,
+            0.5,
+            2.0,
+            0.5,
+            False,
+            False,
+            True,
+            0.25,
+            (),
+        ),
+    ]
+    for (
+        group_name,
+        entry_mode,
+        risk_cap_atr,
+        max_hold_bars,
+        target_r,
+        max_target_r,
+        trail_start_r,
+        trail_atr_mult,
+        breakeven_trigger_r,
+        min_target_r,
+        time_stop_bars,
+        time_stop_min_r,
+        giveback_start_r,
+        giveback_keep_r,
+        avoid_loss_clusters,
+        target_runner,
+        adverse_reversal_exit,
+        adverse_exit_max_r,
+        target_runner_families,
+    ) in exit_enhancements:
+        for timeframe, macd_filter, stop_atr_buffer, use_risk_controls in itertools.product(
+            args.macd_timeframes,
+            args.macd_filters,
+            args.stop_atr_buffers,
+            args.risk_control_modes,
+        ):
+            if timeframe != 1 or macd_filter != "cross_recent_5" or float(stop_atr_buffer) != 1.25:
+                continue
+            name = (
+                f"{group_name}_macd{timeframe}_{macd_filter}"
+                f"_stop{stop_atr_buffer:g}_r{target_r:g}_h{max_hold_bars}"
+                f"_maxr{max_target_r:g}_trail{trail_start_r:g}x{trail_atr_mult:g}"
+                f"_be{breakeven_trigger_r:g}"
+            )
+            if risk_cap_atr > 0:
+                name += f"_cap{risk_cap_atr:g}atr"
+            if time_stop_bars > 0:
+                name += f"_tstop{time_stop_bars}b{time_stop_min_r:g}r"
+            if giveback_start_r > 0:
+                name += f"_lock{giveback_start_r:g}to{giveback_keep_r:g}r"
+            if target_runner:
+                name += "_runner"
+            if adverse_reversal_exit:
+                name += "_adverse_exit"
+                if adverse_exit_max_r < 999.0:
+                    name += f"{adverse_exit_max_r:g}r"
+            name += f"_{'risk' if use_risk_controls else 'norisk'}"
+            specs.append(
+                ComboSpec(
+                    name=name,
+                    families=reversal_long_families,
+                    macd_filter=macd_filter,
+                    macd_timeframe=timeframe,
+                    stop_atr_buffer=float(stop_atr_buffer),
+                    target_r=float(target_r),
+                    max_hold_bars=int(max_hold_bars),
+                    use_risk_controls=bool(use_risk_controls),
+                    entry_mode=entry_mode,
+                    risk_cap_atr=float(risk_cap_atr),
+                    max_target_r=float(max_target_r),
+                    trail_start_r=float(trail_start_r),
+                    trail_atr_mult=float(trail_atr_mult),
+                    breakeven_trigger_r=float(breakeven_trigger_r),
+                    min_target_r=float(min_target_r),
+                    time_stop_bars=int(time_stop_bars),
+                    time_stop_min_r=float(time_stop_min_r),
+                    giveback_start_r=float(giveback_start_r),
+                    giveback_keep_r=float(giveback_keep_r),
+                    avoid_loss_clusters=bool(avoid_loss_clusters),
+                    target_runner=bool(target_runner),
+                    adverse_reversal_exit=bool(adverse_reversal_exit),
+                    adverse_exit_max_r=float(adverse_exit_max_r),
+                    target_runner_families=tuple(target_runner_families),
+                )
+            )
+    quality_filters = [
+        "smc_volume_guard",
+        "reversal_loose_guard",
+        "reversal_quality_guard",
+        "pullback_quality_guard",
+        "defensive_quality_guard",
+        "momentum_quality_guard",
+        "weak_hour_guard",
+        "weak_ttl_session_guard",
+        "weak_family_session_guard",
+        "weak_hour_family_guard",
+        "weak_combo2_guard",
+        "weak_loss_cluster_guard",
+        "weak_loss_cluster_ttl_asia_guard",
+        "weak_loss_cluster_broad_hour_guard",
+        "weak_loss_cluster_strict_guard",
+        "weak_loss_cluster_ultra_guard",
+        "weak_loss_cluster_ultra_plus_guard",
+        "ultra_plus_trend_regime_guard",
+        "ultra_plus_selective_regime_guard",
+        "twelve_month_high_yield_guard",
+    ]
+    for filter_name in quality_filters:
+        for timeframe, macd_filter, stop_atr_buffer, use_risk_controls in itertools.product(
+            args.macd_timeframes,
+            args.macd_filters,
+            args.stop_atr_buffers,
+            args.risk_control_modes,
+        ):
+            if timeframe != 1 or macd_filter != "cross_recent_5" or float(stop_atr_buffer) != 1.25:
+                continue
+            specs.append(
+                ComboSpec(
+                    name=(
+                        f"selective_adverse_guard_{filter_name}_reversal_long"
+                        f"_macd{timeframe}_{macd_filter}_stop{stop_atr_buffer:g}_r2.5_h35"
+                        f"_maxr4_trail1.2x2_be1.5_lock1.5to1r_adverse_exit0.25r_norisk"
+                    ),
+                    families=reversal_long_families,
+                    macd_filter=macd_filter,
+                    macd_timeframe=timeframe,
+                    stop_atr_buffer=float(stop_atr_buffer),
+                    target_r=2.5,
+                    max_hold_bars=35,
+                    use_risk_controls=bool(use_risk_controls),
+                    max_target_r=4.0,
+                    trail_start_r=1.2,
+                    trail_atr_mult=2.0,
+                    breakeven_trigger_r=1.5,
+                    min_target_r=1.0,
+                    giveback_start_r=1.5,
+                    giveback_keep_r=1.0,
+                    adverse_reversal_exit=True,
+                    adverse_exit_max_r=0.25,
+                    entry_quality_filter=filter_name,
+                )
+            )
+    high_yield_12m_family_groups = [
+        (
+            "twelve_month_high_yield_core",
+            (
+                "top_breakout_long",
+                "smc_discount_choch_long",
+                "smc_ob_retest_long",
+                "smc_premium_choch_short",
+                "smc_ob_retest_short",
+            ),
+        ),
+        (
+            "twelve_month_high_yield_smc_only",
+            (
+                "smc_discount_choch_long",
+                "smc_ob_retest_long",
+                "smc_premium_choch_short",
+                "smc_ob_retest_short",
+            ),
+        ),
+        (
+            "twelve_month_high_yield_positive_smc",
+            (
+                "smc_discount_choch_long",
+                "smc_premium_choch_short",
+                "smc_ob_retest_short",
+            ),
+        ),
+    ]
+    for group_name, families in high_yield_12m_family_groups:
+        for timeframe, macd_filter, stop_atr_buffer, min_structure_rr, wait_bars in itertools.product(
+            args.macd_timeframes,
+            args.macd_filters,
+            args.stop_atr_buffers,
+            [1.4, 1.7, 2.0],
+            [3, 5],
+        ):
+            if timeframe != 1 or macd_filter != "cross_recent_5" or float(stop_atr_buffer) != 1.25:
+                continue
+            specs.append(
+                ComboSpec(
+                    name=(
+                        f"{group_name}_macd{timeframe}_{macd_filter}_stop{stop_atr_buffer:g}"
+                        f"_r2.5_h30_rr{min_structure_rr:g}_wait{wait_bars}"
+                        "_12m_high_yield_guard_norisk"
+                    ),
+                    families=families,
+                    macd_filter=macd_filter,
+                    macd_timeframe=timeframe,
+                    stop_atr_buffer=float(stop_atr_buffer),
+                    target_r=2.5,
+                    max_hold_bars=30,
+                    use_risk_controls=False,
+                    entry_mode="structure_adaptive",
+                    min_structure_rr=float(min_structure_rr),
+                    entry_wait_bars=int(wait_bars),
+                    entry_quality_filter="twelve_month_high_yield_guard",
+                )
+            )
     return specs
 
 
@@ -1100,6 +2277,11 @@ def evaluate_combinations(features: pd.DataFrame, specs: list[ComboSpec], costs:
             stop_atr_buffer=spec.stop_atr_buffer,
             target_r=spec.target_r,
             max_hold_bars=spec.max_hold_bars,
+            max_target_r=spec.max_target_r if spec.max_target_r > 0 else BoundaryLightglowConfig.max_target_r,
+            trail_start_r=spec.trail_start_r if spec.trail_start_r > 0 else BoundaryLightglowConfig.trail_start_r,
+            trail_atr_mult=spec.trail_atr_mult if spec.trail_atr_mult > 0 else BoundaryLightglowConfig.trail_atr_mult,
+            breakeven_trigger_r=spec.breakeven_trigger_r if spec.breakeven_trigger_r > 0 else BoundaryLightglowConfig.breakeven_trigger_r,
+            min_target_r=spec.min_target_r if spec.min_target_r > 0 else BoundaryLightglowConfig.min_target_r,
         )
         trades = backtest_combo_fast(features, spec, config, costs)
         summary = summarize_for_search(trades)
@@ -1117,6 +2299,21 @@ def evaluate_combinations(features: pd.DataFrame, specs: list[ComboSpec], costs:
                 "entry_mode": spec.entry_mode,
                 "min_structure_rr": spec.min_structure_rr,
                 "entry_wait_bars": spec.entry_wait_bars,
+                "risk_cap_atr": spec.risk_cap_atr,
+                "max_target_r": spec.max_target_r,
+                "trail_start_r": spec.trail_start_r,
+                "trail_atr_mult": spec.trail_atr_mult,
+                "breakeven_trigger_r": spec.breakeven_trigger_r,
+                "min_target_r": spec.min_target_r,
+                "time_stop_bars": spec.time_stop_bars,
+                "time_stop_min_r": spec.time_stop_min_r,
+                "giveback_start_r": spec.giveback_start_r,
+                "giveback_keep_r": spec.giveback_keep_r,
+                "avoid_loss_clusters": spec.avoid_loss_clusters,
+                "target_runner": spec.target_runner,
+                "adverse_reversal_exit": spec.adverse_reversal_exit,
+                "adverse_exit_max_r": spec.adverse_exit_max_r,
+                "entry_quality_filter": spec.entry_quality_filter,
                 "score": score,
                 **summary,
             }
@@ -1198,7 +2395,7 @@ def write_markdown_report(
     screenshot_rows = results[results["strategy"].astype(str).str.contains("fast_boundary_reversal|screenshot_reversal", regex=True)].head(10)
     phase_rows = results[results["strategy"].astype(str).str.contains("phase_", regex=False)].head(10)
     selective_rows = results[results["strategy"].astype(str).str.contains("selective_bidirectional", regex=False)].head(10)
-    structure_rows = results[results["strategy"].astype(str).str.contains("structure_rr", regex=False)].head(10)
+    structure_rows = results[results["entry_mode"].astype(str).ne("next_open")].head(10)
     smc_rows = results[results["strategy"].astype(str).str.contains("smc_", regex=False)].head(10)
     sixty_min_rows = results[results["macd_timeframe"].eq(60)].head(10)
     lines.extend(
@@ -1224,7 +2421,7 @@ def write_markdown_report(
             "",
             "## Structure Risk-Reward Pullback Candidates",
             "",
-            "These rows keep the directional signal fixed, then wait for a pullback into the favorable side of the recent structure and require a minimum historical structure R/R before entering.",
+            "These rows keep the directional signal fixed, then improve entry quality using only historical structure: deep pullback waits, adaptive structural zones, or micro-swing stop anchors with minimum R/R filters.",
             "",
             markdown_table(structure_rows, columns),
             "",

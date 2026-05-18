@@ -18,7 +18,7 @@ from tradingagents.execution.paper_runner import PaperDaemonConfig, PaperRunnerC
 from tradingagents.execution.paper_report import PaperValidationGateConfig
 from tradingagents.execution.paper_validation import build_paper_intent_from_trade, load_trade_samples, select_trade_sample
 from tradingagents.execution.tick_recorder import IBKRTickRecorderConfig
-from tradingagents.execution.trade_log import append_execution_fill_log
+from tradingagents.execution.trade_log import append_execution_fill_log, append_realtime_execution_fill_ledger, append_realtime_trade_ledger
 
 
 def test_build_paper_intent_from_long_trade():
@@ -1383,6 +1383,129 @@ def test_live_paper_trader_accrual_mode_allows_sample_count_blocker(tmp_path, mo
     assert result["submitted"] is True
 
 
+def test_live_paper_trader_records_realtime_ledger_for_dry_run_signal(tmp_path):
+    broker = IBKRPaperBroker(
+        risk=IBKRPaperRiskConfig(allowed_accounts=("DU123",), allowed_symbols=("MNQ",)),
+        audit_path=tmp_path / "ibkr.jsonl",
+    )
+    broker.connect = lambda: {"status": "connected", "connected": True}
+    broker.status_snapshot = lambda symbol: {"current_position": 0, "open_trades": [], "fills": []}
+    broker.tick_snapshot = lambda spec: {
+        "event_type": "ibkr_tick_snapshot",
+        "symbol": "MNQ",
+        "bid": 18000.0,
+        "ask": 18000.25,
+        "last": 18000.25,
+        "spread": 0.25,
+        "order_ready": True,
+        "market_data_type": "1",
+    }
+
+    result = run_live_paper_trader_once(
+        config=LivePaperTraderConfig(
+            live_signal_path=tmp_path / "live.csv",
+            state_path=tmp_path / "state.json",
+            direction=1,
+            signal_mode="manual",
+            account="DU123",
+            skip_when_position_open=False,
+            realtime_ledger_path=tmp_path / "ledger.jsonl",
+            realtime_ledger_csv_path=tmp_path / "ledger.csv",
+        ),
+        broker=broker,
+    )
+
+    assert result["status"] == "dry_run"
+    assert result["realtime_ledger"]["status"] == "recorded"
+    event = json.loads((tmp_path / "ledger.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert event["status"] == "dry_run"
+    assert event["strategy_id"]
+    assert event["action"] == "BUY"
+    assert event["direction"] == 1
+    assert event["ibkr_bid"] == 18000.0
+    csv_content = (tmp_path / "ledger.csv").read_text(encoding="utf-8")
+    assert "trade_uid" in csv_content
+    assert "dry_run" in csv_content
+
+
+def test_live_paper_trader_records_realtime_ledger_for_signal_blocked(tmp_path):
+    result = run_live_paper_trader_once(
+        config=LivePaperTraderConfig(
+            live_signal_path=tmp_path / "live.csv",
+            state_path=tmp_path / "state.json",
+            direction=0,
+            signal_mode="manual",
+            realtime_ledger_path=tmp_path / "ledger.jsonl",
+            realtime_ledger_csv_path=tmp_path / "ledger.csv",
+        ),
+        broker=IBKRPaperBroker(audit_path=tmp_path / "ibkr.jsonl"),
+    )
+
+    assert result["status"] == "signal_blocked"
+    assert result["realtime_ledger"]["status"] == "recorded"
+    event = json.loads((tmp_path / "ledger.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert event["status"] == "signal_blocked"
+    assert "direction must be" in event["reason"]
+
+
+def test_realtime_trade_ledger_is_idempotent_by_intent_id(tmp_path):
+    result = {
+        "status": "dry_run",
+        "submitted": False,
+        "candidate_key": "candidate-1",
+        "intent": {
+            "intent_id": "intent-ledger-1",
+            "strategy_id": "mnq_ba_no_trade_best_combo",
+            "action": "SELL",
+            "symbol": "MNQ",
+            "quantity": 1,
+            "stop_loss_price": 28977.43,
+            "take_profit_price": 28889.30,
+        },
+        "live_signal": {
+            "entry_ts": "2026-05-18T01:45:21+00:00",
+            "entry_price": 28952.25,
+            "strategy_leg": "BA",
+            "signal_source": "strategy:mnq_ba_no_trade_best_combo:short_ba_smc_ob_retest",
+        },
+    }
+
+    first = append_realtime_trade_ledger(result, ledger_path=tmp_path / "ledger.jsonl")
+    second = append_realtime_trade_ledger(result, ledger_path=tmp_path / "ledger.jsonl")
+
+    assert first["trade_uid"] == second["trade_uid"]
+    assert len((tmp_path / "ledger.jsonl").read_text(encoding="utf-8").splitlines()) == 1
+    assert len((tmp_path / "ledger.csv").read_text(encoding="utf-8").splitlines()) == 2
+
+
+def test_realtime_execution_fill_ledger_is_idempotent_by_exec_id(tmp_path):
+    fill = {
+        "contract": {"symbol": "MNQ", "localSymbol": "MNQM6"},
+        "execution": {
+            "exec_id": "exec-ledger-1",
+            "time": "2026-05-04T12:24:35+00:00",
+            "account": "DU123",
+            "side": "BOT",
+            "shares": 1,
+            "price": 27854.75,
+            "order_id": 257,
+        },
+    }
+
+    first = append_realtime_execution_fill_ledger(fill, ledger_path=tmp_path / "ledger.jsonl")
+    second = append_realtime_execution_fill_ledger(fill, ledger_path=tmp_path / "ledger.jsonl")
+
+    assert first["trade_uid"] == "exec-ledger-1"
+    assert first["trade_uid"] == second["trade_uid"]
+    events = (tmp_path / "ledger.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(events) == 1
+    event = json.loads(events[0])
+    assert event["status"] == "execution_fill"
+    assert event["action"] == "BUY"
+    assert event["fill_price"] == 27854.75
+    assert len((tmp_path / "ledger.csv").read_text(encoding="utf-8").splitlines()) == 2
+
+
 def test_live_paper_trader_daemon_runs_one_iteration(tmp_path):
     broker = IBKRPaperBroker(
         risk=IBKRPaperRiskConfig(allowed_accounts=("DU123",), allowed_symbols=("MNQ",)),
@@ -1412,6 +1535,7 @@ def test_live_paper_trader_daemon_runs_one_iteration(tmp_path):
             ),
             interval_seconds=0,
             max_iterations=1,
+            require_preflight_ready=False,
         ),
         broker=broker,
     )
@@ -1419,6 +1543,62 @@ def test_live_paper_trader_daemon_runs_one_iteration(tmp_path):
     assert result["status"] == "completed"
     assert result["iterations"] == 1
     assert result["events"][0]["status"] == "dry_run"
+
+
+def test_live_paper_trader_daemon_blocks_when_startup_preflight_not_ready(tmp_path, monkeypatch):
+    broker = IBKRPaperBroker(audit_path=tmp_path / "ibkr.jsonl")
+    monkeypatch.setattr(
+        "tradingagents.execution.live_paper_trader.live_paper_preflight",
+        lambda **kwargs: {"readiness": {"status": "blocked", "missing_requirements": ["not_connected"]}},
+    )
+
+    result = run_live_paper_trader_daemon(
+        config=LivePaperTraderDaemonConfig(
+            trader=LivePaperTraderConfig(live_signal_path=tmp_path / "live.csv", state_path=tmp_path / "state.json"),
+            interval_seconds=0,
+            max_iterations=1,
+            status_path=tmp_path / "status.json",
+        ),
+        broker=broker,
+    )
+
+    assert result["status"] == "preflight_blocked"
+    assert result["submitted"] is False
+    assert result["iterations"] == 0
+    assert (tmp_path / "status.json").exists()
+    assert not (tmp_path / "live.csv").exists()
+
+
+def test_live_paper_trader_daemon_runs_after_startup_preflight_ready(tmp_path, monkeypatch):
+    broker = IBKRPaperBroker(audit_path=tmp_path / "ibkr.jsonl")
+    monkeypatch.setattr(
+        "tradingagents.execution.live_paper_trader.live_paper_preflight",
+        lambda **kwargs: {"readiness": {"status": "ready", "missing_requirements": []}, "market_data": {"order_ready": True}},
+    )
+    monkeypatch.setattr(
+        "tradingagents.execution.live_paper_trader.run_live_paper_trader_once",
+        lambda *, config, broker, gate: {"status": "dry_run", "submitted": False, "candidate_key": "test"},
+    )
+    monkeypatch.setattr(
+        "tradingagents.execution.live_paper_trader._sync_execution_logs",
+        lambda broker, config: {"status": "disabled", "fills": 0},
+    )
+
+    result = run_live_paper_trader_daemon(
+        config=LivePaperTraderDaemonConfig(
+            trader=LivePaperTraderConfig(live_signal_path=tmp_path / "live.csv", state_path=tmp_path / "state.json"),
+            interval_seconds=0,
+            max_iterations=1,
+            status_path=tmp_path / "status.json",
+        ),
+        broker=broker,
+    )
+
+    assert result["status"] == "completed"
+    assert result["iterations"] == 1
+    assert result["events"][0]["status"] == "dry_run"
+    status = json.loads((tmp_path / "status.json").read_text(encoding="utf-8"))
+    assert status["status"] == "completed"
 
 
 def test_live_paper_trader_daemon_uses_fixed_start_cadence(tmp_path, monkeypatch):
@@ -1437,6 +1617,7 @@ def test_live_paper_trader_daemon_uses_fixed_start_cadence(tmp_path, monkeypatch
             trader=LivePaperTraderConfig(live_signal_path=tmp_path / "live.csv", state_path=tmp_path / "state.json"),
             interval_seconds=30,
             max_iterations=2,
+            require_preflight_ready=False,
         ),
         broker=IBKRPaperBroker(),
     )
@@ -1757,11 +1938,17 @@ def test_execution_sync_records_high_confidence_paper_outcomes(tmp_path):
             strategy_id="adaptive_defensive_mr",
             trade_log_dir=trade_log_dir,
             agent_audit_path=tmp_path / "agent.jsonl",
+            realtime_ledger_path=tmp_path / "ledger.jsonl",
+            realtime_ledger_csv_path=tmp_path / "ledger.csv",
         ),
     )
 
     assert result["paper_outcomes"]["recorded"] == 1
     assert result["paper_outcomes"]["high_confidence"] == 1
+    assert result["realtime_fill_ledgers"][0]["trade_uid"] == "exec-sync-1"
+    ledger_event = json.loads((tmp_path / "ledger.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert ledger_event["status"] == "execution_fill"
+    assert ledger_event["fill_price"] == 27893.5
     rows = (tmp_path / "agent.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(rows) == 1
     assert '"intent_id": "ibkr_intent_sync_1"' in rows[0]
@@ -2880,6 +3067,141 @@ def test_run_ibkr_live_paper_trader_script_invokes_live_runner(tmp_path, monkeyp
     assert captured["config"].submit is True
     assert captured["config"].require_agent_gate is True
     assert '"status": "submitted"' in capsys.readouterr().out
+
+
+def test_submit_ibkr_paper_order_script_builds_immediate_manual_intent(tmp_path, monkeypatch, capsys):
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "submit_ibkr_paper_order.py"
+    spec = importlib.util.spec_from_file_location("submit_ibkr_paper_order", script_path)
+    script = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(script)
+    captured = {}
+
+    class FakeSession:
+        def __init__(self, *, broker, contract):
+            captured["broker"] = broker
+            captured["contract"] = contract
+            self.max_spread_ticks = 4
+
+        def submit_intent(self, intent, *, dry_run=True, skip_preflight=False):
+            captured["intent"] = intent
+            captured["dry_run"] = dry_run
+            captured["skip_preflight"] = skip_preflight
+            return {"status": "submitted", "submitted": True, "intent": asdict(intent)}
+
+    monkeypatch.setattr(script, "IBKRPaperTradingSession", FakeSession)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "submit_ibkr_paper_order.py",
+            "--action",
+            "BUY",
+            "--symbol",
+            "MNQ",
+            "--contract-month",
+            "202606",
+            "--account",
+            "DU123",
+            "--client-id",
+            "731",
+            "--stop-loss-points",
+            "12",
+            "--take-profit-points",
+            "18",
+            "--submit",
+        ],
+    )
+
+    assert script.main() == 0
+    assert captured["dry_run"] is False
+    assert captured["contract"].symbol == "MNQ"
+    assert captured["contract"].last_trade_date_or_contract_month == "202606"
+    assert captured["intent"].action == "BUY"
+    assert captured["intent"].quantity == 1
+    assert captured["intent"].account == "DU123"
+    assert "stop_loss_points=12.0000" in captured["intent"].reason
+    assert "take_profit_points=18.0000" in captured["intent"].reason
+    assert '"status": "submitted"' in capsys.readouterr().out
+
+
+def test_run_mnq_ba_no_trade_combo_paper_trader_defaults_to_combo(tmp_path, monkeypatch, capsys):
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "run_mnq_ba_no_trade_combo_paper_trader.py"
+    spec = importlib.util.spec_from_file_location("run_mnq_ba_no_trade_combo_paper_trader", script_path)
+    script = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(script)
+    captured = {}
+
+    def fake_run_once(*, config, broker=None):
+        captured["config"] = config
+        captured["broker"] = broker
+        return {"status": "signal_blocked", "submitted": False, "reason": "no_signal"}
+
+    monkeypatch.setattr(script, "run_live_paper_trader_once", fake_run_once)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_mnq_ba_no_trade_combo_paper_trader.py",
+            "--account",
+            "DU123",
+            "--client-id",
+            "733",
+            "--live-signal",
+            str(tmp_path / "live.csv"),
+            "--state-path",
+            str(tmp_path / "state.json"),
+        ],
+    )
+
+    assert script.main() == 0
+    assert captured["config"].strategy_id == "mnq_ba_no_trade_best_combo"
+    assert captured["config"].selected_alias == "ba_no_trade_best_combo"
+    assert captured["config"].strategy_spec.family == "ba_no_trade_combo"
+    assert captured["config"].contract.symbol == "MNQ"
+    assert captured["config"].strategy_signal.min_bars == 220
+    assert captured["config"].submit is False
+    assert captured["config"].paper_validation_accrual_mode is False
+    assert captured["broker"].connection.client_id == 733
+    assert '"status": "signal_blocked"' in capsys.readouterr().out
+
+
+def test_run_mnq_ba_no_trade_combo_paper_trader_submit_uses_accrual_mode(tmp_path, monkeypatch):
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "run_mnq_ba_no_trade_combo_paper_trader.py"
+    spec = importlib.util.spec_from_file_location("run_mnq_ba_no_trade_combo_paper_trader_submit", script_path)
+    script = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(script)
+    captured = {}
+
+    def fake_daemon(*, config, broker=None):
+        captured["config"] = config
+        captured["broker"] = broker
+        return {"status": "completed", "iterations": 0, "events": []}
+
+    monkeypatch.setattr(script, "run_live_paper_trader_daemon", fake_daemon)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_mnq_ba_no_trade_combo_paper_trader.py",
+            "--daemon",
+            "--max-iterations",
+            "1",
+            "--submit",
+            "--account",
+            "DU123",
+            "--client-id",
+            "734",
+            "--status-path",
+            str(tmp_path / "status.json"),
+        ],
+    )
+
+    assert script.main() == 0
+    assert captured["config"].trader.submit is True
+    assert captured["config"].trader.paper_validation_accrual_mode is True
+    assert captured["config"].trader.paper_validation_gate_enabled is True
+    assert captured["config"].require_preflight_ready is True
+    assert captured["config"].max_iterations == 1
 
 
 def test_check_paper_automation_status_reports_blockers(tmp_path, monkeypatch, capsys):

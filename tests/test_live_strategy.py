@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import pandas as pd
 
 from tradingagents.execution import (
+    BA_NO_TRADE_COMBO_ALIAS,
+    BA_NO_TRADE_COMBO_STRATEGY_ID,
     BEST_MEAN_REVERSION_ALIAS,
     BEST_MEAN_REVERSION_STRATEGY_ID,
     IBKRConnectionConfig,
@@ -16,6 +18,8 @@ from tradingagents.execution import (
     LivePaperTraderConfig,
     LiveStrategySpec,
     LiveStrategySignalConfig,
+    ba_no_trade_combo_spec,
+    evaluate_ba_no_trade_combo_signal,
     evaluate_mean_reversion_signal,
     evaluate_regime_transition_signal,
     regime_transition_spec,
@@ -154,6 +158,60 @@ def _regime_bars(*, include_volume: bool = True) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _ba_combo_bars(*, side: str = "long") -> pd.DataFrame:
+    start = datetime(2026, 5, 4, 18 if side == "long" else 1, 0, tzinfo=UTC)
+    rows = []
+    price = 120.0 if side == "short" else 100.0
+    row_count = 229 if side == "long" else 230
+    for index in range(row_count):
+        timestamp = start + timedelta(minutes=index)
+        if side == "long":
+            base = 100 + (index % 20 - 10) * 0.25
+            open_price = base
+            close = base + (0.2 if index % 2 == 0 else -0.2)
+            high = max(open_price, close) + 2.0
+            low = min(open_price, close) - 2.0
+            volume = 100.0
+            price = close
+        else:
+            open_price = price
+            if index < 210:
+                close = price - 0.08
+                high = open_price + 2.0
+                low = close - 2.0
+                volume = 100.0
+            else:
+                close = price - 3.2
+                high = open_price + 1.0
+                low = close + 0.2
+                volume = 300.0
+            price = close
+        rows.append(
+            {
+                "ts": timestamp,
+                "Open": open_price,
+                "High": high,
+                "Low": low,
+                "Close": close,
+                "Volume": volume,
+                "imbalance_last": 0.0,
+            }
+        )
+    if side == "long":
+        rows.append(
+            {
+                "ts": start + timedelta(minutes=229),
+                "Open": 98.0,
+                "High": 101.5,
+                "Low": 93.0,
+                "Close": 100.8,
+                "Volume": 300.0,
+                "imbalance_last": 0.0,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def _broker(tmp_path, fake_ib: FakeIB) -> IBKRPaperBroker:
     return IBKRPaperBroker(
         connection=IBKRConnectionConfig(port=7497, account="DU123"),
@@ -252,6 +310,25 @@ def test_regime_transition_blocks_volume_filtered_strategy_without_volume():
     assert evaluation["reason"] == "missing_volume_for_volume_z"
 
 
+def test_ba_no_trade_combo_triggers_long_with_dynamic_bracket():
+    evaluation = evaluate_ba_no_trade_combo_signal(_ba_combo_bars(side="long"), ba_no_trade_combo_spec())
+
+    assert evaluation["triggered"]
+    assert evaluation["direction"] == 1
+    assert evaluation["leg"] == "BA"
+    assert evaluation["stop_points"] >= 4.0
+    assert evaluation["target_points"] == evaluation["stop_points"] * 2.5
+
+
+def test_ba_no_trade_combo_triggers_short_with_dynamic_bracket():
+    evaluation = evaluate_ba_no_trade_combo_signal(_ba_combo_bars(side="short"), ba_no_trade_combo_spec())
+
+    assert evaluation["triggered"]
+    assert evaluation["direction"] == -1
+    assert evaluation["leg"] == "BA"
+    assert evaluation["stop_points"] >= 4.0
+
+
 def test_live_trader_blocks_when_strategy_history_is_insufficient(tmp_path):
     broker = _broker(tmp_path, FakeIB())
     result = run_live_paper_trader_once(
@@ -299,6 +376,48 @@ def test_live_trader_regime_transition_uses_historical_ohlcv_bars(tmp_path, monk
     assert float(result["live_signal"]["strategy_target_points"]) > float(result["live_signal"]["strategy_stop_points"])
     signal = pd.read_csv(tmp_path / "signal.csv")
     assert float(signal.iloc[0]["strategy_volume_z"]) >= 0.5
+
+
+def test_live_trader_ba_no_trade_combo_uses_historical_ohlcv_bars(tmp_path, monkeypatch):
+    start = datetime(2026, 5, 4, 21, 49, tzinfo=UTC)
+    monkeypatch.setattr("tradingagents.execution.live_strategy._utc_now", lambda value=None: start)
+    fake_ib = FakeIB(bid=114.0, ask=114.25, last=114.0)
+    fake_ib.reqHistoricalData = lambda contract, endDateTime, durationStr, barSizeSetting, whatToShow, useRTH, formatDate: [
+        SimpleNamespace(
+            date=row["ts"].to_pydatetime(),
+            open=row["Open"],
+            high=row["High"],
+            low=row["Low"],
+            close=row["Close"],
+            volume=row["Volume"],
+            wap=row["Close"],
+            barCount=1,
+        )
+        for _, row in _ba_combo_bars(side="long").iterrows()
+    ]
+    broker = _broker(tmp_path, fake_ib)
+
+    result = run_live_paper_trader_once(
+        config=LivePaperTraderConfig(
+            live_signal_path=tmp_path / "signal.csv",
+            state_path=tmp_path / "state.json",
+            strategy_id=BA_NO_TRADE_COMBO_STRATEGY_ID,
+            selected_alias=BA_NO_TRADE_COMBO_ALIAS,
+            signal_mode="strategy",
+            strategy_spec=ba_no_trade_combo_spec(),
+            contract=IBKRContractSpec(last_trade_date_or_contract_month="202606"),
+            strategy_signal=LiveStrategySignalConfig(history_path=tmp_path / "history.jsonl", tick_interval_seconds=0, min_bars=220),
+            max_hold_minutes=60,
+        ),
+        broker=broker,
+    )
+
+    assert result["status"] == "dry_run"
+    assert result["live_signal"]["signal_source"].startswith("strategy:mnq_ba_no_trade_best_combo:long_ba_")
+    assert result["live_signal"]["strategy_leg"] == "BA"
+    assert float(result["live_signal"]["strategy_stop_points"]) >= 4.0
+    signal = pd.read_csv(tmp_path / "signal.csv")
+    assert signal.iloc[0]["strategy_leg"] == "BA"
 
 
 def test_live_trader_blocks_when_live_imbalance_is_missing(tmp_path, monkeypatch):

@@ -14,11 +14,15 @@ from .ibkr import (
 )
 from .live_signal import LIVE_SIGNAL_COLUMNS, LiveSignalConfig, build_live_signal_row, write_live_signal
 from .live_strategy import (
+    BA_NO_TRADE_COMBO_ALIAS,
+    BA_NO_TRADE_COMBO_STRATEGY_ID,
     BEST_MEAN_REVERSION_ALIAS,
     BEST_MEAN_REVERSION_STRATEGY_ID,
     LiveStrategySignalConfig,
     LiveStrategySpec,
+    ba_no_trade_combo_spec,
     build_strategy_live_signal_row,
+    evaluate_ba_no_trade_combo_signal,
     evaluate_mean_reversion_signal,
     evaluate_regime_transition_signal,
     regime_transition_spec,
@@ -35,7 +39,7 @@ from .agent_gate import (
 from .gate_backtest import GateReplayConfig, replay_gate_on_trades
 from .paper_report import PaperValidationGateConfig, evaluate_paper_validation_gate, paper_summary_frame, summarize_paper_audits
 from .paper_runner import PaperDaemonConfig, PaperRunnerConfig, run_adaptive_portfolio_paper_daemon, run_adaptive_portfolio_paper_once
-from .live_paper_trader import LivePaperTraderConfig, LivePaperTraderDaemonConfig, run_live_paper_trader_daemon, run_live_paper_trader_once
+from .live_paper_trader import LivePaperTraderConfig, LivePaperTraderDaemonConfig, live_paper_preflight, run_live_paper_trader_daemon, run_live_paper_trader_once
 from .paper_validation import build_paper_intent_from_trade, load_trade_samples, select_trade_sample
 from .tick_recorder import IBKRTickRecorderConfig, record_ibkr_ticks
 from .tick_replay import TickReplayDatasetConfig, build_tick_replay_dataset
@@ -96,9 +100,12 @@ __all__ = [
     "StaticDebatePlanner",
     "BEST_MEAN_REVERSION_ALIAS",
     "BEST_MEAN_REVERSION_STRATEGY_ID",
+    "BA_NO_TRADE_COMBO_ALIAS",
+    "BA_NO_TRADE_COMBO_STRATEGY_ID",
     "build_nq_future_contract",
     "is_paper_tradeable_market_data_type",
     "build_live_signal_row",
+    "ba_no_trade_combo_spec",
     "build_strategy_live_signal_row",
     "build_candidate_trade_context",
     "build_paper_intent_from_trade",
@@ -115,6 +122,7 @@ __all__ = [
     "run_adaptive_portfolio_paper_daemon",
     "run_live_paper_trader_once",
     "run_live_paper_trader_daemon",
+    "live_paper_preflight",
     "record_ibkr_ticks",
     "build_tick_replay_dataset",
     "write_live_signal",
@@ -133,6 +141,7 @@ __all__ = [
     "select_feature_trigger",
     "walk_forward_gate_replay",
     "evaluate_mean_reversion_signal",
+    "evaluate_ba_no_trade_combo_signal",
     "evaluate_regime_transition_signal",
     "regime_transition_spec",
     "LIVE_SIGNAL_COLUMNS",

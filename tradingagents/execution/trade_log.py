@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import csv
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 
 DEFAULT_TRADE_LOG_DIR = Path("docs/Strategy/tradelogs")
+DEFAULT_REALTIME_LEDGER_PATH = Path(".tmp/ibkr-paper-realtime-trades.jsonl")
 
 
 def append_trade_log(
@@ -52,6 +55,286 @@ def append_execution_fill_log(
     with output.open("a", encoding="utf-8") as handle:
         handle.write(_format_execution_fill_entry(fill, timestamp, execution, contract))
     return output
+
+
+def append_realtime_trade_ledger(
+    result: dict[str, Any],
+    *,
+    ledger_path: Path | str = DEFAULT_REALTIME_LEDGER_PATH,
+    csv_path: Path | str | None = None,
+    created_at: datetime | None = None,
+) -> dict[str, Any]:
+    event = _realtime_ledger_event(result, created_at=created_at)
+    return _append_realtime_ledger_event(event, ledger_path=ledger_path, csv_path=csv_path)
+
+
+def append_realtime_execution_fill_ledger(
+    fill: dict[str, Any],
+    *,
+    ledger_path: Path | str = DEFAULT_REALTIME_LEDGER_PATH,
+    csv_path: Path | str | None = None,
+    created_at: datetime | None = None,
+) -> dict[str, Any]:
+    event = _realtime_execution_fill_event(fill, created_at=created_at)
+    return _append_realtime_ledger_event(event, ledger_path=ledger_path, csv_path=csv_path)
+
+
+def _append_realtime_ledger_event(
+    event: dict[str, Any],
+    *,
+    ledger_path: Path | str,
+    csv_path: Path | str | None,
+) -> dict[str, Any]:
+    output = Path(ledger_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    existing_ids = _existing_trade_uids(output)
+    if event["trade_uid"] not in existing_ids:
+        with output.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, sort_keys=True, default=str) + "\n")
+    csv_output = Path(csv_path) if csv_path is not None else output.with_suffix(".csv")
+    _append_realtime_ledger_csv(csv_output, event)
+    return {"status": "recorded", "trade_uid": event["trade_uid"], "ledger_path": str(output), "csv_path": str(csv_output)}
+
+
+def _realtime_execution_fill_event(fill: dict[str, Any], *, created_at: datetime | None) -> dict[str, Any]:
+    execution = fill.get("execution") if isinstance(fill.get("execution"), dict) else {}
+    contract = fill.get("contract") if isinstance(fill.get("contract"), dict) else {}
+    timestamp = _parse_timestamp(execution.get("time")) or _event_timestamp({}, created_at)
+    side = str(execution.get("side") or "").upper()
+    action = "BUY" if side in {"BOT", "BUY"} else "SELL" if side in {"SLD", "SELL"} else side
+    exec_id = str(execution.get("exec_id") or "")
+    trade_uid = _safe_component(exec_id or f"fill-{execution.get('order_id', '')}-{timestamp.isoformat()}")
+    return {
+        "event_type": "ibkr_realtime_execution_fill",
+        "trade_uid": trade_uid,
+        "created_at": timestamp.isoformat(),
+        "status": "execution_fill",
+        "submitted": True,
+        "reason": "ibkr_execution_fill_sync",
+        "candidate_key": "",
+        "intent_id": "",
+        "strategy_id": "",
+        "selected_alias": "",
+        "signal_source": "ibkr_execution_fill",
+        "strategy_leg": "",
+        "action": action,
+        "direction": 1 if action == "BUY" else -1 if action == "SELL" else None,
+        "symbol": contract.get("symbol", ""),
+        "account": execution.get("account"),
+        "quantity": execution.get("shares"),
+        "entry_ts": "",
+        "exit_ts": "",
+        "entry_price": "",
+        "stop_loss_price": "",
+        "take_profit_price": "",
+        "stop_points": "",
+        "target_points": "",
+        "horizon_minutes": "",
+        "ibkr_bid": "",
+        "ibkr_ask": "",
+        "ibkr_last": execution.get("price"),
+        "ibkr_spread": "",
+        "ibkr_market_data_type": "",
+        "risk_decision": "",
+        "risk_reasons": [],
+        "order_statuses": "",
+        "realized_vol_30": "",
+        "vwap_distance": "",
+        "strategy_body_share": "",
+        "strategy_volume_z": "",
+        "exec_id": exec_id,
+        "fill_ts": timestamp.isoformat(),
+        "fill_price": execution.get("price"),
+        "ibkr_order_id": execution.get("order_id"),
+        "contract_local_symbol": contract.get("localSymbol") or contract.get("local_symbol", ""),
+        "raw_fill": fill,
+    }
+
+
+def _realtime_ledger_event(result: dict[str, Any], *, created_at: datetime | None) -> dict[str, Any]:
+    timestamp = _event_timestamp(result, created_at)
+    live_signal = result.get("live_signal") if isinstance(result.get("live_signal"), dict) else {}
+    selected_trade = result.get("selected_trade") if isinstance(result.get("selected_trade"), dict) else {}
+    intent = result.get("intent") if isinstance(result.get("intent"), dict) else {}
+    broker_result = result.get("result") if isinstance(result.get("result"), dict) else {}
+    if not intent and isinstance(broker_result.get("intent"), dict):
+        intent = broker_result["intent"]
+    risk = broker_result.get("risk") if isinstance(broker_result.get("risk"), dict) else {}
+    preflight = broker_result.get("preflight") if isinstance(broker_result.get("preflight"), dict) else {}
+    market_data = preflight.get("market_data") if isinstance(preflight.get("market_data"), dict) else {}
+    candidate_key = str(result.get("candidate_key") or _ledger_candidate_key(result, live_signal, selected_trade, intent, timestamp))
+    intent_id = str(intent.get("intent_id") or "")
+    trade_uid = _safe_component(intent_id or candidate_key or f"ledger-{timestamp.isoformat()}")
+    direction = _ledger_direction(intent, live_signal, selected_trade)
+    entry_price = _first_value(intent.get("entry_price"), live_signal.get("entry_price"), selected_trade.get("entry_price"))
+    stop_loss_price = intent.get("stop_loss_price")
+    take_profit_price = intent.get("take_profit_price")
+    stop_points = _first_value(live_signal.get("strategy_stop_points"), selected_trade.get("strategy_stop_points"), _reason_value(intent.get("reason"), "stop_loss_points"))
+    target_points = _first_value(live_signal.get("strategy_target_points"), selected_trade.get("strategy_target_points"), _reason_value(intent.get("reason"), "take_profit_points"))
+    return {
+        "event_type": "ibkr_realtime_trade_ledger",
+        "trade_uid": trade_uid,
+        "created_at": timestamp.isoformat(),
+        "status": result.get("status"),
+        "submitted": bool(result.get("submitted")),
+        "reason": result.get("reason", ""),
+        "candidate_key": candidate_key,
+        "intent_id": intent_id,
+        "strategy_id": intent.get("strategy_id") or live_signal.get("strategy_name") or selected_trade.get("strategy_name"),
+        "selected_alias": live_signal.get("selected_alias") or selected_trade.get("selected_alias"),
+        "signal_source": live_signal.get("signal_source") or selected_trade.get("signal_source"),
+        "strategy_leg": live_signal.get("strategy_leg") or selected_trade.get("strategy_leg"),
+        "action": intent.get("action"),
+        "direction": direction,
+        "symbol": intent.get("symbol") or live_signal.get("symbol") or selected_trade.get("symbol", "MNQ"),
+        "account": intent.get("account"),
+        "quantity": intent.get("quantity"),
+        "entry_ts": live_signal.get("entry_ts") or selected_trade.get("entry_ts"),
+        "exit_ts": live_signal.get("exit_ts") or selected_trade.get("exit_ts"),
+        "entry_price": entry_price,
+        "stop_loss_price": stop_loss_price,
+        "take_profit_price": take_profit_price,
+        "stop_points": stop_points,
+        "target_points": target_points,
+        "horizon_minutes": live_signal.get("strategy_horizon_minutes") or selected_trade.get("strategy_horizon_minutes") or selected_trade.get("holding_minutes"),
+        "ibkr_bid": _first_value(market_data.get("bid"), live_signal.get("ibkr_bid"), selected_trade.get("ibkr_bid")),
+        "ibkr_ask": _first_value(market_data.get("ask"), live_signal.get("ibkr_ask"), selected_trade.get("ibkr_ask")),
+        "ibkr_last": _first_value(market_data.get("last"), live_signal.get("ibkr_last"), selected_trade.get("ibkr_last")),
+        "ibkr_spread": _first_value(market_data.get("spread"), live_signal.get("ibkr_spread"), selected_trade.get("ibkr_spread")),
+        "ibkr_market_data_type": _first_value(market_data.get("market_data_type"), live_signal.get("ibkr_market_data_type"), selected_trade.get("ibkr_market_data_type")),
+        "risk_decision": risk.get("decision"),
+        "risk_reasons": risk.get("reasons", []),
+        "order_statuses": _trade_status_summary(broker_result.get("trades") if isinstance(broker_result.get("trades"), list) else []),
+        "realized_vol_30": live_signal.get("realized_vol_30") or selected_trade.get("realized_vol_30"),
+        "vwap_distance": live_signal.get("vwap_distance") or selected_trade.get("vwap_distance"),
+        "strategy_body_share": live_signal.get("strategy_body_share") or selected_trade.get("strategy_body_share"),
+        "strategy_volume_z": live_signal.get("strategy_volume_z") or selected_trade.get("strategy_volume_z"),
+        "exec_id": "",
+        "fill_ts": "",
+        "fill_price": "",
+        "ibkr_order_id": "",
+        "contract_local_symbol": "",
+        "raw_result": result,
+    }
+
+
+def _append_realtime_ledger_csv(path: Path, event: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "trade_uid",
+        "created_at",
+        "status",
+        "submitted",
+        "strategy_id",
+        "selected_alias",
+        "signal_source",
+        "strategy_leg",
+        "action",
+        "direction",
+        "symbol",
+        "account",
+        "quantity",
+        "entry_ts",
+        "entry_price",
+        "stop_loss_price",
+        "take_profit_price",
+        "stop_points",
+        "target_points",
+        "horizon_minutes",
+        "ibkr_bid",
+        "ibkr_ask",
+        "ibkr_last",
+        "ibkr_spread",
+        "risk_decision",
+        "reason",
+        "candidate_key",
+        "intent_id",
+        "exec_id",
+        "fill_ts",
+        "fill_price",
+        "ibkr_order_id",
+        "contract_local_symbol",
+    ]
+    existing_ids = _existing_trade_uids(path, csv_mode=True)
+    if event["trade_uid"] in existing_ids:
+        return
+    with path.open("a", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        if path.stat().st_size == 0:
+            writer.writeheader()
+        writer.writerow({key: _csv_value(event.get(key)) for key in fieldnames})
+
+
+def _existing_trade_uids(path: Path, *, csv_mode: bool = False) -> set[str]:
+    if not path.exists():
+        return set()
+    ids: set[str] = set()
+    if csv_mode:
+        try:
+            with path.open("r", encoding="utf-8", newline="") as handle:
+                for row in csv.DictReader(handle):
+                    if row.get("trade_uid"):
+                        ids.add(str(row["trade_uid"]))
+        except Exception:
+            return set()
+        return ids
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("trade_uid"):
+            ids.add(str(event["trade_uid"]))
+    return ids
+
+
+def _ledger_candidate_key(
+    result: dict[str, Any],
+    live_signal: dict[str, Any],
+    selected_trade: dict[str, Any],
+    intent: dict[str, Any],
+    timestamp: datetime,
+) -> str:
+    parts = [
+        intent.get("strategy_id") or live_signal.get("strategy_name") or selected_trade.get("strategy_name") or "unknown_strategy",
+        live_signal.get("selected_alias") or selected_trade.get("selected_alias") or "",
+        live_signal.get("entry_ts") or selected_trade.get("entry_ts") or timestamp.isoformat(),
+        live_signal.get("direction") or selected_trade.get("direction") or intent.get("action") or "",
+        live_signal.get("entry_price") or selected_trade.get("entry_price") or "",
+        result.get("status") or "",
+    ]
+    return "|".join(str(part) for part in parts)
+
+
+def _ledger_direction(intent: dict[str, Any], live_signal: dict[str, Any], selected_trade: dict[str, Any]) -> int | None:
+    action = str(intent.get("action") or "").upper()
+    if action == "BUY":
+        return 1
+    if action == "SELL":
+        return -1
+    for source in [live_signal, selected_trade]:
+        try:
+            return 1 if int(float(source.get("direction"))) > 0 else -1
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _first_value(*values: Any) -> Any:
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return ""
+
+
+def _csv_value(value: Any) -> Any:
+    if isinstance(value, (list, dict)):
+        return json.dumps(value, sort_keys=True, default=str)
+    return value
+
+
+def _safe_component(value: str) -> str:
+    return "".join(character if character.isalnum() or character in {"-", "_"} else "-" for character in value)[:120]
 
 
 def _event_timestamp(result: dict[str, Any], fallback: datetime | None) -> datetime:

@@ -486,6 +486,116 @@ def run_reverse_trade_diagnostic(
     return result
 
 
+def add_bottom_state_context(trades: pd.DataFrame, bars: pd.DataFrame) -> pd.DataFrame:
+    """Attach causal range-bottom state features known at the signal/entry decision."""
+    context = bars[["ts", "Open", "High", "Low", "Close", "Volume"]].copy()
+    context["range_high_90"] = context["High"].rolling(90, min_periods=45).max().shift(1)
+    context["range_low_90"] = context["Low"].rolling(90, min_periods=45).min().shift(1)
+    context["range_width_90"] = context["range_high_90"] - context["range_low_90"]
+    previous_close = context["Close"].shift(1)
+    true_range = pd.concat(
+        [
+            context["High"] - context["Low"],
+            (context["High"] - previous_close).abs(),
+            (context["Low"] - previous_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    context["atr14"] = true_range.rolling(14, min_periods=5).mean()
+    context["ema20"] = context["Close"].ewm(span=20, adjust=False).mean()
+    context["ema60"] = context["Close"].ewm(span=60, adjust=False).mean()
+    context["ema200"] = context["Close"].ewm(span=200, adjust=False).mean()
+    context["mom30"] = context["Close"] - context["Close"].shift(30)
+    volume_std = context["Volume"].rolling(60, min_periods=20).std().replace(0, np.nan)
+    context["volume_z_60_ctx"] = (context["Volume"] - context["Volume"].rolling(60, min_periods=20).mean()) / volume_std
+    context["body_atr"] = (context["Close"] - context["Open"]).abs() / context["atr14"].replace(0, np.nan)
+    context["range_pos_90"] = (context["Close"] - context["range_low_90"]) / context["range_width_90"].replace(0, np.nan)
+    below_range = context["Close"] < (context["range_low_90"] - context["atr14"].fillna(0.0) * 0.15)
+    context["accepted_below_range"] = below_range.rolling(3, min_periods=1).sum() >= 3
+    context["sweep_reclaim_range_low"] = (context["Low"] < context["range_low_90"]) & (context["Close"] > context["range_low_90"])
+    context["bottom_breakdown_continuation"] = (
+        context["accepted_below_range"]
+        & (context["Close"] < context["Open"])
+        & (context["ema20"] < context["ema60"])
+        & (context["ema60"] <= context["ema200"])
+        & (context["mom30"] < 0.0)
+        & (context["volume_z_60_ctx"].fillna(0.0) >= 0.0)
+        & (context["body_atr"].fillna(0.0) >= 0.6)
+    )
+    context["bottom_sweep_reclaim_bounce"] = (
+        context["sweep_reclaim_range_low"]
+        & (context["Close"] > context["Open"])
+        & (context["mom30"] > context["mom30"].shift(1))
+        & (context["body_atr"].fillna(0.0) >= 0.3)
+    )
+    context["bottom_uncertain_no_trade"] = (
+        context["range_pos_90"].le(0.15)
+        & ~context["bottom_breakdown_continuation"]
+        & ~context["bottom_sweep_reclaim_bounce"]
+    )
+    context["bottom_state"] = np.select(
+        [
+            context["bottom_breakdown_continuation"],
+            context["bottom_sweep_reclaim_bounce"],
+            context["bottom_uncertain_no_trade"],
+        ],
+        ["breakdown_continuation", "sweep_reclaim_bounce", "uncertain_bottom"],
+        default="neutral",
+    )
+    context["ctx_ts"] = (context["ts"] + pd.Timedelta(minutes=1)).astype("datetime64[ns, UTC]")
+    frame = trades.copy().sort_values("entry_ts")
+    frame["entry_ts"] = frame["entry_ts"].astype("datetime64[ns, UTC]")
+    columns = [
+        "ctx_ts",
+        "range_low_90",
+        "range_high_90",
+        "range_pos_90",
+        "atr14",
+        "ema20",
+        "ema60",
+        "ema200",
+        "mom30",
+        "volume_z_60_ctx",
+        "body_atr",
+        "accepted_below_range",
+        "sweep_reclaim_range_low",
+        "bottom_breakdown_continuation",
+        "bottom_sweep_reclaim_bounce",
+        "bottom_uncertain_no_trade",
+        "bottom_state",
+    ]
+    return pd.merge_asof(
+        frame,
+        context[columns].sort_values("ctx_ts"),
+        left_on="entry_ts",
+        right_on="ctx_ts",
+        direction="backward",
+    )
+
+
+def bottom_state_summary(trades: pd.DataFrame, bars: pd.DataFrame) -> pd.DataFrame:
+    if trades.empty:
+        return pd.DataFrame()
+    context = add_bottom_state_context(trades, bars)
+    rows: list[dict[str, Any]] = []
+    for (source, direction, state), group in context.groupby(["strategy_source", "direction", "bottom_state"], dropna=False):
+        points = pd.to_numeric(group["net_points"], errors="coerce").fillna(0.0)
+        rows.append(
+            {
+                "strategy_source": source,
+                "direction": int(direction) if pd.notna(direction) else 0,
+                "bottom_state": state,
+                "trades": int(len(group)),
+                "net_points": float(points.sum()),
+                "profit_factor": profit_factor(points),
+                "win_rate": float((points > 0).mean()) if len(points) else 0.0,
+                "avg_points": float(points.mean()) if len(points) else 0.0,
+                "worst_trade_points": float(points.min()) if len(points) else 0.0,
+            }
+        )
+    return pd.DataFrame(rows).sort_values(["strategy_source", "direction", "net_points"], ascending=[True, True, False])
+
+
 def hash_frame(frame: pd.DataFrame, columns: list[str]) -> str:
     if frame.empty:
         return "empty"
@@ -1024,6 +1134,7 @@ def build_html_report(
     stress: pd.DataFrame,
     loss_learning: pd.DataFrame,
     reverse_diagnostic: pd.DataFrame,
+    bottom_states: pd.DataFrame,
     bars: pd.DataFrame,
     readiness: dict[str, Any],
     risk_mapping: pd.DataFrame,
@@ -1152,6 +1263,15 @@ def build_html_report(
       {html_table(reverse_diagnostic, [("window", "窗口"), ("candidate", "候选"), ("selected_by_train_reverse", "训练选中"), ("threshold_points", "阈值"), ("train_signal_trades", "训练信号数"), ("train_reverse_delta_vs_baseline", "训练反手vs原始"), ("train_reverse_delta_vs_skip", "训练反手vs跳过"), ("test_signal_trades", "测试信号数"), ("test_reverse_delta_vs_baseline", "测试反手vs原始"), ("test_reverse_delta_vs_skip", "测试反手vs跳过"), ("is_reverse_positive_oos", "OOS正向")], limit=80)}
     </section>
     <section>
+      <h2>区间底部破位 vs 扫低收回诊断</h2>
+      <div class="note">
+        <p><strong>目的：</strong>价格跌到区间底部时不能机械做多。系统把底部分为 <code>breakdown_continuation</code>、<code>sweep_reclaim_bounce</code>、<code>uncertain_bottom</code> 和 <code>neutral</code>。</p>
+        <p><strong>破位延续：</strong>连续接受在区间低点下方，同时 EMA20&lt;EMA60&lt;=EMA200、30m 动量为负、成交量不萎缩、实体达到 ATR 置换阈值。</p>
+        <p><strong>扫低反弹：</strong>先刺穿区间低点获取流动性，再收回区间内，并出现阳线实体、动量改善和足够的实体强度。该状态只说明有反抽候选，不代表追多。</p>
+      </div>
+      {html_table(bottom_states, [("strategy_source", "来源"), ("direction", "方向"), ("bottom_state", "底部状态"), ("trades", "交易数"), ("net_points", "净点"), ("profit_factor", "PF"), ("win_rate", "胜率"), ("avg_points", "均值"), ("worst_trade_points", "最差单笔")])}
+    </section>
+    <section>
       <h2>成本/延迟/滑点压力</h2>
       {html_table(stress, [("stress_type", "类型"), ("parameter", "参数"), ("trades", "交易数"), ("net_points", "净点"), ("profit_factor", "PF"), ("win_rate", "胜率"), ("max_drawdown_points", "最大DD"), ("worst_month_points", "最差月"), ("worst_90d_points", "最差90日"), ("positive_90d_rate", "正90日率")])}
     </section>
@@ -1202,6 +1322,7 @@ def build_html_report(
         "loss_learning_selected_oos_delta_points": selected_loss_learning_delta(loss_learning),
         "reverse_trade_verdict": summary_reverse_trade_verdict(reverse_diagnostic),
         "reverse_selected_oos_delta_points": selected_reverse_trade_delta(reverse_diagnostic),
+        "bottom_state_rows": int(len(bottom_states)),
     }
     return html_doc, summary
 
@@ -1294,6 +1415,7 @@ def write_report(args: argparse.Namespace) -> dict[str, Any]:
     stress = stress_tables(composite_trades, bars)
     loss_learning = run_loss_learning_walk_forward(composite_trades, bars)
     reverse_diagnostic = run_reverse_trade_diagnostic(composite_trades, bars)
+    bottom_states = bottom_state_summary(composite_trades, bars)
     risk_mapping = risk_budget_mapping()
     paper_plan = paper_validation_plan()
     paper_interface = paper_interface_readiness_table()
@@ -1306,6 +1428,7 @@ def write_report(args: argparse.Namespace) -> dict[str, Any]:
         stress=stress,
         loss_learning=loss_learning,
         reverse_diagnostic=reverse_diagnostic,
+        bottom_states=bottom_states,
         bars=bars,
         readiness=readiness,
         risk_mapping=risk_mapping,

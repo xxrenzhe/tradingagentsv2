@@ -1,0 +1,639 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © TradingAgentsV2
+//
+// NQ Range Boundary Lightglow Strategy
+//
+// Converts the Lightglow paper-readiness research into an explicit range-boundary strategy:
+// - Executable orders come from range-boundary behavior, not from a time-cell direction generator.
+// - Default behavior: low reclaim = long, high rejection = short, bottom accepted breakdown = short, top accepted breakout = long.
+// - Stable 2020-2021 trained month x weekday action map is a filter by default; legacy native/reverse/skip is optional research mode.
+// - Signal confirms on the current bar; TradingView executes the strategy order on the next bar open.
+// - Default exit always arms the protective stop immediately; adaptive targets use signal type, range structure, and R constraints.
+// - Timecell is shown as shadow-only because the readiness report maps it to 0.05 NQ, which is not an integer futures contract.
+//
+// Apply on NQ/MNQ 1-minute charts. This is a manual validation script, not live-trading approval.
+
+//@version=5
+strategy("NQ Range Boundary Lightglow Strategy",
+     shorttitle="NQ Boundary LG",
+     overlay=true,
+     initial_capital=25000,
+     currency=currency.USD,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1,
+     commission_type=strategy.commission.cash_per_contract,
+     commission_value=5,
+     slippage=2,
+     process_orders_on_close=false,
+     calc_on_every_tick=false,
+     calc_on_order_fills=false,
+     pyramiding=0,
+     max_labels_count=500,
+     max_lines_count=500)
+
+// ============================================================================
+// Inputs
+// ============================================================================
+
+groupLightglow = "Lightglow Stable Action Map"
+swingLength = input.int(50, "Confirmed Swing Length", minval=10, maxval=200, group=groupLightglow)
+premiumRatio = input.float(0.95, "Premium Ratio", minval=0.50, maxval=1.00, step=0.01, group=groupLightglow)
+discountRatio = input.float(0.05, "Discount Ratio", minval=0.00, maxval=0.50, step=0.01, group=groupLightglow)
+timeCellMode = input.string("Off", "Time Cell Use", options=["Off", "Filter Only", "Native/Reverse Research"], group=groupLightglow)
+signalDedup = input.bool(true, "Deduplicate Repeated P/D Zone Signals", group=groupLightglow)
+tradePdFallback = input.bool(false, "Trade P/D Fallback Signals", group=groupLightglow)
+
+groupExecution = "Execution"
+useDateFilter = input.bool(true, "Use Date Filter", group=groupExecution)
+startTime = input.time(timestamp("2020-01-01 00:00"), "Start", group=groupExecution)
+endTime = input.time(timestamp("2026-12-31 23:59"), "End", group=groupExecution)
+exitMode = input.string("Structure Bracket", "Exit Mode", options=["Structure Bracket", "Fixed Time"], group=groupExecution)
+holdBars = input.int(2, "Fixed Time Exit Bars", minval=1, maxval=120, group=groupExecution)
+maxHoldBars = input.int(120, "Max Hold Bars", minval=2, maxval=500, group=groupExecution)
+stopAtrBuffer = input.float(0.35, "Structure Stop ATR Buffer", minval=0.00, maxval=3.00, step=0.05, group=groupExecution)
+minRiskAtr = input.float(0.80, "Minimum Risk ATR", minval=0.10, maxval=5.00, step=0.05, group=groupExecution)
+targetR = input.float(1.80, "Initial Target R", minval=0.25, maxval=8.00, step=0.05, group=groupExecution)
+targetMode = input.string("Signal Adaptive", "Target Mode", options=["Signal Adaptive", "Fixed R", "Structure Capped"], group=groupExecution)
+minTargetR = input.float(1.00, "Minimum Target R", minval=0.25, maxval=5.00, step=0.05, group=groupExecution)
+maxTargetR = input.float(3.00, "Maximum Adaptive Target R", minval=0.50, maxval=8.00, step=0.05, group=groupExecution)
+reversalTargetRangeRatio = input.float(0.50, "Reversal Target Range Ratio", minval=0.10, maxval=1.00, step=0.05, group=groupExecution)
+continuationTargetRangeMult = input.float(0.75, "Continuation Target Range Mult", minval=0.10, maxval=2.00, step=0.05, group=groupExecution)
+useBreakeven = input.bool(true, "Move Stop To Breakeven", group=groupExecution)
+breakevenTriggerR = input.float(1.50, "Breakeven Trigger R", minval=0.25, maxval=5.00, step=0.05, group=groupExecution)
+useAtrTrail = input.bool(true, "Use ATR Trailing After Target Progress", group=groupExecution)
+trailStartR = input.float(1.20, "Trail Start R", minval=0.25, maxval=5.00, step=0.05, group=groupExecution)
+trailAtrMult = input.float(2.00, "Trailing ATR Mult", minval=0.25, maxval=8.00, step=0.05, group=groupExecution)
+minHoldBarsBeforeTargetExit = input.int(2, "Minimum Hold Bars Before Target Exit", minval=0, maxval=20, group=groupExecution)
+useBottomStateFilter = input.bool(false, "Filter Longs During Accepted Range Breakdown", group=groupExecution)
+cooldownBars = input.int(5, "Cooldown Bars After Exit", minval=0, maxval=200, group=groupExecution)
+
+groupBottom = "Range Boundary Breakdown vs Reclaim"
+rangeLength = input.int(90, "Range Lookback", minval=20, maxval=300, group=groupBottom)
+acceptBars = input.int(3, "Acceptance Bars Below Range Low", minval=1, maxval=10, group=groupBottom)
+acceptAtrBuffer = input.float(0.15, "Acceptance ATR Buffer", minval=0.00, maxval=2.00, step=0.05, group=groupBottom)
+momentumLookback = input.int(30, "Momentum Lookback", minval=5, maxval=120, group=groupBottom)
+volumeLength = input.int(60, "Volume Z Length", minval=10, maxval=200, group=groupBottom)
+bodyAtrThreshold = input.float(0.60, "Displacement Body ATR", minval=0.10, maxval=3.00, step=0.05, group=groupBottom)
+
+groupTrendIgnition = "Trend Ignition"
+tradeBottomBreakdown = input.bool(false, "Trade Bottom Breakdown Continuation", group=groupTrendIgnition)
+tradeTopBreakout = input.bool(true, "Trade Top Breakout Continuation", group=groupTrendIgnition)
+tradeBottomReclaim = input.bool(false, "Trade Bottom Reclaim Bounce", group=groupTrendIgnition)
+tradeTopReject = input.bool(false, "Trade Top Reject Short", group=groupTrendIgnition)
+tradeTrendIgnition = input.bool(true, "Trade Compression Reclaim Ignition", group=groupTrendIgnition)
+tradeTrendContinuation = input.bool(false, "Trade Trend Pullback Continuation", group=groupTrendIgnition)
+tradeTrendTransition = input.bool(false, "Trade EMA Transition Trend Start", group=groupTrendIgnition)
+tradeReversalImpulse = input.bool(false, "Trade Liquidity Reversal Impulse", group=groupTrendIgnition)
+tradeTopBreakoutOnlyRth = input.bool(true, "Trade Top Breakout Only In US RTH", group=groupTrendIgnition)
+tradeReversalImpulseLateOnly = input.bool(true, "Trade Reversal Impulse Only In US Late", group=groupTrendIgnition)
+tradeTrendIgnitionEuropeOnly = input.bool(true, "Trade Trend Ignition Only In Europe", group=groupTrendIgnition)
+ignitionBreakoutLength = input.int(14, "Micro Breakout Lookback", minval=5, maxval=60, group=groupTrendIgnition)
+ignitionBaseLength = input.int(45, "Compression Base Lookback", minval=15, maxval=180, group=groupTrendIgnition)
+ignitionBaseAtrMax = input.float(4.00, "Maximum Base Width ATR", minval=0.50, maxval=12.00, step=0.25, group=groupTrendIgnition)
+ignitionRangePosLongMax = input.float(0.45, "Long Ignition Max Range Position", minval=0.05, maxval=0.80, step=0.05, group=groupTrendIgnition)
+ignitionRangePosShortMin = input.float(0.55, "Short Ignition Min Range Position", minval=0.20, maxval=0.95, step=0.05, group=groupTrendIgnition)
+ignitionBodyAtrMin = input.float(0.35, "Ignition Body ATR Min", minval=0.05, maxval=2.00, step=0.05, group=groupTrendIgnition)
+ignitionVolumeZMin = input.float(-0.50, "Ignition Volume Z Min", minval=-3.00, maxval=3.00, step=0.10, group=groupTrendIgnition)
+trendSlopeLookback = input.int(20, "Trend Slope Lookback", minval=5, maxval=120, group=groupTrendIgnition)
+pullbackLookback = input.int(12, "Pullback Lookback", minval=3, maxval=60, group=groupTrendIgnition)
+pullbackAtrMax = input.float(2.50, "Maximum Pullback Depth ATR", minval=0.25, maxval=8.00, step=0.25, group=groupTrendIgnition)
+pullbackEmaAtrBuffer = input.float(0.35, "EMA Pullback ATR Buffer", minval=0.00, maxval=2.00, step=0.05, group=groupTrendIgnition)
+continuationVolumeZMin = input.float(-0.75, "Continuation Volume Z Min", minval=-3.00, maxval=3.00, step=0.10, group=groupTrendIgnition)
+transitionLookback = input.int(20, "EMA Transition Lookback", minval=5, maxval=120, group=groupTrendIgnition)
+transitionBodyAtrMin = input.float(0.40, "Transition Body ATR Min", minval=0.05, maxval=2.00, step=0.05, group=groupTrendIgnition)
+transitionVolumeZMin = input.float(-0.50, "Transition Volume Z Min", minval=-3.00, maxval=3.00, step=0.10, group=groupTrendIgnition)
+reversalImpulseBodyAtrMin = input.float(0.80, "Reversal Impulse Body ATR Min", minval=0.10, maxval=3.00, step=0.05, group=groupTrendIgnition)
+reversalImpulseVolumeZMin = input.float(-0.25, "Reversal Impulse Volume Z Min", minval=-3.00, maxval=3.00, step=0.10, group=groupTrendIgnition)
+reversalImpulseCloseRatio = input.float(0.70, "Reversal Impulse Close Ratio", minval=0.50, maxval=0.95, step=0.05, group=groupTrendIgnition)
+
+groupTimecell = "Timecell Shadow"
+showTimecellShadow = input.bool(true, "Show Timecell Shadow Markers Only", group=groupTimecell)
+timecellStepMinutes = input.int(15, "Timecell Step Minutes", minval=5, maxval=60, step=5, group=groupTimecell)
+timecellHoldBars = input.int(90, "Timecell Shadow Hold Bars", minval=15, maxval=240, group=groupTimecell)
+
+groupDisplay = "Display"
+showZones = input.bool(true, "Show Lightglow Zones", group=groupDisplay)
+showBottomDiagnostics = input.bool(true, "Show Bottom State Diagnostics", group=groupDisplay)
+showTradeLines = input.bool(true, "Draw Entry-Exit Dashed Lines", group=groupDisplay)
+showPnlLabels = input.bool(true, "Show Trade PnL Labels", group=groupDisplay)
+pnlLabelHorizontalOffsetBars = input.int(3, "PnL Label Horizontal Offset Bars", minval=0, maxval=50, group=groupDisplay)
+pnlLabelVerticalAtrOffset = input.float(2.00, "PnL Label Vertical ATR Offset", minval=0.25, maxval=10.00, step=0.25, group=groupDisplay)
+showSignalMarkers = input.bool(true, "Show Entry/Exit Markers", group=groupDisplay)
+showStats = input.bool(true, "Show Summary Table", group=groupDisplay)
+maxVisualTrades = input.int(200, "Max Visual Trade Labels/Lines", minval=20, maxval=500, group=groupDisplay)
+
+// ============================================================================
+// Date, Calendar, And Stable Action Maps
+// ============================================================================
+
+dateFilterPassed = not useDateFilter or (time >= startTime and time <= endTime)
+
+tvToPythonDow(int tvDow) =>
+    // TradingView: Sunday=1 ... Saturday=7. Python pandas dayofweek: Monday=0 ... Sunday=6.
+    tvDow == dayofweek.monday ? 0 :
+     tvDow == dayofweek.tuesday ? 1 :
+     tvDow == dayofweek.wednesday ? 2 :
+     tvDow == dayofweek.thursday ? 3 :
+     tvDow == dayofweek.friday ? 4 :
+     tvDow == dayofweek.saturday ? 5 : 6
+
+pythonDow = tvToPythonDow(dayofweek)
+currentMonth = month(time)
+
+stableLightglowAction(int monthValue, int dowValue) =>
+    // 0=skip, 1=native, -1=reverse. Frozen from .tmp/nq-2020-lightglow-earlytrain-month-dow-action-search.json.
+    int action = 0
+    if monthValue == 1 and dowValue == 4
+        action := -1
+    else if monthValue == 1 and dowValue == 6
+        action := -1
+    else if monthValue == 2 and dowValue == 6
+        action := 1
+    else if monthValue == 3 and dowValue == 3
+        action := -1
+    else if monthValue == 3 and dowValue == 6
+        action := -1
+    else if monthValue == 4 and dowValue == 2
+        action := 1
+    else if monthValue == 5 and dowValue == 1
+        action := 1
+    else if monthValue == 5 and dowValue == 6
+        action := -1
+    else if monthValue == 8 and dowValue == 3
+        action := -1
+    else if monthValue == 8 and dowValue == 6
+        action := -1
+    else if monthValue == 9 and dowValue == 0
+        action := -1
+    else if monthValue == 9 and dowValue == 4
+        action := -1
+    else if monthValue == 9 and dowValue == 6
+        action := -1
+    else if monthValue == 11 and dowValue == 2
+        action := -1
+    else if monthValue == 11 and dowValue == 6
+        action := 1
+    else if monthValue == 12 and dowValue == 0
+        action := -1
+    else if monthValue == 12 and dowValue == 4
+        action := -1
+    else if monthValue == 12 and dowValue == 6
+        action := 1
+    action
+
+timecellShadowDirection(int monthValue, int hourValue) =>
+    // Shadow-only rollstable_trainpf105_timecell month/hour map. It is visual context, not an executable order source.
+    int direction = 0
+    if monthValue == 1 and hourValue == 7
+        direction := -1
+    else if monthValue == 1 and hourValue == 10
+        direction := -1
+    else if monthValue == 1 and (hourValue == 11 or hourValue == 12 or hourValue == 16 or hourValue == 17)
+        direction := 1
+    else if monthValue == 10 and (hourValue == 10 or hourValue == 11 or hourValue == 15 or hourValue == 17 or hourValue == 18)
+        direction := 1
+    else if monthValue == 10 and (hourValue == 7 or hourValue == 12 or hourValue == 14)
+        direction := -1
+    else if monthValue == 11 and (hourValue == 7 or hourValue == 9 or hourValue == 10 or hourValue == 11 or hourValue == 12 or hourValue == 13 or hourValue == 14 or hourValue == 15 or hourValue == 16 or hourValue == 17 or hourValue == 18 or hourValue == 19)
+        direction := 1
+    else if monthValue == 12 and (hourValue == 7 or hourValue == 10 or hourValue == 11 or hourValue == 12 or hourValue == 13 or hourValue == 14 or hourValue == 15 or hourValue == 18 or hourValue == 19)
+        direction := -1
+    else if monthValue == 2 and (hourValue == 7 or hourValue == 10 or hourValue == 11 or hourValue == 14 or hourValue == 15 or hourValue == 16 or hourValue == 17 or hourValue == 18 or hourValue == 19)
+        direction := -1
+    else if monthValue == 3 and (hourValue == 7 or hourValue == 8 or hourValue == 9 or hourValue == 10 or hourValue == 11 or hourValue == 12 or hourValue == 13 or hourValue == 14 or hourValue == 15 or hourValue == 16 or hourValue == 17 or hourValue == 18 or hourValue == 19)
+        direction := 1
+    else if monthValue == 4 and (hourValue == 8 or hourValue == 9 or hourValue == 10 or hourValue == 11 or hourValue == 12 or hourValue == 13 or hourValue == 14 or hourValue == 15 or hourValue == 16 or hourValue == 17 or hourValue == 18 or hourValue == 19)
+        direction := 1
+    else if monthValue == 5 and (hourValue == 7 or hourValue == 8 or hourValue == 9 or hourValue == 10 or hourValue == 11 or hourValue == 12 or hourValue == 13 or hourValue == 14 or hourValue == 15 or hourValue == 16 or hourValue == 17 or hourValue == 18 or hourValue == 19)
+        direction := 1
+    else if monthValue == 6 and (hourValue == 8 or hourValue == 9 or hourValue == 10 or hourValue == 11 or hourValue == 12 or hourValue == 13 or hourValue == 14 or hourValue == 15 or hourValue == 16 or hourValue == 17 or hourValue == 18 or hourValue == 19)
+        direction := 1
+    else if monthValue == 7 and (hourValue == 7 or hourValue == 8 or hourValue == 9 or hourValue == 10 or hourValue == 11 or hourValue == 12 or hourValue == 13 or hourValue == 14 or hourValue == 15 or hourValue == 16 or hourValue == 17 or hourValue == 18 or hourValue == 19)
+        direction := 1
+    else if monthValue == 8 and (hourValue == 7 or hourValue == 8 or hourValue == 9 or hourValue == 10 or hourValue == 11 or hourValue == 12 or hourValue == 13 or hourValue == 14 or hourValue == 15 or hourValue == 16 or hourValue == 17 or hourValue == 18 or hourValue == 19)
+        direction := 1
+    else if monthValue == 9 and (hourValue == 7 or hourValue == 8 or hourValue == 9 or hourValue == 10 or hourValue == 11 or hourValue == 12 or hourValue == 13 or hourValue == 14 or hourValue == 15 or hourValue == 16 or hourValue == 17 or hourValue == 18 or hourValue == 19)
+        direction := 1
+    direction
+
+stableAction = timeCellMode == "Off" ? 1 : stableLightglowAction(currentMonth, pythonDow)
+stableActionText = stableAction == 1 ? "allow/native" : stableAction == -1 ? "allow/research-reverse" : "block"
+timeCellAllowsTrade = timeCellMode == "Off" or stableAction != 0
+utcHour = hour(time, "UTC")
+utcMinute = minute(time, "UTC")
+utcMinuteOfDay = utcHour * 60 + utcMinute
+isAsiaSession = utcMinuteOfDay < 420 or utcMinuteOfDay >= 1380
+isEuropeSession = utcMinuteOfDay >= 420 and utcMinuteOfDay < 810
+isUsRthSession = utcMinuteOfDay >= 810 and utcMinuteOfDay < 1200
+isUsLateSession = utcMinuteOfDay >= 1200 and utcMinuteOfDay < 1380
+
+// ============================================================================
+// Lightglow Premium / Discount Signal Approximation
+// ============================================================================
+
+confirmedSwingHigh = ta.pivothigh(high, swingLength, swingLength)
+confirmedSwingLow = ta.pivotlow(low, swingLength, swingLength)
+
+var float swingTop = na
+var float swingBottom = na
+if not na(confirmedSwingHigh)
+    swingTop := confirmedSwingHigh
+if not na(confirmedSwingLow)
+    swingBottom := confirmedSwingLow
+
+swingRange = swingTop - swingBottom
+premiumFloor = swingBottom + swingRange * premiumRatio
+discountCeiling = swingBottom + swingRange * discountRatio
+equilibrium = (swingTop + swingBottom) * 0.5
+hasValidSwingRange = not na(swingTop) and not na(swingBottom) and swingTop > swingBottom
+
+rawPremiumZone = hasValidSwingRange and close >= premiumFloor
+rawDiscountZone = hasValidSwingRange and close <= discountCeiling
+premiumSignal = signalDedup ? rawPremiumZone and not rawPremiumZone[1] : rawPremiumZone
+discountSignal = signalDedup ? rawDiscountZone and not rawDiscountZone[1] : rawDiscountZone
+
+nativeDirection = discountSignal ? 1 : premiumSignal ? -1 : 0
+
+// ============================================================================
+// Range Boundary Breakdown / Breakout vs Reclaim Diagnostics
+// ============================================================================
+
+atr = ta.atr(14)
+ema20 = ta.ema(close, 20)
+ema60 = ta.ema(close, 60)
+ema200 = ta.ema(close, 200)
+rangeHigh = ta.highest(high, rangeLength)[1]
+rangeLow = ta.lowest(low, rangeLength)[1]
+rangeWidth = rangeHigh - rangeLow
+rangePos = rangeWidth > 0 ? (close - rangeLow) / rangeWidth : na
+volumeMean = ta.sma(volume, volumeLength)
+volumeStd = ta.stdev(volume, volumeLength)
+volumeZ = volumeStd > 0 ? (volume - volumeMean) / volumeStd : 0.0
+momentum = close - close[momentumLookback]
+bodyPoints = math.abs(close - open)
+bodyAtr = atr > 0 ? bodyPoints / atr : 0.0
+
+belowRangeLow = not na(rangeLow) and close < rangeLow - atr * acceptAtrBuffer
+acceptedBelowRange = math.sum(belowRangeLow ? 1 : 0, acceptBars) >= acceptBars
+sweepBelowRange = not na(rangeLow) and low < rangeLow and close > rangeLow
+aboveRangeHigh = not na(rangeHigh) and close > rangeHigh + atr * acceptAtrBuffer
+acceptedAboveRange = math.sum(aboveRangeHigh ? 1 : 0, acceptBars) >= acceptBars
+sweepAboveRange = not na(rangeHigh) and high > rangeHigh and close < rangeHigh
+
+discountReclaimBounceCandidate = sweepBelowRange and close > open and close > rangeLow and momentum > momentum[1] and bodyAtr >= bodyAtrThreshold * 0.5
+breakdownContinuationCandidate = acceptedBelowRange and close < open and ema20 < ema60 and ema60 <= ema200 and momentum < 0 and volumeZ >= 0 and bodyAtr >= bodyAtrThreshold
+premiumRejectShortCandidate = sweepAboveRange and close < open and close < rangeHigh and momentum < momentum[1] and bodyAtr >= bodyAtrThreshold * 0.5
+breakoutContinuationCandidate = acceptedAboveRange and close > open and ema20 > ema60 and ema60 >= ema200 and momentum > 0 and volumeZ >= 0 and bodyAtr >= bodyAtrThreshold
+weakBottomNoTrade = not na(rangeLow) and rangePos <= 0.15 and not discountReclaimBounceCandidate and not breakdownContinuationCandidate
+weakTopNoTrade = not na(rangeHigh) and rangePos >= 0.85 and not premiumRejectShortCandidate and not breakoutContinuationCandidate
+
+microBreakoutHigh = ta.highest(high, ignitionBreakoutLength)[1]
+microBreakdownLow = ta.lowest(low, ignitionBreakoutLength)[1]
+compressionHigh = ta.highest(high, ignitionBaseLength)[1]
+compressionLow = ta.lowest(low, ignitionBaseLength)[1]
+compressionWidthAtr = atr > 0 ? (compressionHigh - compressionLow) / atr : na
+compressedBase = not na(compressionWidthAtr) and compressionWidthAtr <= ignitionBaseAtrMax
+emaReclaimLong = close > ema20 and close > ema60 and close[1] <= ema20[1] and ema20 >= ema20[1]
+emaRejectShort = close < ema20 and close < ema60 and close[1] >= ema20[1] and ema20 <= ema20[1]
+trendIgnitionLongCandidate = tradeTrendIgnition and compressedBase and rangePos <= ignitionRangePosLongMax and close > microBreakoutHigh and emaReclaimLong and momentum > 0 and volumeZ >= ignitionVolumeZMin and bodyAtr >= ignitionBodyAtrMin
+trendIgnitionShortCandidate = tradeTrendIgnition and compressedBase and rangePos >= ignitionRangePosShortMin and close < microBreakdownLow and emaRejectShort and momentum < 0 and volumeZ >= ignitionVolumeZMin and bodyAtr >= ignitionBodyAtrMin
+trendUpEstablished = ema20 > ema60 and ema60 > ema200 and ema20 > ema20[trendSlopeLookback] and close > ema60
+trendDownEstablished = ema20 < ema60 and ema60 < ema200 and ema20 < ema20[trendSlopeLookback] and close < ema60
+pullbackDepthLongAtr = atr > 0 ? (ta.highest(high, pullbackLookback)[1] - low) / atr : na
+pullbackDepthShortAtr = atr > 0 ? (high - ta.lowest(low, pullbackLookback)[1]) / atr : na
+longPullbackHeld = low <= ema20 + atr * pullbackEmaAtrBuffer and close > ema20 and close > open and low > ema60 - atr * pullbackEmaAtrBuffer
+shortPullbackHeld = high >= ema20 - atr * pullbackEmaAtrBuffer and close < ema20 and close < open and high < ema60 + atr * pullbackEmaAtrBuffer
+trendContinuationLongCandidate = tradeTrendContinuation and trendUpEstablished and longPullbackHeld and close > microBreakoutHigh and momentum > 0 and volumeZ >= continuationVolumeZMin and not na(pullbackDepthLongAtr) and pullbackDepthLongAtr <= pullbackAtrMax
+trendContinuationShortCandidate = tradeTrendContinuation and trendDownEstablished and shortPullbackHeld and close < microBreakdownLow and momentum < 0 and volumeZ >= continuationVolumeZMin and not na(pullbackDepthShortAtr) and pullbackDepthShortAtr <= pullbackAtrMax
+emaBearTransition = close < ema20 and close < ema60 and ema20 < ema20[1] and close < ta.lowest(low, transitionLookback)[1]
+emaBullTransition = close > ema20 and close > ema60 and ema20 > ema20[1] and close > ta.highest(high, transitionLookback)[1]
+trendTransitionShortCandidate = tradeTrendTransition and emaBearTransition and momentum < 0 and volumeZ >= transitionVolumeZMin and bodyAtr >= transitionBodyAtrMin
+trendTransitionLongCandidate = tradeTrendTransition and emaBullTransition and momentum > 0 and volumeZ >= transitionVolumeZMin and bodyAtr >= transitionBodyAtrMin
+barRange = high - low
+closeLocation = barRange > 0 ? (close - low) / barRange : 0.5
+bullishReversalImpulseCandidate = tradeReversalImpulse and rangePos <= ignitionRangePosLongMax and close > open and close > ema20 and close > microBreakoutHigh and momentum > 0 and volumeZ >= reversalImpulseVolumeZMin and bodyAtr >= reversalImpulseBodyAtrMin and closeLocation >= reversalImpulseCloseRatio
+bearishReversalImpulseCandidate = tradeReversalImpulse and rangePos >= ignitionRangePosShortMin and close < open and close < ema20 and close < microBreakdownLow and momentum < 0 and volumeZ >= reversalImpulseVolumeZMin and bodyAtr >= reversalImpulseBodyAtrMin and closeLocation <= 1.0 - reversalImpulseCloseRatio
+
+bottomBreakdownSignal = tradeBottomBreakdown and breakdownContinuationCandidate and not breakdownContinuationCandidate[1]
+topBreakoutSignal = tradeTopBreakout and breakoutContinuationCandidate and not breakoutContinuationCandidate[1]
+bottomReclaimSignal = tradeBottomReclaim and discountReclaimBounceCandidate and not discountReclaimBounceCandidate[1]
+topRejectSignal = tradeTopReject and premiumRejectShortCandidate and not premiumRejectShortCandidate[1]
+trendIgnitionLongSignal = tradeTrendIgnition and (not tradeTrendIgnitionEuropeOnly or isEuropeSession) and trendIgnitionLongCandidate and not trendIgnitionLongCandidate[1]
+trendIgnitionShortSignal = false
+trendContinuationLongSignal = tradeTrendContinuation and trendContinuationLongCandidate and not trendContinuationLongCandidate[1]
+trendContinuationShortSignal = tradeTrendContinuation and trendContinuationShortCandidate and not trendContinuationShortCandidate[1]
+trendTransitionLongSignal = tradeTrendTransition and trendTransitionLongCandidate and not trendTransitionLongCandidate[1]
+trendTransitionShortSignal = tradeTrendTransition and trendTransitionShortCandidate and not trendTransitionShortCandidate[1]
+reversalImpulseLongSignal = tradeReversalImpulse and (not tradeReversalImpulseLateOnly or isUsLateSession) and bullishReversalImpulseCandidate and not bullishReversalImpulseCandidate[1]
+reversalImpulseShortSignal = tradeReversalImpulse and (not tradeReversalImpulseLateOnly or isUsLateSession) and bearishReversalImpulseCandidate and not bearishReversalImpulseCandidate[1]
+boundaryEvent = bottomBreakdownSignal or topBreakoutSignal or bottomReclaimSignal or topRejectSignal or trendIgnitionLongSignal or trendIgnitionShortSignal or trendContinuationLongSignal or trendContinuationShortSignal or trendTransitionLongSignal or trendTransitionShortSignal or reversalImpulseLongSignal or reversalImpulseShortSignal
+pdFallbackSignal = tradePdFallback and nativeDirection != 0
+boundaryDirection = bottomBreakdownSignal ? -1 : topBreakoutSignal ? 1 : bottomReclaimSignal ? 1 : topRejectSignal ? -1 : trendIgnitionLongSignal ? 1 : trendIgnitionShortSignal ? -1 : trendContinuationLongSignal ? 1 : trendContinuationShortSignal ? -1 : trendTransitionLongSignal ? 1 : trendTransitionShortSignal ? -1 : reversalImpulseLongSignal ? 1 : reversalImpulseShortSignal ? -1 : pdFallbackSignal ? nativeDirection : 0
+mappedDirection = timeCellMode == "Native/Reverse Research" ? boundaryDirection * stableAction : boundaryDirection
+lightglowSignal = (boundaryEvent or pdFallbackSignal) and mappedDirection != 0 and timeCellAllowsTrade and dateFilterPassed
+
+bottomFilterBlocksLong = useBottomStateFilter and mappedDirection > 0 and breakdownContinuationCandidate
+
+// ============================================================================
+// Timecell Shadow Diagnostic
+// ============================================================================
+
+minuteInHour = minute(time)
+ldnNySession = hour(time) >= 7 and hour(time) < 20
+timecellShadowDirectionValue = timecellShadowDirection(currentMonth, hour(time))
+timecellShadowSignal = showTimecellShadow and ldnNySession and minuteInHour % timecellStepMinutes == 0 and timecellShadowDirectionValue != 0
+
+// ============================================================================
+// Orders And Trade State
+// ============================================================================
+
+var int lastClosedCount = 0
+var int lastExitBar = na
+var string pendingSignalType = ""
+var float pendingSignalHigh = na
+var float pendingSignalLow = na
+var float pendingRangeHigh = na
+var float pendingRangeLow = na
+var float pendingAtr = na
+var string activeSignalType = ""
+var float activeSignalHigh = na
+var float activeSignalLow = na
+var float activeRangeHigh = na
+var float activeRangeLow = na
+var float activeAtr = na
+var float activeInitialStop = na
+var float activeTarget = na
+var string activeTargetPlan = ""
+var string lastTradeTargetPlan = ""
+var float activeRiskPoints = na
+var float activeBestPrice = na
+var array<line> tradeLines = array.new<line>()
+var array<label> pnlLabels = array.new<label>()
+
+isFlat = strategy.position_size == 0
+cooldownPassed = na(lastExitBar) or bar_index - lastExitBar >= cooldownBars
+entryAllowed = lightglowSignal and isFlat and cooldownPassed and not bottomFilterBlocksLong
+longCondition = entryAllowed and mappedDirection > 0 and (not topBreakoutSignal or tradeTopBreakoutOnlyRth or isUsRthSession)
+shortCondition = entryAllowed and mappedDirection < 0
+signalType = bottomBreakdownSignal ? "bottom_breakdown_short" : topBreakoutSignal ? "top_breakout_long" : bottomReclaimSignal ? "bottom_reclaim_long" : topRejectSignal ? "top_reject_short" : trendIgnitionLongSignal ? "trend_ignition_long" : trendIgnitionShortSignal ? "trend_ignition_short" : trendContinuationLongSignal ? "trend_pullback_long" : trendContinuationShortSignal ? "trend_pullback_short" : trendTransitionLongSignal ? "trend_transition_long" : trendTransitionShortSignal ? "trend_transition_short" : reversalImpulseLongSignal ? "reversal_impulse_long" : reversalImpulseShortSignal ? "reversal_impulse_short" : mappedDirection > 0 ? "pd_discount_long" : mappedDirection < 0 ? "pd_premium_short" : "none"
+
+if longCondition
+    pendingSignalType := signalType
+    pendingSignalHigh := high
+    pendingSignalLow := low
+    pendingRangeHigh := rangeHigh
+    pendingRangeLow := rangeLow
+    pendingAtr := atr
+    strategy.entry("LG Stable Long", strategy.long)
+
+if shortCondition
+    pendingSignalType := signalType
+    pendingSignalHigh := high
+    pendingSignalLow := low
+    pendingRangeHigh := rangeHigh
+    pendingRangeLow := rangeLow
+    pendingAtr := atr
+    strategy.entry("LG Stable Short", strategy.short)
+
+barsHeldFromEntry = strategy.opentrades > 0 ? bar_index - strategy.opentrades.entry_bar_index(0) : 0
+newLongPosition = strategy.position_size > 0 and strategy.position_size[1] <= 0
+newShortPosition = strategy.position_size < 0 and strategy.position_size[1] >= 0
+flatPosition = strategy.position_size == 0
+
+if newLongPosition or newShortPosition
+    activeSignalType := pendingSignalType
+    activeSignalHigh := pendingSignalHigh
+    activeSignalLow := pendingSignalLow
+    activeRangeHigh := pendingRangeHigh
+    activeRangeLow := pendingRangeLow
+    activeAtr := na(pendingAtr) ? atr : pendingAtr
+    activeBestPrice := newLongPosition ? high : low
+    structureStop = newLongPosition ?
+         (activeSignalType == "top_breakout_long" and not na(activeRangeHigh) ? activeRangeHigh - activeAtr * stopAtrBuffer : activeSignalLow - activeAtr * stopAtrBuffer) :
+         (activeSignalType == "bottom_breakdown_short" and not na(activeRangeLow) ? activeRangeLow + activeAtr * stopAtrBuffer : activeSignalHigh + activeAtr * stopAtrBuffer)
+    fallbackStop = newLongPosition ? strategy.position_avg_price - activeAtr : strategy.position_avg_price + activeAtr
+    activeInitialStop := na(structureStop) ? fallbackStop : structureStop
+    rawRisk = math.abs(strategy.position_avg_price - activeInitialStop)
+    activeRiskPoints := math.max(rawRisk, math.max(activeAtr * minRiskAtr, syminfo.mintick))
+    activeInitialStop := newLongPosition ? strategy.position_avg_price - activeRiskPoints : strategy.position_avg_price + activeRiskPoints
+    fixedRTarget = newLongPosition ? strategy.position_avg_price + activeRiskPoints * targetR : strategy.position_avg_price - activeRiskPoints * targetR
+    minRTarget = newLongPosition ? strategy.position_avg_price + activeRiskPoints * minTargetR : strategy.position_avg_price - activeRiskPoints * minTargetR
+    maxRTarget = newLongPosition ? strategy.position_avg_price + activeRiskPoints * maxTargetR : strategy.position_avg_price - activeRiskPoints * maxTargetR
+    activeRangeWidth = activeRangeHigh - activeRangeLow
+    hasActiveRange = not na(activeRangeHigh) and not na(activeRangeLow) and activeRangeWidth > syminfo.mintick
+    float structureTargetCandidate = na
+    if hasActiveRange
+        if activeSignalType == "bottom_reclaim_long"
+            structureTargetCandidate := activeRangeLow + activeRangeWidth * reversalTargetRangeRatio
+        else if activeSignalType == "top_reject_short"
+            structureTargetCandidate := activeRangeHigh - activeRangeWidth * reversalTargetRangeRatio
+        else if activeSignalType == "top_breakout_long"
+            structureTargetCandidate := activeRangeHigh + activeRangeWidth * continuationTargetRangeMult
+        else if activeSignalType == "bottom_breakdown_short"
+            structureTargetCandidate := activeRangeLow - activeRangeWidth * continuationTargetRangeMult
+        else if activeSignalType == "trend_ignition_long"
+            structureTargetCandidate := activeRangeHigh
+        else if activeSignalType == "trend_ignition_short"
+            structureTargetCandidate := activeRangeLow
+        else if activeSignalType == "trend_pullback_long"
+            structureTargetCandidate := activeRangeHigh + activeRangeWidth * continuationTargetRangeMult
+        else if activeSignalType == "trend_pullback_short"
+            structureTargetCandidate := activeRangeLow - activeRangeWidth * continuationTargetRangeMult
+        else if activeSignalType == "trend_transition_long" or activeSignalType == "reversal_impulse_long"
+            structureTargetCandidate := activeRangeHigh
+        else if activeSignalType == "trend_transition_short" or activeSignalType == "reversal_impulse_short"
+            structureTargetCandidate := activeRangeLow
+    structureTargetDistance = newLongPosition ? structureTargetCandidate - strategy.position_avg_price : strategy.position_avg_price - structureTargetCandidate
+    structureTargetValid = not na(structureTargetCandidate) and structureTargetDistance >= activeRiskPoints * minTargetR
+    cappedStructureTarget = newLongPosition ? math.min(structureTargetCandidate, maxRTarget) : math.max(structureTargetCandidate, maxRTarget)
+    structureCappedFixedTarget = newLongPosition ? math.min(fixedRTarget, cappedStructureTarget) : math.max(fixedRTarget, cappedStructureTarget)
+    activeTarget := targetMode == "Fixed R" or not structureTargetValid ? fixedRTarget : targetMode == "Structure Capped" ? structureCappedFixedTarget : cappedStructureTarget
+    activeTargetPlan := targetMode == "Fixed R" or not structureTargetValid ? "fixed_r" : activeSignalType == "bottom_reclaim_long" or activeSignalType == "top_reject_short" ? "reversal_midrange" : activeSignalType == "trend_ignition_long" or activeSignalType == "trend_ignition_short" or activeSignalType == "trend_transition_long" or activeSignalType == "trend_transition_short" or activeSignalType == "reversal_impulse_long" or activeSignalType == "reversal_impulse_short" ? "trend_range_target" : activeSignalType == "trend_pullback_long" or activeSignalType == "trend_pullback_short" ? "trend_pullback_extension" : "continuation_extension"
+    lastTradeTargetPlan := activeTargetPlan
+
+if strategy.position_size > 0
+    activeBestPrice := na(activeBestPrice) ? high : math.max(activeBestPrice, high)
+else if strategy.position_size < 0
+    activeBestPrice := na(activeBestPrice) ? low : math.min(activeBestPrice, low)
+else if flatPosition
+    activeSignalType := ""
+    activeSignalHigh := na
+    activeSignalLow := na
+    activeRangeHigh := na
+    activeRangeLow := na
+    activeAtr := na
+    activeInitialStop := na
+    activeTarget := na
+    activeTargetPlan := ""
+    activeRiskPoints := na
+    activeBestPrice := na
+
+longProgressR = strategy.position_size > 0 and not na(activeRiskPoints) ? (activeBestPrice - strategy.position_avg_price) / activeRiskPoints : 0.0
+shortProgressR = strategy.position_size < 0 and not na(activeRiskPoints) ? (strategy.position_avg_price - activeBestPrice) / activeRiskPoints : 0.0
+longBreakevenStop = useBreakeven and longProgressR >= breakevenTriggerR ? strategy.position_avg_price : activeInitialStop
+shortBreakevenStop = useBreakeven and shortProgressR >= breakevenTriggerR ? strategy.position_avg_price : activeInitialStop
+longTrailStop = useAtrTrail and longProgressR >= trailStartR ? activeBestPrice - atr * trailAtrMult : activeInitialStop
+shortTrailStop = useAtrTrail and shortProgressR >= trailStartR ? activeBestPrice + atr * trailAtrMult : activeInitialStop
+longProtectiveStop = math.max(activeInitialStop, math.max(longBreakevenStop, longTrailStop))
+shortProtectiveStop = math.min(activeInitialStop, math.min(shortBreakevenStop, shortTrailStop))
+
+targetExitArmed = barsHeldFromEntry >= minHoldBarsBeforeTargetExit
+longTargetForExit = targetExitArmed ? activeTarget : na
+shortTargetForExit = targetExitArmed ? activeTarget : na
+if exitMode == "Structure Bracket" and strategy.position_size > 0 and not na(longProtectiveStop)
+    strategy.exit("LG Long Bracket", from_entry="LG Stable Long", stop=longProtectiveStop, limit=longTargetForExit)
+
+if exitMode == "Structure Bracket" and strategy.position_size < 0 and not na(shortProtectiveStop)
+    strategy.exit("LG Short Bracket", from_entry="LG Stable Short", stop=shortProtectiveStop, limit=shortTargetForExit)
+
+timeExitCondition = strategy.opentrades > 0 and exitMode == "Fixed Time" and barsHeldFromEntry >= holdBars
+maxHoldExitCondition = strategy.opentrades > 0 and exitMode == "Structure Bracket" and barsHeldFromEntry >= maxHoldBars
+manualExitCondition = timeExitCondition or maxHoldExitCondition
+if manualExitCondition
+    strategy.close_all(timeExitCondition ? "LG Fixed Time Exit" : "LG Max Hold Exit")
+
+// ============================================================================
+// Entry / Exit Visuals
+// ============================================================================
+
+plotshape(showSignalMarkers and longCondition, "Lightglow Stable Long", shape.triangleup, location.belowbar, color.new(color.lime, 0), size=size.small, text="LG L")
+plotshape(showSignalMarkers and shortCondition, "Lightglow Stable Short", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.small, text="LG S")
+plotshape(showSignalMarkers and manualExitCondition, "Lightglow Manual Exit", shape.xcross, location.abovebar, color.new(color.yellow, 0), size=size.tiny, text="X")
+plotshape(showSignalMarkers and bottomFilterBlocksLong, "Blocked Long: Accepted Breakdown", shape.square, location.belowbar, color.new(color.orange, 0), size=size.tiny, text="BLK")
+
+plotshape(showTimecellShadow and timecellShadowSignal and timecellShadowDirectionValue > 0, "Timecell Shadow Long", shape.circle, location.belowbar, color.new(color.aqua, 20), size=size.tiny, text="TC")
+plotshape(showTimecellShadow and timecellShadowSignal and timecellShadowDirectionValue < 0, "Timecell Shadow Short", shape.circle, location.abovebar, color.new(color.fuchsia, 20), size=size.tiny, text="TC")
+
+plotshape(showBottomDiagnostics and bottomBreakdownSignal, "Range Bottom Breakdown Continuation", shape.diamond, location.abovebar, color.new(color.red, 0), size=size.tiny, text="BD")
+plotshape(showBottomDiagnostics and bottomReclaimSignal, "Range Bottom Sweep Reclaim Bounce", shape.diamond, location.belowbar, color.new(color.lime, 0), size=size.tiny, text="RC")
+plotshape(showBottomDiagnostics and topBreakoutSignal, "Range Top Breakout Continuation", shape.diamond, location.belowbar, color.new(color.lime, 0), size=size.tiny, text="BO")
+plotshape(showBottomDiagnostics and topRejectSignal, "Range Top Sweep Reject Short", shape.diamond, location.abovebar, color.new(color.red, 0), size=size.tiny, text="RJ")
+plotshape(showBottomDiagnostics and trendIgnitionLongSignal, "Compression Reclaim Trend Ignition Long", shape.arrowup, location.belowbar, color.new(color.teal, 0), size=size.tiny, text="TI")
+plotshape(showBottomDiagnostics and trendIgnitionShortSignal, "Compression Reject Trend Ignition Short", shape.arrowdown, location.abovebar, color.new(color.maroon, 0), size=size.tiny, text="TI")
+plotshape(showBottomDiagnostics and trendContinuationLongSignal, "Trend Pullback Continuation Long", shape.arrowup, location.belowbar, color.new(color.green, 0), size=size.tiny, text="PB")
+plotshape(showBottomDiagnostics and trendContinuationShortSignal, "Trend Pullback Continuation Short", shape.arrowdown, location.abovebar, color.new(color.red, 0), size=size.tiny, text="PB")
+plotshape(showBottomDiagnostics and trendTransitionLongSignal, "EMA Transition Trend Start Long", shape.arrowup, location.belowbar, color.new(color.aqua, 0), size=size.tiny, text="TS")
+plotshape(showBottomDiagnostics and trendTransitionShortSignal, "EMA Transition Trend Start Short", shape.arrowdown, location.abovebar, color.new(color.orange, 0), size=size.tiny, text="TS")
+plotshape(showBottomDiagnostics and reversalImpulseLongSignal, "Liquidity Reversal Impulse Long", shape.arrowup, location.belowbar, color.new(color.lime, 0), size=size.tiny, text="RI")
+plotshape(showBottomDiagnostics and reversalImpulseShortSignal, "Liquidity Reversal Impulse Short", shape.arrowdown, location.abovebar, color.new(color.red, 0), size=size.tiny, text="RI")
+plotshape(showBottomDiagnostics and weakBottomNoTrade, "Weak Bottom No-Trade", shape.square, location.bottom, color.new(color.gray, 35), size=size.tiny, text="?")
+plotshape(showBottomDiagnostics and weakTopNoTrade, "Weak Top No-Trade", shape.square, location.top, color.new(color.gray, 35), size=size.tiny, text="?")
+
+if strategy.closedtrades > lastClosedCount
+    tradeIndex = strategy.closedtrades - 1
+    exitBar = strategy.closedtrades.exit_bar_index(tradeIndex)
+    closedEntryBar = strategy.closedtrades.entry_bar_index(tradeIndex)
+    closedEntryPrice = strategy.closedtrades.entry_price(tradeIndex)
+    closedExitPrice = strategy.closedtrades.exit_price(tradeIndex)
+    tradeSize = strategy.closedtrades.size(tradeIndex)
+    direction = tradeSize > 0 ? 1 : -1
+    pointsPnl = (closedExitPrice - closedEntryPrice) * direction
+    cashPnl = strategy.closedtrades.profit(tradeIndex)
+    isWin = cashPnl >= 0
+    tradeColor = isWin ? color.new(color.lime, 0) : color.new(color.red, 0)
+    labelStyle = isWin ? label.style_label_left : label.style_label_left
+    labelX = exitBar + pnlLabelHorizontalOffsetBars
+    labelY = isWin ? high + atr * pnlLabelVerticalAtrOffset : low - atr * pnlLabelVerticalAtrOffset
+    labelText = "#" + str.tostring(strategy.closedtrades) + "\n" + str.tostring(pointsPnl, "#.##") + " pts\n$" + str.tostring(cashPnl, "#.##") + "\n" + stableActionText + "\n" + lastTradeTargetPlan
+
+    if showTradeLines
+        newLine = line.new(closedEntryBar, closedEntryPrice, exitBar, closedExitPrice, xloc=xloc.bar_index, extend=extend.none, color=tradeColor, style=line.style_dashed, width=2)
+        array.push(tradeLines, newLine)
+        if array.size(tradeLines) > maxVisualTrades
+            line.delete(array.shift(tradeLines))
+
+    if showPnlLabels
+        newLabel = label.new(labelX, labelY, labelText, xloc=xloc.bar_index, color=color.new(color.black, 15), textcolor=tradeColor, style=labelStyle, size=size.tiny)
+        array.push(pnlLabels, newLabel)
+        if array.size(pnlLabels) > maxVisualTrades
+            label.delete(array.shift(pnlLabels))
+
+    lastExitBar := exitBar
+    lastClosedCount := strategy.closedtrades
+
+// ============================================================================
+// Zone And State Plots
+// ============================================================================
+
+plot(showZones ? premiumFloor : na, "Lightglow Premium Floor", color=color.new(color.red, 25), linewidth=1)
+plot(showZones ? discountCeiling : na, "Lightglow Discount Ceiling", color=color.new(color.green, 25), linewidth=1)
+plot(showZones ? equilibrium : na, "Lightglow Equilibrium", color=color.new(color.gray, 60), linewidth=1)
+plot(showBottomDiagnostics ? rangeLow : na, "Diagnostic Range Low", color=color.new(color.orange, 30), linewidth=1, style=plot.style_linebr)
+plot(showBottomDiagnostics ? rangeHigh : na, "Diagnostic Range High", color=color.new(color.blue, 70), linewidth=1, style=plot.style_linebr)
+plot(ema20, "EMA20", color=color.new(color.aqua, 15), linewidth=1)
+plot(ema60, "EMA60", color=color.new(color.orange, 15), linewidth=1)
+plot(ema200, "EMA200", color=color.new(color.gray, 35), linewidth=1)
+plot(exitMode == "Structure Bracket" and strategy.position_size > 0 ? longProtectiveStop : na, "Long Structure Stop", color=color.new(color.red, 0), linewidth=1, style=plot.style_linebr)
+plot(exitMode == "Structure Bracket" and strategy.position_size < 0 ? shortProtectiveStop : na, "Short Structure Stop", color=color.new(color.red, 0), linewidth=1, style=plot.style_linebr)
+plot(exitMode == "Structure Bracket" and strategy.position_size != 0 ? activeTarget : na, "Adaptive Structure Target", color=color.new(color.lime, 0), linewidth=1, style=plot.style_linebr)
+
+bgcolor(showBottomDiagnostics and bottomBreakdownSignal ? color.new(color.red, 88) : na, title="Accepted Breakdown Background")
+bgcolor(showBottomDiagnostics and bottomReclaimSignal ? color.new(color.lime, 90) : na, title="Sweep Reclaim Background")
+bgcolor(showBottomDiagnostics and topBreakoutSignal ? color.new(color.lime, 90) : na, title="Accepted Breakout Background")
+bgcolor(showBottomDiagnostics and topRejectSignal ? color.new(color.red, 90) : na, title="Sweep Reject Background")
+
+// ============================================================================
+// Summary Table
+// ============================================================================
+
+if showStats and barstate.islast
+    var table stats = table.new(position.top_right, 2, 17, border_width=1)
+    winRate = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100 : 0.0
+    grossLossAbs = math.abs(strategy.grossloss)
+    profitFactor = grossLossAbs > 0 ? strategy.grossprofit / grossLossAbs : na
+    avgTrade = strategy.closedtrades > 0 ? strategy.netprofit / strategy.closedtrades : 0.0
+
+    table.cell(stats, 0, 0, "NQ Boundary LG", text_color=color.white, bgcolor=color.new(color.blue, 25), text_size=size.small)
+    table.cell(stats, 1, 0, "Boundary executable", text_color=color.white, bgcolor=color.new(color.blue, 25), text_size=size.small)
+    table.cell(stats, 0, 1, "Closed Trades", text_size=size.small)
+    table.cell(stats, 1, 1, str.tostring(strategy.closedtrades), text_size=size.small)
+    table.cell(stats, 0, 2, "Net Profit", text_size=size.small)
+    table.cell(stats, 1, 2, "$" + str.tostring(strategy.netprofit, "#.##"), text_color=strategy.netprofit >= 0 ? color.lime : color.red, text_size=size.small)
+    table.cell(stats, 0, 3, "Win Rate", text_size=size.small)
+    table.cell(stats, 1, 3, str.tostring(winRate, "#.#") + "%", text_size=size.small)
+    table.cell(stats, 0, 4, "Profit Factor", text_size=size.small)
+    table.cell(stats, 1, 4, na(profitFactor) ? "n/a" : str.tostring(profitFactor, "#.##"), text_size=size.small)
+    table.cell(stats, 0, 5, "Avg Trade", text_size=size.small)
+    table.cell(stats, 1, 5, "$" + str.tostring(avgTrade, "#.##"), text_color=avgTrade >= 0 ? color.lime : color.red, text_size=size.small)
+    table.cell(stats, 0, 6, "Time Cell", text_size=size.small)
+    table.cell(stats, 1, 6, str.tostring(currentMonth) + "-" + str.tostring(pythonDow) + " " + stableActionText, text_size=size.small)
+    table.cell(stats, 0, 7, "Exit Mode", text_size=size.small)
+    table.cell(stats, 1, 7, exitMode, text_size=size.small)
+    table.cell(stats, 0, 8, "Bottom Filter", text_size=size.small)
+    table.cell(stats, 1, 8, useBottomStateFilter ? "ON" : "OFF", text_size=size.small)
+    table.cell(stats, 0, 9, "Bottom State", text_size=size.small)
+    table.cell(stats, 1, 9, bottomBreakdownSignal ? "bottom breakdown short" : bottomReclaimSignal ? "bottom reclaim long" : topBreakoutSignal ? "top breakout long" : topRejectSignal ? "top reject short" : trendIgnitionLongSignal ? "trend ignition long" : trendIgnitionShortSignal ? "trend ignition short" : trendContinuationLongSignal ? "trend pullback long" : trendContinuationShortSignal ? "trend pullback short" : trendTransitionLongSignal ? "trend transition long" : trendTransitionShortSignal ? "trend transition short" : reversalImpulseLongSignal ? "reversal impulse long" : reversalImpulseShortSignal ? "reversal impulse short" : weakBottomNoTrade ? "uncertain bottom" : weakTopNoTrade ? "uncertain top" : "neutral", text_size=size.small)
+    table.cell(stats, 0, 10, "Range Pos", text_size=size.small)
+    table.cell(stats, 1, 10, na(rangePos) ? "n/a" : str.tostring(rangePos, "#.##"), text_size=size.small)
+    table.cell(stats, 0, 11, "Momentum", text_size=size.small)
+    table.cell(stats, 1, 11, str.tostring(momentum, "#.##"), text_size=size.small)
+    table.cell(stats, 0, 12, "Volume Z", text_size=size.small)
+    table.cell(stats, 1, 12, str.tostring(volumeZ, "#.##"), text_size=size.small)
+    table.cell(stats, 0, 13, "Body ATR", text_size=size.small)
+    table.cell(stats, 1, 13, str.tostring(bodyAtr, "#.##"), text_size=size.small)
+    table.cell(stats, 0, 14, "Timecell", text_size=size.small)
+    table.cell(stats, 1, 14, "shadow-only 0.05x", text_size=size.small)
+    table.cell(stats, 0, 15, "TC Direction", text_size=size.small)
+    table.cell(stats, 1, 15, timecellShadowDirectionValue > 0 ? "shadow long" : timecellShadowDirectionValue < 0 ? "shadow short" : "skip", text_size=size.small)
+    table.cell(stats, 0, 16, "Stop / Target", text_size=size.small)
+    table.cell(stats, 1, 16, na(activeInitialStop) ? "flat" : str.tostring(activeInitialStop, "#.##") + " / " + str.tostring(activeTarget, "#.##") + " " + activeTargetPlan, text_size=size.small)
+
+// ============================================================================
+// Alerts
+// ============================================================================
+
+alertcondition(longCondition, "NQ Boundary Lightglow Long", "NQ Range Boundary Lightglow LONG on {{ticker}} at {{close}}")
+alertcondition(shortCondition, "NQ Boundary Lightglow Short", "NQ Range Boundary Lightglow SHORT on {{ticker}} at {{close}}")
+alertcondition(manualExitCondition, "NQ Boundary Lightglow Manual Exit", "NQ Range Boundary Lightglow manual exit on {{ticker}} at {{close}}")
+alertcondition(bottomBreakdownSignal, "Range Bottom Breakdown Candidate", "Range bottom accepted breakdown candidate on {{ticker}}")
+alertcondition(bottomReclaimSignal, "Range Bottom Reclaim Candidate", "Range bottom sweep and reclaim candidate on {{ticker}}")
+alertcondition(topBreakoutSignal, "Range Top Breakout Candidate", "Range top accepted breakout candidate on {{ticker}}")
+alertcondition(topRejectSignal, "Range Top Reject Candidate", "Range top sweep and reject candidate on {{ticker}}")
+alertcondition(trendIgnitionLongSignal, "Trend Ignition Long Candidate", "Compression reclaim trend ignition long candidate on {{ticker}}")
+alertcondition(trendIgnitionShortSignal, "Trend Ignition Short Candidate", "Compression reject trend ignition short candidate on {{ticker}}")
+alertcondition(trendContinuationLongSignal, "Trend Pullback Long Candidate", "Established uptrend pullback continuation long candidate on {{ticker}}")
+alertcondition(trendContinuationShortSignal, "Trend Pullback Short Candidate", "Established downtrend pullback continuation short candidate on {{ticker}}")
+alertcondition(trendTransitionLongSignal, "Trend Transition Long Candidate", "EMA transition trend-start long candidate on {{ticker}}")
+alertcondition(trendTransitionShortSignal, "Trend Transition Short Candidate", "EMA transition trend-start short candidate on {{ticker}}")
+alertcondition(reversalImpulseLongSignal, "Reversal Impulse Long Candidate", "Liquidity reversal impulse long candidate on {{ticker}}")
+alertcondition(reversalImpulseShortSignal, "Reversal Impulse Short Candidate", "Liquidity reversal impulse short candidate on {{ticker}}")
